@@ -1,0 +1,31 @@
+# Sysible Linux Engineering Platform — Community Edition.
+#
+#   docker compose -f deploy/docker-compose.yml up -d --build
+#   open http://localhost:8810  and create your admin on the first-run screen.
+#
+# One service, one volume. SQLite + project files + run logs persist in the
+# named `slep-data` volume across rebuilds.
+services:
+  slep:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: sysible-slep:latest
+    container_name: sysible-slep
+    ports:
+      - "8810:8810"          # the web console (and API via /api)
+    volumes:
+      - slep-data:/data
+    environment:
+      SLEP_DATA_DIR: /data
+      # Point the automation at the Controller you import inventory from, if any.
+      # SLEP_CONTROLLER_URL: https://controller.example.com:9000
+    restart: unless-stopped
+
+volumes:
+  slep-data:
+
+# --- Enterprise Edition (later) --------------------------------------------
+# EE swaps SQLite for PostgreSQL (the backend/db.py seam). When we build it, a
+# `db:` service lands here and SLEP points at it via a DSN — same shape as
+# sysible-controller-ee. Not wired in CE.

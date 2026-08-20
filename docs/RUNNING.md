@@ -1,4 +1,21 @@
-# Running SLEP (development)
+# Running SLEP
+
+## Docker (recommended)
+
+One container runs everything (both services + Ansible + Terraform baked in);
+SQLite, project files, and run logs persist in the `slep-data` volume.
+
+```sh
+docker compose -f deploy/docker-compose.yml up -d --build
+# open http://localhost:8810 and create your admin on the first-run screen
+```
+
+Salt (`salt-ssh`) is optional and left out of the default image to keep it lean —
+uncomment the `pip install salt` line in `deploy/Dockerfile` to bake it in.
+
+---
+
+# Development (without Docker)
 
 SLEP is two small FastAPI services plus a static console. No node toolchain is
 required for the MVP console (Monaco loads from a CDN; vendor it under

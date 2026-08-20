@@ -20,6 +20,8 @@ import threading
 import time
 from pathlib import Path
 
+from contextlib import asynccontextmanager
+
 from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse
 
@@ -33,16 +35,18 @@ RUNNERS = {
     "salt": salt_runner.launch,
 }
 
-app = FastAPI(title="Sysible Linux Engineering Platform", version="0.1.0")
+
+@asynccontextmanager
+async def lifespan(_app):
+    db.init_db()
+    yield
+
+
+app = FastAPI(title="Sysible Linux Engineering Platform", version="0.1.0", lifespan=lifespan)
 
 # In-memory sessions: token -> {"user", "created"}. Cleared on restart (MVP).
 _SESSIONS: dict[str, dict] = {}
 _SESSION_TTL = 12 * 3600
-
-
-@app.on_event("startup")
-def _startup():
-    db.init_db()
 
 
 # ------------------------------------------------------------------ auth utils

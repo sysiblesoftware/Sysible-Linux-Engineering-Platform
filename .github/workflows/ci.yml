@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  backend:
+    name: Backend (pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install deps
+        run: pip install -r backend/requirements-dev.txt
+      - name: Compile check
+        run: python -m py_compile backend/*.py backend/runners/*.py webgui/server.py
+      - name: Tests
+        run: pytest -q
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+
+  frontend:
+    name: Console (vite build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: webgui/frontend/package-lock.json
+      - name: Install
+        run: npm ci
+        working-directory: webgui/frontend
+      - name: Build
+        run: npm run build
+        working-directory: webgui/frontend
+
+  docker:
+    name: Image builds
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the CE image
+        run: docker build -f deploy/Dockerfile -t sysible-slep:ci .

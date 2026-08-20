@@ -1,0 +1,13 @@
+.git
+.gitignore
+.venv
+venv
+**/__pycache__
+**/node_modules
+webgui/frontend/dist
+data
+*.sqlite3
+*.db
+*.log
+tests
+docs
