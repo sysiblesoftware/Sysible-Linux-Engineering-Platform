@@ -24,7 +24,14 @@ from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse
 
 from . import controller_import, db
-from .runners import ansible_runner
+from .runners import ansible_runner, salt_runner, terraform_runner
+
+# Engine name -> runner.launch(run_id). Each runs to completion on a thread.
+RUNNERS = {
+    "ansible": ansible_runner.launch,
+    "terraform": terraform_runner.launch,
+    "salt": salt_runner.launch,
+}
 
 app = FastAPI(title="Sysible Linux Engineering Platform", version="0.1.0")
 
@@ -318,18 +325,22 @@ def launch_run(body: dict = Body(...), user: str = Depends(current_user)):
     if not project:
         raise HTTPException(status_code=404, detail="Project not found.")
     kind = str(body.get("kind") or "ansible")
-    if kind != "ansible":
-        raise HTTPException(status_code=400, detail=f"Engine '{kind}' not wired yet (Ansible is first).")
+    if kind not in RUNNERS:
+        raise HTTPException(status_code=400,
+                            detail=f"Unknown engine '{kind}'. One of: {', '.join(RUNNERS)}.")
     target = str(body.get("target") or "").strip()
     if not target:
-        raise HTTPException(status_code=400, detail="target (playbook path) is required.")
+        # ansible: playbook path · terraform: plan/apply/destroy · salt: state name
+        what = {"ansible": "playbook path", "terraform": "action (plan/apply/destroy)",
+                "salt": "state name"}.get(kind, "target")
+        raise HTTPException(status_code=400, detail=f"target ({what}) is required.")
     run_id = db.create_run(
         pid, kind, target, inventory_id=body.get("inventory_id"),
         credential_id=body.get("credential_id"), extra_vars=body.get("extra_vars") or {},
         created_by=user,
     )
-    # Launch on a background thread; the console tails the log.
-    threading.Thread(target=ansible_runner.launch, args=(run_id,), daemon=True).start()
+    # Launch the right engine on a background thread; the console tails the log.
+    threading.Thread(target=RUNNERS[kind], args=(run_id,), daemon=True).start()
     return {"status": "launched", "run_id": run_id}
 
 

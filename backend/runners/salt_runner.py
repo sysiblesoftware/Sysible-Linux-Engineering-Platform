@@ -1,0 +1,115 @@
+"""Salt runner — apply Salt states over SSH with `salt-ssh` (agentless, so it
+fits SLEP's SSH-native model; no minions to install).
+
+Rendered per run from the SLEP database:
+  * a ROSTER (which hosts, and how to reach them) from the selected inventory +
+    SSH credential;
+  * a minimal master CONFIG whose `file_roots` is the project dir, so the SLS
+    states authored in the IDE are what salt applies.
+
+The run's `target` is the state to apply (`state.apply <target>`); the literal
+`highstate` runs `state.highstate`. Secrets (the SSH key) go to a 0600 temp file
+that's removed when the run ends.
+"""
+from __future__ import annotations
+
+import os
+import shutil
+import tempfile
+import time
+from pathlib import Path
+
+from .. import db
+from . import _common
+
+
+def _render_roster(hosts, credential, key_path, dest: Path) -> None:
+    user = (credential or {}).get("username") or "root"
+    lines = []
+    for h in hosts:
+        lines.append(f"{h['name']}:")
+        lines.append(f"  host: {h['address']}")
+        lines.append(f"  user: {user}")
+        lines.append("  host_key_checking: False")
+        if credential and credential.get("kind") == "ssh" and key_path:
+            lines.append(f"  priv: {key_path}")
+        elif credential and credential.get("kind") == "ssh_password" and credential.get("secret"):
+            lines.append(f"  passwd: {credential['secret']}")
+            lines.append("  sudo: True")
+    dest.write_text("\n".join(lines) + "\n")
+
+
+def _write_key(secret: str, dest: Path) -> None:
+    fd = os.open(str(dest), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, secret.encode())
+        if not secret.endswith("\n"):
+            os.write(fd, b"\n")
+    finally:
+        os.close(fd)
+
+
+def launch(run_id: int) -> None:
+    run = db.get_run(run_id)
+    if not run:
+        return
+    log_path = db.run_log_path(run_id)
+    project = db.get_project(run["project_id"])
+    workdir = db.project_dir(run["project_id"])
+    hosts = db.list_hosts(run["inventory_id"]) if run.get("inventory_id") else []
+    credential = (
+        db.get_credential(run["credential_id"], include_secret=True)
+        if run.get("credential_id") else None
+    )
+    state = (run["target"] or "").strip()
+
+    tmp = Path(tempfile.mkdtemp(prefix=f"slep-salt-{run_id}-"))
+    roster = tmp / "roster"
+    key_file = tmp / "id_key"
+    conf_dir = tmp / "conf"
+    conf_dir.mkdir()
+
+    db.set_run_status(run_id, "running", started=int(time.time()))
+    with log_path.open("w", buffering=1) as log:
+        def emit(m):
+            log.write(m if m.endswith("\n") else m + "\n")
+
+        emit(f"== SLEP run #{run_id} · project '{project['name']}' · salt-ssh {state or 'highstate'} ==")
+        try:
+            if not hosts:
+                emit("!! No hosts in the selected inventory — nothing to target.")
+                raise RuntimeError("empty inventory")
+
+            key_path = None
+            if credential and credential.get("kind") == "ssh" and credential.get("secret"):
+                _write_key(credential["secret"], key_file)
+                key_path = str(key_file)
+            _render_roster(hosts, credential, key_path, roster)
+
+            # Minimal master config: states come from the project dir; keep all
+            # of salt's scratch dirs inside the per-run temp so no root paths are
+            # touched and nothing leaks between runs.
+            (conf_dir / "master").write_text(
+                "file_roots:\n  base:\n    - %s\n"
+                "cachedir: %s\npki_dir: %s\nroster_file: %s\n"
+                % (workdir, tmp / "cache", tmp / "pki", roster)
+            )
+
+            func = "state.highstate" if state.lower() == "highstate" or not state else "state.apply"
+            cmd = ["salt-ssh", "-c", str(conf_dir), "-i", "--no-color", "'*'", func]
+            if func == "state.apply":
+                cmd.append(state)
+
+            emit(f"-- roster: {len(hosts)} host(s); credential: "
+                 f"{credential['name'] if credential else 'none'} --")
+            rc = _common.stream(cmd, workdir, dict(os.environ), log)
+            emit(f"\n== finished: exit code {rc} ==")
+            db.set_run_status(run_id, "success" if rc == 0 else "failed",
+                              exit_code=rc, finished=int(time.time()))
+        except Exception as e:  # noqa: BLE001
+            emit(f"\n!! run aborted: {e}")
+            cur = db.get_run(run_id)
+            if cur and cur.get("status") == "running":
+                db.set_run_status(run_id, "failed", exit_code=1, finished=int(time.time()))
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
