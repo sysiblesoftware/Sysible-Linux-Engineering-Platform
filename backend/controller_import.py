@@ -1,14 +1,21 @@
 """Import inventory from a Sysible Controller.
 
-The whole point of SLEP living next to Controller: the fleet you already manage
-in Controller becomes the inventory you automate in SLEP, with one click. This
-reads the Controller's agent list over its API and upserts each host into a SLEP
-inventory (idempotent — re-importing refreshes addresses/groups, never duplicates).
+The point of SLEP living next to Controller: the fleet you already manage there
+becomes the inventory you automate here, in one click. A Controller manages TWO
+kinds of host, and we pull both:
 
-Auth is the Controller's backend API key (X-API-Key), the same key its own BFF
-uses. The Controller's TLS is self-signed and operator-directed here, so the
-fetch is unverified (the operator typed the address + key) — mirroring how the
-cross-controller handoff pulls a bundle.
+  * agent-enrolled hosts  — GET /agents           → {"agents": [ {hostname, ip, environment, …} ]}
+  * SSH-managed hosts      — GET /remote/hosts      → { name: {ip, user, port, environment}, … }
+
+Both are gated by the Controller's backend API key (X-API-Key) — the same key its
+own console uses. SSH hosts carry their connection user/port, so those import as
+runnable hosts (we set ansible_user / ansible_port host vars); agent hosts import
+with their address + Controller environment as an Ansible group. The Controller
+`environment` tag becomes the host's group. Idempotent: re-importing refreshes
+addresses/groups/vars, never duplicates (upsert by name).
+
+The Controller's TLS is self-signed and operator-directed here (the operator
+typed the address + key), so the fetch is unverified — mirroring the handoff pull.
 """
 from __future__ import annotations
 
@@ -30,69 +37,91 @@ def _normalize_base(url: str) -> str:
     return url
 
 
-def fetch_agents(controller_url: str, api_key: str, timeout: int = 20):
-    """GET the Controller's /agents list. Returns the raw list of host dicts."""
-    base = _normalize_base(controller_url)
-    if not api_key:
-        raise ControllerImportError("Controller API key is required.")
+def _get(base_url: str, path: str, api_key: str, allow_404: bool = False):
+    """GET base_url+path with the Controller API key. Returns parsed JSON, or None
+    on 404 when allow_404 (an older Controller may lack an endpoint). Raises
+    ControllerImportError on auth/network/other failures."""
+    url = base_url + path
     try:
-        resp = requests.get(
-            f"{base}/agents",
-            headers={"X-API-Key": api_key},
-            verify=False,
-            timeout=timeout,
-        )
+        resp = requests.get(url, headers={"X-API-Key": api_key}, verify=False, timeout=20)
     except requests.exceptions.RequestException as e:
-        raise ControllerImportError(f"Could not reach the Controller at {base}: {e}")
+        raise ControllerImportError(f"Could not reach the Controller at {url}: {e}")
     if resp.status_code in (401, 403):
         raise ControllerImportError("The Controller rejected that API key.")
+    if resp.status_code == 404 and allow_404:
+        return None
     if resp.status_code != 200:
-        raise ControllerImportError(
-            f"The Controller returned HTTP {resp.status_code} for /agents."
-        )
+        raise ControllerImportError(f"The Controller returned HTTP {resp.status_code} for {path}.")
     try:
-        data = resp.json()
+        return resp.json()
     except ValueError:
-        raise ControllerImportError("The Controller's /agents response was not JSON.")
-    # Accept either a bare list or {"agents": [...]} / {"hosts": [...]}.
-    if isinstance(data, dict):
-        data = data.get("agents") or data.get("hosts") or []
-    if not isinstance(data, list):
-        raise ControllerImportError("Unexpected /agents payload shape.")
-    return data
-
-
-def _host_fields(agent: dict):
-    """Map a Controller agent record to (name, address, groups) defensively —
-    field names have varied across Controller versions."""
-    name = (agent.get("hostname") or agent.get("name")
-            or agent.get("host_id") or agent.get("id") or "").strip()
-    address = (agent.get("address") or agent.get("ip") or agent.get("ansible_host")
-               or name).strip()
-    # Controller tags/environment become Ansible groups.
-    groups = agent.get("groups") or agent.get("tags") or agent.get("environment") or ""
-    if isinstance(groups, list):
-        groups = ",".join(str(g) for g in groups)
-    return name, address, str(groups)
+        raise ControllerImportError(f"The Controller's {path} response was not JSON.")
 
 
 def import_into_inventory(inventory_id: int, controller_url: str, api_key: str):
-    """Pull the Controller's hosts into an existing SLEP inventory. Returns a
-    summary dict {imported, skipped, total}."""
+    """Pull the Controller's agent + SSH hosts into an existing SLEP inventory.
+    Returns {imported, agents, ssh, skipped, total, errors}."""
     inv = db.get_inventory(inventory_id)
     if not inv:
         raise ControllerImportError("Inventory not found.")
-    agents = fetch_agents(controller_url, api_key)
-    imported = skipped = 0
-    for a in agents:
-        name, address, groups = _host_fields(a)
-        if not name or not address:
-            skipped += 1
-            continue
-        db.upsert_host(
-            inventory_id, name=name, address=address, groups=groups,
-            variables={"sysible_host_id": a.get("host_id") or a.get("id") or name},
-            source="controller",
-        )
-        imported += 1
-    return {"imported": imported, "skipped": skipped, "total": len(agents)}
+    if not api_key:
+        raise ControllerImportError("Controller API key is required.")
+    base = _normalize_base(controller_url)
+
+    agents_n = ssh_n = skipped = 0
+    errors: list[str] = []
+
+    # --- agent-enrolled hosts (the primary listing) ---
+    try:
+        data = _get(base, "/agents", api_key)
+        agents = data.get("agents", []) if isinstance(data, dict) else (data or [])
+        for a in agents:
+            name = str(a.get("hostname") or a.get("host_id") or "").strip()
+            address = str(a.get("ip") or a.get("address") or name).strip()
+            if not name or not address:
+                skipped += 1
+                continue
+            db.upsert_host(
+                inventory_id, name=name, address=address,
+                groups=str(a.get("environment") or ""),
+                variables={"sysible_source": "agent",
+                           "sysible_host_id": a.get("host_id") or name,
+                           "sysible_platform": a.get("platform") or ""},
+                source="controller",
+            )
+            agents_n += 1
+    except ControllerImportError as e:
+        errors.append(f"agents: {e}")
+
+    # --- SSH-managed hosts (carry connection user/port → runnable) ---
+    try:
+        hosts = _get(base, "/remote/hosts", api_key, allow_404=True)
+        if isinstance(hosts, dict):
+            for name, h in hosts.items():
+                if not isinstance(h, dict):
+                    continue
+                nm = str(name).strip()
+                address = str(h.get("ip") or nm).strip()
+                if not nm or not address:
+                    skipped += 1
+                    continue
+                variables = {"sysible_source": "ssh"}
+                if h.get("user"):
+                    variables["ansible_user"] = h["user"]
+                if h.get("port"):
+                    variables["ansible_port"] = h["port"]
+                db.upsert_host(
+                    inventory_id, name=nm, address=address,
+                    groups=str(h.get("environment") or ""),
+                    variables=variables, source="controller",
+                )
+                ssh_n += 1
+    except ControllerImportError as e:
+        errors.append(f"ssh hosts: {e}")
+
+    total = agents_n + ssh_n
+    if total == 0 and errors:
+        # Nothing imported and something went wrong — surface it as a failure.
+        raise ControllerImportError("; ".join(errors))
+    return {"imported": total, "agents": agents_n, "ssh": ssh_n,
+            "skipped": skipped, "total": total, "errors": errors}

@@ -346,7 +346,11 @@ function importModal(inv){
   const b=$('<button class="primary">Import</button>');
   b.onclick=async()=>{ try{ b.textContent='Importing…'; const {data}=await api('inventories/'+inv.id+'/import-controller',
      {method:'POST',json:{controller_url:url.value,api_key:key.value}});
-     document.querySelector('.modal-bg').remove(); alert(`Imported ${data.imported} host(s) (${data.skipped} skipped of ${data.total}).`); render();
+     document.querySelector('.modal-bg').remove();
+     let m=`Imported ${data.imported} host(s): ${data.agents} agent + ${data.ssh} SSH`;
+     if(data.skipped) m+=` (${data.skipped} skipped)`;
+     if(data.errors&&data.errors.length) m+=`\n\nNote: ${data.errors.join('; ')}`;
+     alert(m); render();
      }catch(e){err.textContent=e.message; b.textContent='Import';} };
   m.appendChild(b); modal(m); url.focus();
 }

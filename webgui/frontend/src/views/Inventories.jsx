@@ -91,7 +91,13 @@ function ImportController({ inv, onClose, onDone }) {
       {node}
       <button className="primary" disabled={busy} onClick={() => wrap(async () => {
         setBusy(true)
-        try { const d = await api(`inventories/${inv.id}/import-controller`, { method: 'POST', json: { controller_url: url, api_key: key } }); alert(`Imported ${d.imported} host(s) (${d.skipped} skipped of ${d.total}).`); onDone() }
+        try {
+          const d = await api(`inventories/${inv.id}/import-controller`, { method: 'POST', json: { controller_url: url, api_key: key } })
+          let msg = `Imported ${d.imported} host(s): ${d.agents} agent + ${d.ssh} SSH`
+          if (d.skipped) msg += ` (${d.skipped} skipped)`
+          if (d.errors && d.errors.length) msg += `\n\nNote: ${d.errors.join('; ')}`
+          alert(msg); onDone()
+        }
         finally { setBusy(false) }
       })}>{busy ? 'Importing…' : 'Import'}</button>
     </Modal>
