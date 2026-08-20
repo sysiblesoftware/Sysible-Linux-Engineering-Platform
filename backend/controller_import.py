@@ -58,6 +58,22 @@ def _get(base_url: str, path: str, api_key: str, allow_404: bool = False):
         raise ControllerImportError(f"The Controller's {path} response was not JSON.")
 
 
+def test_connection(controller_url: str, api_key: str):
+    """Probe a Controller with the given key — used by 'Connect to Controller'.
+    Returns {ok, agents, ssh, total} (host counts it can see). Raises
+    ControllerImportError on auth/network failure so the UI can show why."""
+    if not api_key:
+        raise ControllerImportError("Controller API key is required.")
+    base = _normalize_base(controller_url)
+    data = _get(base, "/agents", api_key)          # auth-gated → validates the key
+    agents = data.get("agents", []) if isinstance(data, dict) else (data or [])
+    ssh = 0
+    hosts = _get(base, "/remote/hosts", api_key, allow_404=True)
+    if isinstance(hosts, dict):
+        ssh = len(hosts)
+    return {"ok": True, "agents": len(agents), "ssh": ssh, "total": len(agents) + ssh}
+
+
 def import_into_inventory(inventory_id: int, controller_url: str, api_key: str):
     """Pull the Controller's agent + SSH hosts into an existing SLEP inventory.
     Returns {imported, agents, ssh, skipped, total, errors}."""

@@ -5,6 +5,7 @@ import Logo from './Logo.jsx'
 import Projects from './views/Projects.jsx'
 import Ide from './views/Ide.jsx'
 import Inventories from './views/Inventories.jsx'
+import Controllers from './views/Controllers.jsx'
 import Credentials from './views/Credentials.jsx'
 import Runs, { RunLog } from './views/Runs.jsx'
 
@@ -43,7 +44,7 @@ export default function App() {
       </header>
       <div className="layout">
         <nav className="side">
-          {[['projects', 'Projects'], ['inventories', 'Inventories'], ['credentials', 'Credentials'], ['runs', 'Runs']].map(([k, l]) => (
+          {[['projects', 'Projects'], ['inventories', 'Inventories'], ['controllers', 'Controllers'], ['credentials', 'Credentials'], ['runs', 'Runs']].map(([k, l]) => (
             <button key={k} className={view === k && !project && runId == null ? 'active' : ''} onClick={() => go(k)}>{l}</button>
           ))}
         </nav>
@@ -52,8 +53,9 @@ export default function App() {
             : project ? <Ide project={project} onBack={() => setProject(null)} onRun={(id) => setRunId(id)} />
               : view === 'projects' ? <Projects onOpen={setProject} />
                 : view === 'inventories' ? <Inventories />
-                  : view === 'credentials' ? <Credentials />
-                    : <Runs onOpen={setRunId} />}
+                  : view === 'controllers' ? <Controllers />
+                    : view === 'credentials' ? <Credentials />
+                      : <Runs onOpen={setRunId} />}
         </main>
       </div>
     </>

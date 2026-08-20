@@ -81,25 +81,38 @@ function AddHost({ inv, onClose, onDone }) {
 }
 
 function ImportController({ inv, onClose, onDone }) {
-  const [url, setUrl] = useState(''); const [key, setKey] = useState(''); const [busy, setBusy] = useState(false)
+  const [controllers, setControllers] = useState(null)   // null = loading
+  const [cid, setCid] = useState('')
+  const [busy, setBusy] = useState(false)
   const { wrap, node } = useErr()
+  useEffect(() => { api('controllers').then((d) => { setControllers(d.controllers); if (d.controllers[0]) setCid(String(d.controllers[0].id)) }) }, [])
+
   return (
     <Modal title="Import hosts from a Sysible Controller" onClose={onClose}>
-      <div className="muted">Pulls the Controller’s /agents fleet into this inventory. Re-importing refreshes, never duplicates.</div>
-      <Field label="Controller URL"><input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://controller-host:9000" autoFocus /></Field>
-      <Field label="Backend API key"><input type="password" value={key} onChange={(e) => setKey(e.target.value)} /></Field>
-      {node}
-      <button className="primary" disabled={busy} onClick={() => wrap(async () => {
-        setBusy(true)
-        try {
-          const d = await api(`inventories/${inv.id}/import-controller`, { method: 'POST', json: { controller_url: url, api_key: key } })
-          let msg = `Imported ${d.imported} host(s): ${d.agents} agent + ${d.ssh} SSH`
-          if (d.skipped) msg += ` (${d.skipped} skipped)`
-          if (d.errors && d.errors.length) msg += `\n\nNote: ${d.errors.join('; ')}`
-          alert(msg); onDone()
-        }
-        finally { setBusy(false) }
-      })}>{busy ? 'Importing…' : 'Import'}</button>
+      <div className="muted">Pulls the Controller’s agent + SSH hosts into this inventory. Re-importing refreshes, never duplicates.</div>
+      {controllers === null ? <div className="muted">Loading connected Controllers…</div>
+        : controllers.length === 0
+          ? <div className="muted">No Controllers connected yet. Go to the <b>Controllers</b> tab and <b>Connect to Controller</b> first — then import from here.</div>
+          : (
+            <>
+              <Field label="Controller">
+                <select value={cid} onChange={(e) => setCid(e.target.value)}>
+                  {controllers.map((c) => <option key={c.id} value={c.id}>{c.name} — {c.base_url}</option>)}
+                </select>
+              </Field>
+              {node}
+              <button className="primary" disabled={busy} onClick={() => wrap(async () => {
+                setBusy(true)
+                try {
+                  const d = await api(`inventories/${inv.id}/import-controller`, { method: 'POST', json: { controller_id: Number(cid) } })
+                  let msg = `Imported ${d.imported} host(s): ${d.agents} agent + ${d.ssh} SSH`
+                  if (d.skipped) msg += ` (${d.skipped} skipped)`
+                  if (d.errors && d.errors.length) msg += `\n\nNote: ${d.errors.join('; ')}`
+                  alert(msg); onDone()
+                } finally { setBusy(false) }
+              })}>{busy ? 'Importing…' : 'Import'}</button>
+            </>
+          )}
     </Modal>
   )
 }

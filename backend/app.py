@@ -311,14 +311,63 @@ def delete_host(hid: int, user: str = Depends(current_user)):
 
 @app.post("/inventories/{iid}/import-controller")
 def import_controller(iid: int, body: dict = Body(...), user: str = Depends(current_user)):
-    """Pull hosts from a Sysible Controller into this inventory."""
+    """Pull hosts into this inventory from a Controller — either a saved one
+    (controller_id) or an ad-hoc controller_url + api_key."""
+    cid = body.get("controller_id")
+    if cid:
+        ctrl = db.get_controller(int(cid), include_key=True)
+        if not ctrl:
+            raise HTTPException(status_code=404, detail="Controller connection not found.")
+        url, key = ctrl["base_url"], ctrl["api_key"]
+    else:
+        url, key = str(body.get("controller_url") or ""), str(body.get("api_key") or "")
     try:
-        summary = controller_import.import_into_inventory(
-            iid, str(body.get("controller_url") or ""), str(body.get("api_key") or ""),
-        )
+        summary = controller_import.import_into_inventory(iid, url, key)
     except controller_import.ControllerImportError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    if cid:
+        db.set_controller_last_import(int(cid))
     return {"status": "ok", **summary}
+
+
+# ------------------------------------------------------------------ controllers (Connect to Controller)
+@app.get("/controllers")
+def controllers(user: str = Depends(current_user)):
+    return {"controllers": db.list_controllers()}
+
+
+@app.post("/controllers")
+def connect_controller(body: dict = Body(...), user: str = Depends(current_user)):
+    """Connect to a Sysible Controller: validate the URL + API key, then save it.
+    The key is stored server-side and never returned to the browser."""
+    name = str(body.get("name") or "").strip()
+    url = str(body.get("base_url") or body.get("controller_url") or "").strip()
+    key = str(body.get("api_key") or "")
+    if not url or not key:
+        raise HTTPException(status_code=400, detail="Controller URL and API key are required.")
+    try:
+        probe = controller_import.test_connection(url, key)   # fails closed on a bad key/URL
+    except controller_import.ControllerImportError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    cid = db.create_controller(name or url, url, key)
+    return {"status": "connected", "controller": db.get_controller(cid), **probe}
+
+
+@app.post("/controllers/{cid}/test")
+def test_controller(cid: int, user: str = Depends(current_user)):
+    ctrl = db.get_controller(cid, include_key=True)
+    if not ctrl:
+        raise HTTPException(status_code=404, detail="Controller connection not found.")
+    try:
+        return {"status": "ok", **controller_import.test_connection(ctrl["base_url"], ctrl["api_key"])}
+    except controller_import.ControllerImportError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.delete("/controllers/{cid}")
+def disconnect_controller(cid: int, user: str = Depends(current_user)):
+    db.delete_controller(cid)
+    return {"status": "disconnected"}
 
 
 # ------------------------------------------------------------------ runs

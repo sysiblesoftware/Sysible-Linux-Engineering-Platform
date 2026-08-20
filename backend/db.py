@@ -76,6 +76,15 @@ def init_db() -> None:
                 updated INTEGER NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS controllers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                base_url TEXT NOT NULL,
+                api_key TEXT NOT NULL,          -- server-side only, never returned to the browser
+                created INTEGER NOT NULL,
+                last_import INTEGER
+            );
+
             CREATE TABLE IF NOT EXISTS credentials (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL,
@@ -233,6 +242,46 @@ def create_credential(name, kind="ssh", username="", secret=""):
 def delete_credential(cid: int):
     with _connect() as c:
         c.execute("DELETE FROM credentials WHERE id=?", (cid,))
+
+
+# ---------------------------------------------------------------- controllers
+def list_controllers(include_key=False):
+    with _connect() as c:
+        rows = [dict(r) for r in c.execute("SELECT * FROM controllers ORDER BY name").fetchall()]
+    if not include_key:
+        for r in rows:
+            r.pop("api_key", None)
+    return rows
+
+
+def get_controller(cid: int, include_key=False):
+    with _connect() as c:
+        r = c.execute("SELECT * FROM controllers WHERE id=?", (cid,)).fetchone()
+    if not r:
+        return None
+    d = dict(r)
+    if not include_key:
+        d.pop("api_key", None)
+    return d
+
+
+def create_controller(name, base_url, api_key):
+    with _connect() as c:
+        cur = c.execute(
+            "INSERT INTO controllers(name,base_url,api_key,created) VALUES(?,?,?,?)",
+            (name, base_url, api_key, _now()),
+        )
+        return cur.lastrowid
+
+
+def delete_controller(cid: int):
+    with _connect() as c:
+        c.execute("DELETE FROM controllers WHERE id=?", (cid,))
+
+
+def set_controller_last_import(cid: int):
+    with _connect() as c:
+        c.execute("UPDATE controllers SET last_import=? WHERE id=?", (_now(), cid))
 
 
 # ---------------------------------------------------------------- inventories & hosts
