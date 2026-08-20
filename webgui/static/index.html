@@ -1,0 +1,388 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Sysible Linux Engineering Platform</title>
+<!--
+  SLEP console — no-build MVP. Vanilla JS + Monaco (VS Code's editor) loaded via
+  its AMD loader from a CDN. For an airgapped/enterprise install, vendor
+  monaco-editor under /static/vs and point the loader there (TODO); the rest of
+  the console is self-contained. Talks only to the BFF at /api/*.
+-->
+<style>
+  :root{
+    --bg:#0f1115; --panel:#161a21; --panel2:#1b2029; --line:#272e39;
+    --text:#e6e9ef; --muted:#9aa4b2; --accent:#43a047; --accent2:#5580ee;
+    --danger:#e05656; --ok:#63c869; --warn:#c98a2b;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--text);
+    font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+  button{font:inherit;cursor:pointer;border:1px solid var(--line);background:var(--panel2);
+    color:var(--text);padding:6px 12px;border-radius:7px}
+  button:hover{border-color:var(--accent)}
+  button.primary{background:var(--accent);border-color:var(--accent);color:#06210c;font-weight:600}
+  button.ghost{background:transparent}
+  button.danger{border-color:var(--danger);color:#ffb3b3}
+  input,select,textarea{font:inherit;background:#0c0e12;border:1px solid var(--line);
+    color:var(--text);padding:7px 9px;border-radius:7px;width:100%}
+  a{color:var(--accent2)}
+  .row{display:flex;gap:8px;align-items:center}
+  .col{display:flex;flex-direction:column;gap:8px}
+  .muted{color:var(--muted)}
+  .pill{font-size:11px;padding:2px 8px;border-radius:20px;border:1px solid var(--line)}
+  .pill.ok{color:var(--ok);border-color:#2f5b3a}
+  .pill.failed{color:#ffb3b3;border-color:#5b2f2f}
+  .pill.running{color:var(--warn);border-color:#5b4a2f}
+  .pill.queued,.pill.pending{color:var(--muted)}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px}
+  header.top{display:flex;align-items:center;gap:12px;padding:10px 16px;border-bottom:1px solid var(--line);background:var(--panel)}
+  .brand{display:flex;align-items:center;gap:9px;font-weight:700}
+  .brand .mark{width:22px;height:22px;border-radius:6px;background:linear-gradient(145deg,var(--accent),var(--accent2))}
+  .layout{display:flex;height:calc(100% - 49px)}
+  nav.side{width:190px;border-right:1px solid var(--line);background:var(--panel);padding:10px;display:flex;flex-direction:column;gap:4px}
+  nav.side button{text-align:left;background:transparent;border:none;padding:9px 11px;border-radius:8px;color:var(--muted)}
+  nav.side button.active{background:var(--panel2);color:var(--text)}
+  main.view{flex:1;overflow:auto;padding:18px}
+  h2{margin:.2em 0 .6em}
+  table{width:100%;border-collapse:collapse}
+  th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line)}
+  th{color:var(--muted);font-weight:600;font-size:12px}
+  .ide{display:grid;grid-template-columns:230px 1fr;gap:0;height:calc(100% - 4px);border:1px solid var(--line);border-radius:10px;overflow:hidden}
+  .ide .tree{background:var(--panel);border-right:1px solid var(--line);overflow:auto;padding:8px}
+  .ide .tree .f{padding:4px 8px;border-radius:6px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .ide .tree .f:hover{background:var(--panel2)}
+  .ide .tree .f.active{background:var(--accent);color:#06210c}
+  .ide .tree .f.dir{color:var(--muted)}
+  .ide .edwrap{display:flex;flex-direction:column;min-width:0}
+  .ide .edtool{display:flex;gap:8px;align-items:center;padding:8px;border-bottom:1px solid var(--line);background:var(--panel)}
+  #editor{flex:1;min-height:0}
+  .log{background:#0a0c10;border:1px solid var(--line);border-radius:8px;padding:12px;
+    font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap;
+    overflow:auto;max-height:60vh;color:#d7dde7}
+  .modal-bg{position:fixed;inset:0;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;z-index:50}
+  .modal{width:min(480px,92vw);max-height:88vh;overflow:auto}
+  .center{height:100%;display:flex;align-items:center;justify-content:center}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  .err{color:#ffb3b3;font-size:13px;min-height:1.2em}
+  .spacer{flex:1}
+  label.fld{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--muted)}
+</style>
+</head>
+<body>
+<div id="app"><div class="center muted">Loading…</div></div>
+
+<script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.45.0/min/vs/loader.js"></script>
+<script>
+// ---------------------------------------------------------------- tiny helpers
+const $ = (h) => { const t=document.createElement('template'); t.innerHTML=h.trim(); return t.content.firstElementChild; };
+const app = document.getElementById('app');
+let TOKEN = localStorage.getItem('slep_token') || '';
+let STATE = { view:'projects', project:null, inventory:null, file:null, editor:null, run:null };
+
+async function api(path, opts={}) {
+  const headers = Object.assign({}, opts.headers||{});
+  if (TOKEN) headers['Authorization'] = 'Bearer '+TOKEN;
+  if (opts.json !== undefined) { headers['Content-Type']='application/json'; opts.body=JSON.stringify(opts.json); }
+  const r = await fetch('/api/'+path, {method:opts.method||'GET', headers, body:opts.body});
+  if (r.status === 401) { TOKEN=''; localStorage.removeItem('slep_token'); render(); throw new Error('Session expired — please sign in.'); }
+  const ct = r.headers.get('content-type')||'';
+  const data = ct.includes('json') ? await r.json() : await r.text();
+  if (!r.ok) throw new Error((data && data.detail) || ('HTTP '+r.status));
+  return { data, headers:r.headers };
+}
+
+function modal(node){ const bg=$('<div class="modal-bg"></div>'); bg.appendChild(node);
+  bg.addEventListener('click',e=>{ if(e.target===bg) bg.remove(); }); document.body.appendChild(bg); return bg; }
+
+// ---------------------------------------------------------------- auth screens
+async function boot(){
+  try {
+    const h = await fetch('/api/health').then(r=>r.json());
+    if (h.admins === 0) return renderSetup();
+  } catch(e){ app.innerHTML=`<div class="center err">Backend unreachable. Is the SLEP backend running on :9100?</div>`; return; }
+  if (!TOKEN) return renderLogin();
+  try { await api('me'); render(); } catch(e){ renderLogin(); }
+}
+
+function authCard(title, btn, onSubmit){
+  const err=$('<div class="err"></div>');
+  const u=$('<input placeholder="username" autocomplete="username">');
+  const p=$('<input type="password" placeholder="password" autocomplete="current-password">');
+  const card=$(`<div class="card col" style="width:min(360px,92vw)"></div>`);
+  card.appendChild($(`<div class="brand" style="font-size:18px"><span class="mark"></span> SLEP</div>`));
+  card.appendChild($(`<div class="muted">Sysible Linux Engineering Platform</div>`));
+  const lu=$('<label class="fld">Username</label>'); lu.appendChild(u);
+  const lp=$('<label class="fld">Password</label>'); lp.appendChild(p);
+  card.append(lu,lp,err);
+  const b=$(`<button class="primary">${btn}</button>`);
+  b.onclick=async()=>{ err.textContent=''; try{ await onSubmit(u.value,p.value);}catch(e){err.textContent=e.message;} };
+  p.addEventListener('keydown',e=>{ if(e.key==='Enter') b.click(); });
+  card.appendChild(b);
+  app.innerHTML=''; app.appendChild($('<div class="center"></div>')).appendChild(card);
+}
+function renderLogin(){ authCard('Sign in','Sign in', async(u,p)=>{
+  const {data}=await api('login',{method:'POST',json:{username:u,password:p}});
+  TOKEN=data.token; localStorage.setItem('slep_token',TOKEN); render();
+});}
+function renderSetup(){ authCard('Create admin','Create admin', async(u,p)=>{
+  if(p.length<10) throw new Error('Password must be at least 10 characters.');
+  const {data}=await api('setup',{method:'POST',json:{username:u,password:p}});
+  TOKEN=data.token; localStorage.setItem('slep_token',TOKEN); render();
+});}
+
+// ---------------------------------------------------------------- shell
+function render(){
+  app.innerHTML='';
+  app.appendChild($(`<header class="top">
+     <div class="brand"><span class="mark"></span> Sysible Linux Engineering Platform</div>
+     <div class="spacer"></div>
+     <button class="ghost" id="logout">Sign out</button></header>`));
+  const layout=$('<div class="layout"></div>');
+  const nav=$('<nav class="side"></nav>');
+  [['projects','Projects'],['inventories','Inventories'],['credentials','Credentials'],['runs','Runs']]
+    .forEach(([k,label])=>{ const b=$(`<button>${label}</button>`); if(STATE.view===k)b.classList.add('active');
+      b.onclick=()=>{STATE.view=k;STATE.project=null;render();}; nav.appendChild(b); });
+  const main=$('<main class="view"></main>');
+  layout.append(nav,main); app.appendChild(layout);
+  document.getElementById('logout').onclick=async()=>{ try{await api('logout',{method:'POST'});}catch(e){} TOKEN='';localStorage.removeItem('slep_token');boot(); };
+  const views={projects:viewProjects, inventories:viewInventories, credentials:viewCredentials, runs:viewRuns};
+  if (STATE.project) viewIDE(main); else (views[STATE.view]||viewProjects)(main);
+}
+
+// ---------------------------------------------------------------- projects
+async function viewProjects(main){
+  main.innerHTML='<h2>Projects</h2>';
+  const bar=$('<div class="row" style="margin-bottom:12px"></div>');
+  const nb=$('<button class="primary">+ New project</button>');
+  nb.onclick=()=>newProjectModal();
+  bar.appendChild(nb); main.appendChild(bar);
+  const {data}=await api('projects');
+  if(!data.projects.length){ main.appendChild($('<div class="muted">No projects yet. Create one to start authoring playbooks.</div>')); return; }
+  const t=$('<table><thead><tr><th>Name</th><th>Slug</th><th>Description</th><th></th></tr></thead><tbody></tbody></table>');
+  data.projects.forEach(p=>{ const tr=$(`<tr><td><a>${p.name}</a></td><td class="muted">${p.slug}</td><td class="muted">${p.description||''}</td>
+     <td class="row"><button class="ghost">Open</button> <button class="danger ghost">Delete</button></td></tr>`);
+    tr.querySelector('a').onclick=()=>openProject(p);
+    tr.querySelectorAll('button')[0].onclick=()=>openProject(p);
+    tr.querySelectorAll('button')[1].onclick=async()=>{ if(confirm('Delete project '+p.name+'?')){ await api('projects/'+p.id,{method:'DELETE'}); render(); } };
+    t.querySelector('tbody').appendChild(tr); });
+  main.appendChild(t);
+}
+function newProjectModal(){
+  const err=$('<div class="err"></div>');
+  const name=$('<input placeholder="Project name">');
+  const desc=$('<input placeholder="Description (optional)">');
+  const m=$('<div class="card modal col"></div>');
+  m.append($('<h2>New project</h2>'),labeled('Name',name),labeled('Description',desc),err);
+  const b=$('<button class="primary">Create</button>');
+  b.onclick=async()=>{ try{ const {data}=await api('projects',{method:'POST',json:{name:name.value,description:desc.value}});
+     document.querySelector('.modal-bg').remove(); openProject(data);}catch(e){err.textContent=e.message;} };
+  m.append($('<div class="row"><div class="spacer"></div></div>')).appendChild(b);
+  modal(m); name.focus();
+}
+function openProject(p){ STATE.project=p; STATE.file=null; render(); }
+function labeled(t,node){ const l=$(`<label class="fld">${t}</label>`); l.appendChild(node); return l; }
+
+// ---------------------------------------------------------------- IDE
+async function viewIDE(main){
+  const p=STATE.project;
+  main.innerHTML='';
+  main.appendChild($(`<div class="row" style="margin-bottom:10px">
+     <button class="ghost" id="back">← Projects</button>
+     <h2 style="margin:0">${p.name}</h2><span class="muted">${p.slug}</span><div class="spacer"></div>
+     <button id="newfile" class="ghost">+ File</button>
+     <button id="save" class="ghost">Save</button>
+     <button id="run" class="primary">▶ Run playbook</button></div>`));
+  main.querySelector('#back').onclick=()=>{STATE.project=null;render();};
+  const ide=$(`<div class="ide"><div class="tree" id="tree"></div>
+     <div class="edwrap"><div class="edtool"><span class="muted" id="curfile">No file open</span></div>
+     <div id="editor"></div></div></div>`);
+  main.appendChild(ide);
+  await refreshTree();
+  ensureMonaco(()=>{ STATE.editor=monaco.editor.create(document.getElementById('editor'),
+     {value:'',language:'yaml',theme:'vs-dark',automaticLayout:true,minimap:{enabled:false},fontSize:13}); });
+  main.querySelector('#newfile').onclick=()=>newFileModal(p);
+  main.querySelector('#save').onclick=saveCurrent;
+  main.querySelector('#run').onclick=()=>runModal(p);
+  document.addEventListener('keydown',ctrlS);
+}
+function ctrlS(e){ if((e.ctrlKey||e.metaKey)&&e.key==='s'){ e.preventDefault(); if(STATE.project) saveCurrent(); } }
+async function refreshTree(){
+  const {data}=await api('projects/'+STATE.project.id+'/files');
+  const tree=document.getElementById('tree'); tree.innerHTML='';
+  if(!data.files.length) tree.appendChild($('<div class="muted" style="padding:6px">Empty project. “+ File”.</div>'));
+  data.files.forEach(f=>{ const el=$(`<div class="f ${f.type==='dir'?'dir':''}">${f.type==='dir'?'📁 ':'📄 '}${f.path}</div>`);
+    if(f.type==='file'){ el.onclick=()=>openFile(f.path,el); } tree.appendChild(el); });
+}
+async function openFile(path,el){
+  const {data}=await api('projects/'+STATE.project.id+'/file?path='+encodeURIComponent(path));
+  STATE.file=path; document.getElementById('curfile').textContent=path;
+  document.querySelectorAll('.tree .f').forEach(x=>x.classList.remove('active')); if(el)el.classList.add('active');
+  const lang = path.endsWith('.tf')?'hcl':(path.endsWith('.sls')||path.endsWith('.yml')||path.endsWith('.yaml'))?'yaml':(path.endsWith('.json')?'json':'plaintext');
+  ensureMonaco(()=>{ monaco.editor.setModelLanguage(STATE.editor.getModel(),lang); STATE.editor.setValue(data.content); });
+}
+async function saveCurrent(){
+  if(!STATE.file||!STATE.editor) return;
+  await api('projects/'+STATE.project.id+'/file',{method:'PUT',json:{path:STATE.file,content:STATE.editor.getValue()}});
+  const c=document.getElementById('curfile'); const o=c.textContent; c.textContent=o.replace(' • saved','')+' • saved'; setTimeout(()=>c.textContent=o,1200);
+}
+function newFileModal(p){
+  const name=$('<input placeholder="path e.g. site.yml or roles/web/tasks/main.yml">');
+  const err=$('<div class="err"></div>');
+  const m=$('<div class="card modal col"></div>');
+  m.append($('<h2>New file</h2>'),labeled('Path',name),err);
+  const b=$('<button class="primary">Create</button>');
+  b.onclick=async()=>{ try{ await api('projects/'+p.id+'/file',{method:'POST',json:{path:name.value,type:'file'}});
+     document.querySelector('.modal-bg').remove(); await refreshTree(); openFile(name.value); }catch(e){err.textContent=e.message;} };
+  m.appendChild(b); modal(m); name.focus();
+}
+
+// ---------------------------------------------------------------- run modal + log
+async function runModal(p){
+  const [{data:inv},{data:cred}] = await Promise.all([api('inventories'),api('credentials')]);
+  const err=$('<div class="err"></div>');
+  const pb=$(`<input value="${STATE.file||'site.yml'}" placeholder="playbook path">`);
+  const invSel=$('<select></select>'); inv.inventories.forEach(i=>invSel.appendChild($(`<option value="${i.id}">${i.name}</option>`)));
+  if(!inv.inventories.length) invSel.appendChild($('<option value="">(no inventories — create one first)</option>'));
+  const credSel=$('<select><option value="">(no credential)</option></select>'); cred.credentials.forEach(c=>credSel.appendChild($(`<option value="${c.id}">${c.name} (${c.kind})</option>`)));
+  const m=$('<div class="card modal col"></div>');
+  m.append($('<h2>Run playbook</h2>'),labeled('Playbook',pb),labeled('Inventory',invSel),labeled('SSH credential',credSel),err);
+  const b=$('<button class="primary">▶ Launch</button>');
+  b.onclick=async()=>{ try{ if(!invSel.value) throw new Error('Create and select an inventory first.');
+     const {data}=await api('runs',{method:'POST',json:{project_id:p.id,kind:'ansible',target:pb.value,
+        inventory_id:Number(invSel.value),credential_id:credSel.value?Number(credSel.value):null}});
+     document.querySelector('.modal-bg').remove(); STATE.view='runs'; STATE.project=null; render(); setTimeout(()=>openRun(data.run_id),50);
+     }catch(e){err.textContent=e.message;} };
+  m.appendChild(b); modal(m);
+}
+async function tailRun(id, into){
+  let offset=0, done=false;
+  into.textContent='';
+  while(!done){
+    const r=await fetch('/api/runs/'+id+'/log?offset='+offset,{headers:{'Authorization':'Bearer '+TOKEN}});
+    const txt=await r.text(); if(txt){ into.textContent+=txt; into.scrollTop=into.scrollHeight; }
+    offset=Number(r.headers.get('X-Log-Next')||offset);
+    const st=r.headers.get('X-Run-Status');
+    const badge=document.getElementById('run-badge'); if(badge){ badge.className='pill '+st; badge.textContent=st; }
+    if(['success','failed','canceled'].includes(st)) done=true; else await new Promise(r=>setTimeout(r,1000));
+  }
+}
+
+// ---------------------------------------------------------------- runs
+async function viewRuns(main){
+  main.innerHTML='<h2>Runs</h2>';
+  const {data}=await api('runs');
+  if(!data.runs.length){ main.appendChild($('<div class="muted">No runs yet.</div>')); return; }
+  const t=$('<table><thead><tr><th>#</th><th>Project</th><th>Engine</th><th>Target</th><th>Status</th><th>When</th></tr></thead><tbody></tbody></table>');
+  data.runs.forEach(r=>{ const tr=$(`<tr><td><a>#${r.id}</a></td><td>${r.project_id}</td><td>${r.kind}</td><td class="muted">${r.target}</td>
+     <td><span class="pill ${r.status}">${r.status}</span></td><td class="muted">${r.created?new Date(r.created*1000).toLocaleString():''}</td></tr>`);
+    tr.querySelector('a').onclick=()=>openRun(r.id); t.querySelector('tbody').appendChild(tr); });
+  main.appendChild(t);
+}
+async function openRun(id){
+  render(); const main=document.querySelector('main.view'); main.innerHTML='';
+  main.appendChild($(`<div class="row" style="margin-bottom:10px"><button class="ghost" id="rb">← Runs</button>
+     <h2 style="margin:0">Run #${id}</h2><span class="pill" id="run-badge">…</span></div>`));
+  main.querySelector('#rb').onclick=()=>{STATE.view='runs';render();};
+  const log=$('<div class="log">connecting…</div>'); main.appendChild(log);
+  tailRun(id,log);
+}
+
+// ---------------------------------------------------------------- inventories
+async function viewInventories(main){
+  main.innerHTML='<h2>Inventories</h2>';
+  const bar=$('<div class="row" style="margin-bottom:12px"></div>');
+  const nb=$('<button class="primary">+ New inventory</button>'); nb.onclick=()=>newInventoryModal();
+  bar.appendChild(nb); main.appendChild(bar);
+  const {data}=await api('inventories');
+  if(!data.inventories.length){ main.appendChild($('<div class="muted">No inventories. Create one, then add hosts or import from a Controller.</div>')); return; }
+  for(const inv of data.inventories){
+    const {data:hd}=await api('inventories/'+inv.id+'/hosts');
+    const c=$(`<div class="card col" style="margin-bottom:12px"></div>`);
+    c.appendChild($(`<div class="row"><b>${inv.name}</b><span class="pill">${inv.source}</span><span class="muted">${hd.hosts.length} host(s)</span>
+       <div class="spacer"></div><button class="ghost bi">Import from Controller</button><button class="ghost ba">+ Host</button>
+       <button class="danger ghost bd">Delete</button></div>`));
+    if(hd.hosts.length){ const t=$('<table><thead><tr><th>Name</th><th>Address</th><th>Groups</th><th>Source</th><th></th></tr></thead><tbody></tbody></table>');
+      hd.hosts.forEach(h=>{ const tr=$(`<tr><td>${h.name}</td><td class="muted">${h.address}</td><td class="muted">${h.groups||''}</td><td class="muted">${h.source}</td>
+        <td><button class="danger ghost">✕</button></td></tr>`); tr.querySelector('button').onclick=async()=>{await api('hosts/'+h.id,{method:'DELETE'});render();};
+        t.querySelector('tbody').appendChild(tr); }); c.appendChild(t); }
+    c.querySelector('.bi').onclick=()=>importModal(inv);
+    c.querySelector('.ba').onclick=()=>addHostModal(inv);
+    c.querySelector('.bd').onclick=async()=>{ if(confirm('Delete inventory '+inv.name+'?')){await api('inventories/'+inv.id,{method:'DELETE'});render();} };
+    main.appendChild(c);
+  }
+}
+function newInventoryModal(){
+  const name=$('<input placeholder="Inventory name e.g. production">'); const err=$('<div class="err"></div>');
+  const m=$('<div class="card modal col"></div>'); m.append($('<h2>New inventory</h2>'),labeled('Name',name),err);
+  const b=$('<button class="primary">Create</button>');
+  b.onclick=async()=>{try{await api('inventories',{method:'POST',json:{name:name.value}});document.querySelector('.modal-bg').remove();render();}catch(e){err.textContent=e.message;}};
+  m.appendChild(b); modal(m); name.focus();
+}
+function addHostModal(inv){
+  const name=$('<input placeholder="host name">'); const addr=$('<input placeholder="address / IP">'); const groups=$('<input placeholder="groups (comma-separated)">');
+  const err=$('<div class="err"></div>'); const m=$('<div class="card modal col"></div>');
+  m.append($('<h2>Add host</h2>'),labeled('Name',name),labeled('Address',addr),labeled('Groups',groups),err);
+  const b=$('<button class="primary">Add</button>');
+  b.onclick=async()=>{try{await api('inventories/'+inv.id+'/hosts',{method:'POST',json:{name:name.value,address:addr.value,groups:groups.value}});document.querySelector('.modal-bg').remove();render();}catch(e){err.textContent=e.message;}};
+  m.appendChild(b); modal(m); name.focus();
+}
+function importModal(inv){
+  const url=$('<input placeholder="https://controller-host:9000">'); const key=$('<input type="password" placeholder="Controller backend API key">');
+  const err=$('<div class="err"></div>'); const m=$('<div class="card modal col"></div>');
+  m.append($('<h2>Import hosts from a Sysible Controller</h2>'),
+    $('<div class="muted">Pulls the Controller’s /agents fleet into this inventory. Re-importing refreshes, never duplicates.</div>'),
+    labeled('Controller URL',url),labeled('API key',key),err);
+  const b=$('<button class="primary">Import</button>');
+  b.onclick=async()=>{ try{ b.textContent='Importing…'; const {data}=await api('inventories/'+inv.id+'/import-controller',
+     {method:'POST',json:{controller_url:url.value,api_key:key.value}});
+     document.querySelector('.modal-bg').remove(); alert(`Imported ${data.imported} host(s) (${data.skipped} skipped of ${data.total}).`); render();
+     }catch(e){err.textContent=e.message; b.textContent='Import';} };
+  m.appendChild(b); modal(m); url.focus();
+}
+
+// ---------------------------------------------------------------- credentials
+async function viewCredentials(main){
+  main.innerHTML='<h2>Credentials</h2>';
+  const bar=$('<div class="row" style="margin-bottom:12px"></div>');
+  const nb=$('<button class="primary">+ New credential</button>'); nb.onclick=()=>newCredModal();
+  bar.appendChild(nb); main.appendChild(bar);
+  const {data}=await api('credentials');
+  if(!data.credentials.length){ main.appendChild($('<div class="muted">No credentials. Add an SSH key or password for runs to use.</div>')); return; }
+  const t=$('<table><thead><tr><th>Name</th><th>Kind</th><th>Username</th><th></th></tr></thead><tbody></tbody></table>');
+  data.credentials.forEach(c=>{ const tr=$(`<tr><td>${c.name}</td><td class="muted">${c.kind}</td><td class="muted">${c.username||''}</td>
+     <td><button class="danger ghost">Delete</button></td></tr>`); tr.querySelector('button').onclick=async()=>{await api('credentials/'+c.id,{method:'DELETE'});render();};
+     t.querySelector('tbody').appendChild(tr); });
+  main.appendChild(t);
+}
+function newCredModal(){
+  const name=$('<input placeholder="e.g. deploy-key">');
+  const kind=$('<select><option value="ssh">SSH private key</option><option value="ssh_password">SSH password</option></select>');
+  const user=$('<input placeholder="ssh username e.g. ansible">');
+  const secret=$('<textarea rows="6" placeholder="paste private key, or password"></textarea>');
+  const err=$('<div class="err"></div>'); const m=$('<div class="card modal col"></div>');
+  m.append($('<h2>New credential</h2>'),labeled('Name',name),labeled('Kind',kind),labeled('Username',user),labeled('Secret',secret),
+    $('<div class="muted">Stored server-side and injected into runs — never shown in the console again.</div>'),err);
+  const b=$('<button class="primary">Save</button>');
+  b.onclick=async()=>{try{await api('credentials',{method:'POST',json:{name:name.value,kind:kind.value,username:user.value,secret:secret.value}});document.querySelector('.modal-bg').remove();render();}catch(e){err.textContent=e.message;}};
+  m.appendChild(b); modal(m); name.focus();
+}
+
+// ---------------------------------------------------------------- Monaco loader
+let _monacoReady=false, _monacoQueue=[];
+function ensureMonaco(cb){
+  if(_monacoReady) return cb();
+  _monacoQueue.push(cb);
+  if(ensureMonaco._loading) return; ensureMonaco._loading=true;
+  const CDN='https://cdn.jsdelivr.net/npm/monaco-editor@0.45.0/min/vs';
+  require.config({paths:{vs:CDN}});
+  window.MonacoEnvironment={ getWorkerUrl:()=>`data:text/javascript;charset=utf-8,`+
+    encodeURIComponent(`self.MonacoEnvironment={baseUrl:'${CDN}/'};importScripts('${CDN}/base/worker/workerMain.js');`)};
+  require(['vs/editor/editor.main'],()=>{ _monacoReady=true; _monacoQueue.forEach(f=>f()); _monacoQueue=[]; });
+}
+
+boot();
+</script>
+</body>
+</html>
