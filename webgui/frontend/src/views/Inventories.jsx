@@ -30,7 +30,9 @@ function InventoryCard({ inv, onChanged }) {
     <div className="card col" style={{ marginBottom: 12 }}>
       <div className="row">
         <b>{inv.name}</b><span className="pill">{inv.source}</span><span className="muted">{hosts.length} host(s)</span>
+        {inv.bastion && <span className="pill" title="Runs tunnel through this SSH jump host">⤳ {inv.bastion}</span>}
         <div className="spacer" />
+        <button className="ghost sm" onClick={() => setModal('bastion')}>{inv.bastion ? 'Jump host' : '+ Jump host'}</button>
         <button className="ghost sm" onClick={() => setModal('import')}>Import from Controller</button>
         <button className="ghost sm" onClick={() => setModal('host')}>+ Host</button>
         <button className="danger ghost sm" onClick={async () => { if (confirm('Delete inventory ' + inv.name + '?')) { await api('inventories/' + inv.id, { method: 'DELETE' }); onChanged() } }}>Delete</button>
@@ -50,18 +52,35 @@ function InventoryCard({ inv, onChanged }) {
       )}
       {modal === 'host' && <AddHost inv={inv} onClose={() => setModal(null)} onDone={() => { setModal(null); load(); onChanged() }} />}
       {modal === 'import' && <ImportController inv={inv} onClose={() => setModal(null)} onDone={() => { setModal(null); load(); onChanged() }} />}
+      {modal === 'bastion' && <SetBastion inv={inv} onClose={() => setModal(null)} onDone={() => { setModal(null); onChanged() }} />}
     </div>
   )
 }
 
 function NewInventory({ onClose, onDone }) {
   const [name, setName] = useState('')
+  const [bastion, setBastion] = useState('')
   const { wrap, node } = useErr()
   return (
     <Modal title="New inventory" onClose={onClose}>
       <Field label="Name"><input value={name} onChange={(e) => setName(e.target.value)} autoFocus placeholder="e.g. production" /></Field>
+      <Field label="SSH jump host / bastion (optional)"><input value={bastion} onChange={(e) => setBastion(e.target.value)} placeholder="user@192.168.8.212  — reach hosts through this box" /></Field>
+      <div className="muted">Set this when the hosts aren’t directly reachable (e.g. VMs on a hypervisor’s internal network). Runs tunnel SSH through it (ProxyJump).</div>
       {node}
-      <button className="primary" onClick={() => wrap(async () => { await api('inventories', { method: 'POST', json: { name } }); onDone() })}>Create</button>
+      <button className="primary" onClick={() => wrap(async () => { await api('inventories', { method: 'POST', json: { name, bastion } }); onDone() })}>Create</button>
+    </Modal>
+  )
+}
+
+function SetBastion({ inv, onClose, onDone }) {
+  const [bastion, setBastion] = useState(inv.bastion || '')
+  const { wrap, node } = useErr()
+  return (
+    <Modal title={`Jump host for ${inv.name}`} onClose={onClose}>
+      <div className="muted">SSH bastion to reach this inventory’s hosts through (ProxyJump). Leave empty for direct connections.</div>
+      <Field label="Jump host"><input value={bastion} onChange={(e) => setBastion(e.target.value)} autoFocus placeholder="user@192.168.8.212" /></Field>
+      {node}
+      <button className="primary" onClick={() => wrap(async () => { await api('inventories/' + inv.id, { method: 'PATCH', json: { bastion } }); onDone() })}>Save</button>
     </Modal>
   )
 }

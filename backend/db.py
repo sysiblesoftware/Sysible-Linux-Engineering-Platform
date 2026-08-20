@@ -99,6 +99,7 @@ def init_db() -> None:
                 project_id INTEGER,
                 name TEXT NOT NULL,
                 source TEXT NOT NULL DEFAULT 'manual',  -- manual | controller
+                bastion TEXT DEFAULT '',                -- SSH jump host: user@host[:port]
                 created INTEGER NOT NULL,
                 FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
             );
@@ -137,6 +138,10 @@ def init_db() -> None:
             "INSERT OR IGNORE INTO meta(key, value) VALUES('schema_version', ?)",
             (str(SCHEMA_VERSION),),
         )
+        # Lightweight migrations for DBs created before a column existed.
+        inv_cols = [r["name"] for r in c.execute("PRAGMA table_info(inventories)")]
+        if "bastion" not in inv_cols:
+            c.execute("ALTER TABLE inventories ADD COLUMN bastion TEXT DEFAULT ''")
 
 
 # ---------------------------------------------------------------- admins
@@ -302,13 +307,18 @@ def get_inventory(iid: int):
         return dict(r) if r else None
 
 
-def create_inventory(name, project_id=None, source="manual"):
+def create_inventory(name, project_id=None, source="manual", bastion=""):
     with _connect() as c:
         cur = c.execute(
-            "INSERT INTO inventories(project_id,name,source,created) VALUES(?,?,?,?)",
-            (project_id, name, source, _now()),
+            "INSERT INTO inventories(project_id,name,source,bastion,created) VALUES(?,?,?,?,?)",
+            (project_id, name, source, bastion, _now()),
         )
         return cur.lastrowid
+
+
+def set_inventory_bastion(iid: int, bastion: str):
+    with _connect() as c:
+        c.execute("UPDATE inventories SET bastion=? WHERE id=?", (bastion, iid))
 
 
 def delete_inventory(iid: int):

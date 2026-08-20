@@ -277,7 +277,18 @@ def create_inventory(body: dict = Body(...), user: str = Depends(current_user)):
     if not name:
         raise HTTPException(status_code=400, detail="Inventory name is required.")
     iid = db.create_inventory(name, project_id=body.get("project_id"),
-                              source=str(body.get("source") or "manual"))
+                              source=str(body.get("source") or "manual"),
+                              bastion=str(body.get("bastion") or "").strip())
+    return db.get_inventory(iid)
+
+
+@app.patch("/inventories/{iid}")
+def update_inventory(iid: int, body: dict = Body(...), user: str = Depends(current_user)):
+    """Update an inventory's SSH jump host (bastion). Empty string clears it."""
+    if not db.get_inventory(iid):
+        raise HTTPException(status_code=404, detail="Inventory not found.")
+    if "bastion" in body:
+        db.set_inventory_bastion(iid, str(body.get("bastion") or "").strip())
     return db.get_inventory(iid)
 
 

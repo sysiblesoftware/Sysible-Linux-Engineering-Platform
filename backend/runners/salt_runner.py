@@ -23,7 +23,7 @@ from .. import db
 from . import _common
 
 
-def _render_roster(hosts, credential, key_path, dest: Path) -> None:
+def _render_roster(hosts, credential, key_path, dest: Path, bastion: str = "") -> None:
     user = (credential or {}).get("username") or "root"
     lines = []
     for h in hosts:
@@ -36,6 +36,11 @@ def _render_roster(hosts, credential, key_path, dest: Path) -> None:
         elif credential and credential.get("kind") == "ssh_password" and credential.get("secret"):
             lines.append(f"  passwd: {credential['secret']}")
             lines.append("  sudo: True")
+        # Optional SSH jump host (bastion): reach every host through it.
+        if bastion:
+            lines.append("  ssh_options:")
+            lines.append(f"    - ProxyJump={bastion}")
+            lines.append("    - StrictHostKeyChecking=no")
     dest.write_text("\n".join(lines) + "\n")
 
 
@@ -57,6 +62,7 @@ def launch(run_id: int) -> None:
     project = db.get_project(run["project_id"])
     workdir = db.project_dir(run["project_id"])
     hosts = db.list_hosts(run["inventory_id"]) if run.get("inventory_id") else []
+    bastion = (db.get_inventory(run["inventory_id"]) or {}).get("bastion") or "" if run.get("inventory_id") else ""
     credential = (
         db.get_credential(run["credential_id"], include_secret=True)
         if run.get("credential_id") else None
@@ -84,7 +90,7 @@ def launch(run_id: int) -> None:
             if credential and credential.get("kind") == "ssh" and credential.get("secret"):
                 _write_key(credential["secret"], key_file)
                 key_path = str(key_file)
-            _render_roster(hosts, credential, key_path, roster)
+            _render_roster(hosts, credential, key_path, roster, bastion=bastion)
 
             # Minimal master config: states come from the project dir; keep all
             # of salt's scratch dirs inside the per-run temp so no root paths are

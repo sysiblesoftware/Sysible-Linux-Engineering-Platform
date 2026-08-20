@@ -38,7 +38,7 @@ def _ansible_group(name: str) -> str:
     return g or "ungrouped"
 
 
-def _render_inventory(hosts, credential, dest: Path) -> None:
+def _render_inventory(hosts, credential, dest: Path, bastion: str = "") -> None:
     """Write an Ansible INI inventory from SLEP hosts. Hosts are grouped by their
     comma-separated `groups`; every host also lands in the implicit `all`. SSH
     connection vars come from the attached credential."""
@@ -73,6 +73,12 @@ def _render_inventory(hosts, credential, dest: Path) -> None:
             f.write(f"\n[{g}]\n")
             for line in lines:
                 f.write(line + "\n")
+        # Optional SSH jump host (bastion): reach every host through it. The same
+        # --private-key identity is used for the jump (ssh applies it to all hops).
+        if bastion:
+            f.write("\n[all:vars]\n")
+            f.write(f"ansible_ssh_common_args=-o ProxyJump={bastion} "
+                    "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null\n")
 
 
 def _write_key(secret: str, dest: Path) -> None:
@@ -92,7 +98,9 @@ def launch(run_id: int) -> None:
     log_path = db.run_log_path(run_id)
     project = db.get_project(run["project_id"])
     workdir = db.project_dir(run["project_id"])
+    inventory = db.get_inventory(run["inventory_id"]) if run.get("inventory_id") else None
     hosts = db.list_hosts(run["inventory_id"]) if run.get("inventory_id") else []
+    bastion = (inventory or {}).get("bastion") or ""
     credential = (
         db.get_credential(run["credential_id"], include_secret=True)
         if run.get("credential_id") else None
@@ -126,7 +134,7 @@ def launch(run_id: int) -> None:
                 emit(f"!! Playbook not found: {run['target']}")
                 raise RuntimeError("playbook missing")
 
-            _render_inventory(hosts, credential, inv_file)
+            _render_inventory(hosts, credential, inv_file, bastion=bastion)
 
             cmd = ["ansible-playbook", "-i", str(inv_file), str(playbook)]
             if credential and credential.get("kind") == "ssh" and credential.get("secret"):
@@ -144,7 +152,8 @@ def launch(run_id: int) -> None:
             emit(f"== SLEP run #{run_id} · project '{project['name']}' ==")
             emit(f"$ {' '.join(cmd)}")
             emit(f"-- inventory: {len(hosts)} host(s); credential: "
-                 f"{credential['name'] if credential else 'none'} --\n")
+                 f"{credential['name'] if credential else 'none'}"
+                 f"{'; jump host: ' + bastion if bastion else ''} --\n")
             log.flush()
 
             proc = subprocess.Popen(

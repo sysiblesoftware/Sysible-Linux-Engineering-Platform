@@ -31,3 +31,19 @@ def test_rendered_inventory_has_valid_sections(tmp_path):
     assert "Sysible_Labs" in cp
     body = "\n".join(k for k in cp["Sysible_Labs"])
     assert "arch-01" in body and "ubuntu-01" in body
+
+
+def test_bastion_injects_proxyjump(tmp_path):
+    hosts = [{"name": "web1", "address": "10.0.0.11", "groups": "", "variables": {}}]
+    dest = tmp_path / "inv.ini"
+    _render_inventory(hosts, {"username": "admin"}, dest, bastion="ops@192.168.8.212")
+    text = dest.read_text()
+    assert "[all:vars]" in text
+    assert "ansible_ssh_common_args=-o ProxyJump=ops@192.168.8.212" in text
+
+
+def test_no_bastion_section_when_unset(tmp_path):
+    hosts = [{"name": "web1", "address": "10.0.0.11", "groups": "", "variables": {}}]
+    dest = tmp_path / "inv.ini"
+    _render_inventory(hosts, {"username": "admin"}, dest)
+    assert "[all:vars]" not in dest.read_text()
