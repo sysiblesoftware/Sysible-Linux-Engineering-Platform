@@ -34,6 +34,30 @@ IDE built in.
 | Edit playbooks elsewhere, sync via SCM | **In-browser IDE**, SCM optional |
 | Heavy RBAC/licensing | Simple admin model, self-hosted |
 
+## Editions (CE today, EE later)
+
+SLEP follows the same edition split as Sysible Controller. What exists here today
+is effectively the **Community Edition (CE)**: single container, SQLite, SSH-native,
+one admin model — everything a team needs to author and run automation.
+
+**Enterprise Edition (EE)** will mirror `sysible-controller-ee` when we get to it —
+a separate (private) repo that reuses this codebase's shape and adds the
+enterprise concerns:
+
+- **PostgreSQL-exclusive** datastore (the CE↔EE seam is `backend/db.py`: all
+  persistence goes through its function API, so EE swaps the storage layer without
+  touching the API surface or the runners).
+- **Teams / RBAC** and SSO/SAML/OIDC login.
+- **Approvals & scheduled/recurring jobs**, job-template surveys, and an
+  audit trail.
+- **HA / distributed execution** (multiple runner nodes) for large fleets.
+- **Licensing** gate, same as Controller EE.
+
+The current architecture keeps that path cheap: the backend/BFF split is already
+the two-role seam Controller EE uses, and nothing in the console assumes SQLite.
+We are **not** building EE now — this note just records the intent so CE stays
+EE-ready.
+
 ## Architecture
 
 Mirrors Sysible Controller so the two are operationally identical to run:

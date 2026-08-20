@@ -1,8 +1,15 @@
-"""SLEP datastore — SQLite by default (one file, no server), mirroring the
-"single container, no external dependencies" ethos. Everything the platform
-needs to remember lives here: admins, projects, credentials, inventories, hosts,
-and run history. Project *files* live on disk under DATA/projects/<id>/ (so the
-IDE and the runners both see real files); run *logs* stream to DATA/runs/<id>.log.
+"""SLEP datastore (Community Edition) — SQLite by default (one file, no server),
+mirroring the "single container, no external dependencies" ethos. Everything the
+platform needs to remember lives here: admins, projects, credentials,
+inventories, hosts, and run history. Project *files* live on disk under
+DATA/projects/<id>/ (so the IDE and the runners both see real files); run *logs*
+stream to DATA/runs/<id>.log.
+
+This module IS the CE↔EE datastore seam: the rest of the backend calls only the
+functions below, never raw SQL, so the future Enterprise Edition can supply a
+PostgreSQL-backed implementation of this same API (as sysible-controller-ee does
+for Controller) without changing the API surface or the runners. Keep new
+persistence behind a function here, not inline in app.py.
 
 The connection is opened per-call (SQLite is happiest that way under a threaded
 server) with WAL enabled for concurrent readers during a long run.
