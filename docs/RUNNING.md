@@ -47,6 +47,8 @@ python3 -m venv .venv
 .venv/bin/pip install -r backend/requirements.txt
 # The runner shells out to these — install whichever engines you'll use:
 .venv/bin/pip install ansible-core          # Ansible (first-class today)
+# System tools the runners shell out to (Docker image bakes these in already):
+#   sudo apt install -y openssh-client sshpass    # sshpass = password-based SSH auth
 # terraform / salt: install per their vendors (Terraform via `sysible-tools` on
 # Sysible Server; salt via apt/pip). Runners for these land next.
 ```

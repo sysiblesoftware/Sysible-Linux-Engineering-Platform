@@ -16,10 +16,11 @@ RUN npm run build      # -> /web/dist
 # ---- stage 2: runtime ------------------------------------------------------
 FROM python:3.12-slim
 
-# Engines + tooling: ssh client (Ansible/salt-ssh transport), git (SCM projects),
-# curl/unzip (fetch terraform), ca-certificates, bash (entrypoint).
+# Engines + tooling: ssh client (Ansible/salt-ssh transport), sshpass (password
+# SSH auth for Ansible), git (SCM projects), curl/unzip (fetch terraform),
+# ca-certificates, bash (entrypoint).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      bash git openssh-client curl unzip ca-certificates \
+      bash git openssh-client sshpass curl unzip ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 # Terraform (arch-aware via buildx's TARGETARCH: amd64 / arm64).
