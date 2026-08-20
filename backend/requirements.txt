@@ -1,0 +1,10 @@
+# SLEP backend — FastAPI service.
+fastapi>=0.110
+uvicorn[standard]>=0.29
+pydantic>=2.6
+python-multipart>=0.0.9
+# HTTP client for importing inventory from a Sysible Controller.
+requests>=2.31
+# Password hashing for the admin model (stdlib hashlib is used, but bcrypt is
+# available if we harden later). Kept minimal on purpose.
+PyYAML>=6.0

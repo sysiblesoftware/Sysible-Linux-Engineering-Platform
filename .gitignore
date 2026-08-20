@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# SLEP runtime data (DB, project workdirs, run logs, secrets)
+/data/
+*.sqlite3
+*.db
+
+# Node / frontend build
+node_modules/
+webgui/frontend/dist/
+webgui/frontend/.vite/
+
+# Editors / OS
+.DS_Store
+*.swp
+.idea/
+.vscode/
