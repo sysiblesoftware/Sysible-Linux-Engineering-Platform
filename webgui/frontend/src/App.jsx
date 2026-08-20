@@ -9,10 +9,36 @@ import Controllers from './views/Controllers.jsx'
 import Credentials from './views/Credentials.jsx'
 import Runs, { RunLog } from './views/Runs.jsx'
 
+// Left-rail navigation — same shape as the Sysible Controller console.
+const NAV = [
+  { key: 'projects', label: 'Projects', icon: 'folder' },
+  { key: 'inventories', label: 'Inventories', icon: 'server' },
+  { key: 'controllers', label: 'Controllers', icon: 'link' },
+  { key: 'credentials', label: 'Credentials', icon: 'key' },
+  { key: 'runs', label: 'Runs', icon: 'play' },
+]
+
+// Feather-style line icons (inline SVG paths), matching the Controller's set.
+const ICONS = {
+  folder: <path d="M3 7a2 2 0 0 1 2-2h3.5l2 2H19a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />,
+  server: <><rect x="3" y="4" width="18" height="6" rx="1.5" /><rect x="3" y="14" width="18" height="6" rx="1.5" /><line x1="7" y1="7" x2="7.01" y2="7" /><line x1="7" y1="17" x2="7.01" y2="17" /></>,
+  link: <><path d="M9 15l6-6" /><path d="M11.5 6.5l1-1a4 4 0 0 1 6 6l-1 1" /><path d="M12.5 17.5l-1 1a4 4 0 0 1-6-6l1-1" /></>,
+  key: <><circle cx="8" cy="15" r="4" /><path d="M10.8 12.2 20 3M17 6l2 2M14 9l2 2" /></>,
+  play: <path d="M7 5l12 7-12 7z" />,
+}
+
+function NavIcon({ name }) {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">{ICONS[name]}</svg>
+  )
+}
+
 export default function App() {
   const [ready, setReady] = useState(false)
   const [needSetup, setNeedSetup] = useState(false)
   const [authed, setAuthed] = useState(false)
+  const [username, setUsername] = useState('')
   const [view, setView] = useState('projects')
   const [project, setProject] = useState(null)
   const [runId, setRunId] = useState(null)
@@ -25,40 +51,52 @@ export default function App() {
         const h = await fetch('/api/health').then((r) => r.json())
         if (h.admins === 0) { setNeedSetup(true); setReady(true); return }
       } catch { setReady(true); return }
-      if (getToken()) { try { await api('me'); setAuthed(true) } catch { /* stale token */ } }
+      if (getToken()) { try { const me = await api('me'); setUsername(me.username); setAuthed(true) } catch { /* stale token */ } }
       setReady(true)
     })()
     return () => window.removeEventListener('slep-logout', onLogout)
   }, [])
 
   if (!ready) return <div className="center muted">Loading…</div>
-  if (!authed) return <Auth needSetup={needSetup} onAuthed={() => { setNeedSetup(false); setAuthed(true) }} />
+  if (!authed) return <Auth needSetup={needSetup} onAuthed={(u) => { setNeedSetup(false); setUsername(u); setAuthed(true) }} />
 
   const go = (v) => { setView(v); setProject(null); setRunId(null) }
+  const atNav = (k) => view === k && !project && runId == null
+  const initials = (username || 'AD').slice(0, 2).toUpperCase()
+
   return (
-    <>
-      <header className="top">
-        <div className="brand"><Logo size={24} /> Sysible Linux Engineering Platform</div>
-        <div className="spacer" />
-        <button className="ghost" onClick={async () => { try { await api('logout', { method: 'POST' }) } catch {} setToken(''); setAuthed(false) }}>Sign out</button>
-      </header>
-      <div className="layout">
-        <nav className="side">
-          {[['projects', 'Projects'], ['inventories', 'Inventories'], ['controllers', 'Controllers'], ['credentials', 'Credentials'], ['runs', 'Runs']].map(([k, l]) => (
-            <button key={k} className={view === k && !project && runId == null ? 'active' : ''} onClick={() => go(k)}>{l}</button>
+    <div className="shell">
+      <aside className="rail">
+        <div className="rail-brand">
+          <Logo size={34} />
+          <div className="name">Sysible Linux<br />Engineering Platform</div>
+        </div>
+        <nav className="rail-nav">
+          {NAV.map((n) => (
+            <button key={n.key} className={'rail-item' + (atNav(n.key) ? ' active' : '')} onClick={() => go(n.key)}>
+              <NavIcon name={n.icon} /> {n.label}
+            </button>
           ))}
         </nav>
-        <main className="view">
-          {runId != null ? <RunLog runId={runId} onBack={() => setRunId(null)} />
-            : project ? <Ide project={project} onBack={() => setProject(null)} onRun={(id) => setRunId(id)} />
-              : view === 'projects' ? <Projects onOpen={setProject} />
-                : view === 'inventories' ? <Inventories />
-                  : view === 'controllers' ? <Controllers />
-                    : view === 'credentials' ? <Credentials />
-                      : <Runs onOpen={setRunId} />}
-        </main>
-      </div>
-    </>
+        <div className="rail-foot">
+          <div className="ce-badge">Community Edition</div>
+          <div className="account">
+            <span className="avatar">{initials}</span>
+            <div style={{ lineHeight: 1.2 }}>{username || 'admin'}<br /><span className="faint" style={{ fontSize: 12 }}>administrator</span></div>
+          </div>
+          <button className="ghost" onClick={async () => { try { await api('logout', { method: 'POST' }) } catch {} setToken(''); setAuthed(false) }}>Sign out</button>
+        </div>
+      </aside>
+      <main className="view">
+        {runId != null ? <RunLog runId={runId} onBack={() => setRunId(null)} />
+          : project ? <Ide project={project} onBack={() => setProject(null)} onRun={(id) => setRunId(id)} />
+            : view === 'projects' ? <Projects onOpen={setProject} />
+              : view === 'inventories' ? <Inventories />
+                : view === 'controllers' ? <Controllers />
+                  : view === 'credentials' ? <Credentials />
+                    : <Runs onOpen={setRunId} />}
+      </main>
+    </div>
   )
 }
 
@@ -70,7 +108,7 @@ function Auth({ needSetup, onAuthed }) {
     if (needSetup && p.length < 10) throw new Error('Password must be at least 10 characters.')
     const path = needSetup ? 'setup' : 'login'
     const d = await api(path, { method: 'POST', json: { username: u, password: p } })
-    setToken(d.token); onAuthed()
+    setToken(d.token); onAuthed(d.username || u)
   })
   return (
     <div className="center">
