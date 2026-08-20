@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="icon" type="image/svg+xml" href="/static/logo.svg" />
 <title>Sysible Linux Engineering Platform</title>
 <!--
   SLEP console — no-build MVP. Vanilla JS + Monaco (VS Code's editor) loaded via
@@ -77,6 +78,14 @@
 <script>
 // ---------------------------------------------------------------- tiny helpers
 const $ = (h) => { const t=document.createElement('template'); t.innerHTML=h.trim(); return t.content.firstElementChild; };
+// The SLEP mark (sibling to the Controller mark): dark tile + green ring, code
+// brackets around a green run/play triangle. Inlined so it needs no network.
+const logoSvg = (s=24) => `<svg width="${s}" height="${s}" viewBox="0 0 128 128" style="display:block;border-radius:${s*0.22}px">
+  <defs><linearGradient id="lt" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#161d29"/><stop offset="1" stop-color="#0a0d14"/></linearGradient></defs>
+  <rect x="2" y="2" width="124" height="124" rx="28" ry="28" fill="url(#lt)"/>
+  <rect x="3.5" y="3.5" width="121" height="121" rx="26.5" ry="26.5" fill="none" stroke="#6ddb73" stroke-width="2"/>
+  <g fill="none" stroke="#7aa2ff" stroke-width="6.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="50,44 33,64 50,84"/><polyline points="78,44 95,64 78,84"/></g>
+  <path d="M56 50 L56 78 L75 64 Z" fill="#6ddb73"/></svg>`;
 const app = document.getElementById('app');
 let TOKEN = localStorage.getItem('slep_token') || '';
 let STATE = { view:'projects', project:null, inventory:null, file:null, editor:null, run:null };
@@ -111,7 +120,7 @@ function authCard(title, btn, onSubmit){
   const u=$('<input placeholder="username" autocomplete="username">');
   const p=$('<input type="password" placeholder="password" autocomplete="current-password">');
   const card=$(`<div class="card col" style="width:min(360px,92vw)"></div>`);
-  card.appendChild($(`<div class="brand" style="font-size:18px"><span class="mark"></span> SLEP</div>`));
+  card.appendChild($(`<div class="brand" style="gap:12px">${logoSvg(40)}<span style="font-size:16px;line-height:1.15">Sysible Linux<br>Engineering Platform</span></div>`));
   card.appendChild($(`<div class="muted">Sysible Linux Engineering Platform</div>`));
   const lu=$('<label class="fld">Username</label>'); lu.appendChild(u);
   const lp=$('<label class="fld">Password</label>'); lp.appendChild(p);
@@ -136,7 +145,7 @@ function renderSetup(){ authCard('Create admin','Create admin', async(u,p)=>{
 function render(){
   app.innerHTML='';
   app.appendChild($(`<header class="top">
-     <div class="brand"><span class="mark"></span> Sysible Linux Engineering Platform</div>
+     <div class="brand">${logoSvg(24)} Sysible Linux Engineering Platform</div>
      <div class="spacer"></div>
      <button class="ghost" id="logout">Sign out</button></header>`));
   const layout=$('<div class="layout"></div>');

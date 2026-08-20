@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react'
 import { api, setToken, getToken } from './api.js'
 import { Field, useErr } from './ui.jsx'
+import Logo from './Logo.jsx'
 import Projects from './views/Projects.jsx'
 import Ide from './views/Ide.jsx'
 import Inventories from './views/Inventories.jsx'
@@ -36,7 +37,7 @@ export default function App() {
   return (
     <>
       <header className="top">
-        <div className="brand"><span className="mark" /> Sysible Linux Engineering Platform</div>
+        <div className="brand"><Logo size={24} /> Sysible Linux Engineering Platform</div>
         <div className="spacer" />
         <button className="ghost" onClick={async () => { try { await api('logout', { method: 'POST' }) } catch {} setToken(''); setAuthed(false) }}>Sign out</button>
       </header>
@@ -71,8 +72,13 @@ function Auth({ needSetup, onAuthed }) {
   })
   return (
     <div className="center">
-      <div className="card col" style={{ width: 'min(360px,92vw)' }}>
-        <div className="brand" style={{ fontSize: 18 }}><span className="mark" /> SLEP</div>
+      <div className="card col" style={{ width: 'min(380px,92vw)' }}>
+        <div className="brand" style={{ gap: 12 }}>
+          <Logo size={40} />
+          <div className="col" style={{ gap: 2 }}>
+            <div style={{ fontSize: 17, lineHeight: 1.15 }}>Sysible Linux<br />Engineering Platform</div>
+          </div>
+        </div>
         <div className="muted">{needSetup ? 'Create the first administrator' : 'Sign in'}</div>
         <Field label="Username"><input value={u} autoComplete="username" onChange={(e) => setU(e.target.value)} /></Field>
         <Field label="Password"><input type="password" value={p} autoComplete={needSetup ? 'new-password' : 'current-password'}
