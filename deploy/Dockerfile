@@ -47,6 +47,7 @@ ENV PYTHONPATH=/app \
     SLEP_DATA_DIR=/data \
     SLEP_BACKEND_URL=http://127.0.0.1:9100 \
     SLEP_CONTAINER=1 \
+    SLEP_TLS=1 \
     PYTHONUNBUFFERED=1
 
 # Non-root. Declare the volume AFTER chown so the named volume inherits slep's

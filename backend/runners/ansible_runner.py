@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -24,6 +25,17 @@ import time
 from pathlib import Path
 
 from .. import db
+
+
+def _ansible_group(name: str) -> str:
+    """Ansible INI group names allow only letters, digits and underscores — a
+    Controller environment like "Sysible Labs" (with a space) would otherwise
+    write an invalid `[Sysible Labs]` section and the whole inventory fails to
+    parse. Map every other character to '_'."""
+    g = re.sub(r"[^A-Za-z0-9_]", "_", name.strip())
+    if g and g[0].isdigit():
+        g = "g_" + g            # groups can't start with a digit
+    return g or "ungrouped"
 
 
 def _render_inventory(hosts, credential, dest: Path) -> None:
@@ -47,7 +59,7 @@ def _render_inventory(hosts, credential, dest: Path) -> None:
         for k, v in (h.get("variables") or {}).items():
             parts.append(f"{k}={json.dumps(v) if not isinstance(v, str) else v}")
         line = " ".join(parts)
-        gs = [g.strip() for g in (h.get("groups") or "").split(",") if g.strip()]
+        gs = [_ansible_group(g) for g in (h.get("groups") or "").split(",") if g.strip()]
         if gs:
             for g in gs:
                 groups.setdefault(g, []).append(line)

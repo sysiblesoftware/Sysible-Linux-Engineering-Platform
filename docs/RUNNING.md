@@ -7,8 +7,27 @@ SQLite, project files, and run logs persist in the `slep-data` volume.
 
 ```sh
 docker compose -f deploy/docker-compose.yml up -d --build
-# open http://localhost:8810 and create your admin on the first-run screen
+# open https://localhost:8810 and create your admin on the first-run screen
 ```
+
+### HTTPS / TLS
+
+The console is served over **HTTPS** by default with a **self-signed** certificate,
+generated at first start and stored under the data volume (`data/tls/`). HTTPS is
+what makes the browser treat the page as a *secure context* — required for the
+Monaco IDE's **clipboard/paste** and for encrypting the console across the network.
+
+- Your browser shows a one-time "not private" warning (expected for self-signed) —
+  proceed once and it's remembered.
+- Put your server's IP/hostname in the cert to drop the *name-mismatch* part of the
+  warning: set `SLEP_TLS_HOSTS` (comma-separated), e.g.
+  `SLEP_TLS_HOSTS=192.168.1.50,slep.lan docker compose … up -d`. Delete `data/tls/`
+  to regenerate after changing it.
+- **Warning-free (real) cert:** set `SLEP_TLS=0` (serve plain HTTP internally) and
+  put a reverse proxy (Caddy/nginx/Traefik) in front that terminates TLS with a
+  Let's Encrypt/your-CA certificate for your domain.
+- Firewall the console port (8810) as needed; the backend stays on loopback inside
+  the container and is never exposed.
 
 Salt (`salt-ssh`) is optional and left out of the default image to keep it lean —
 uncomment the `pip install salt` line in `deploy/Dockerfile` to bake it in.

@@ -1,10 +1,17 @@
 # Sysible Linux Engineering Platform — Community Edition.
 #
 #   docker compose -f deploy/docker-compose.yml up -d --build
-#   open http://localhost:8810  and create your admin on the first-run screen.
+#   open https://localhost:8810  and create your admin on the first-run screen.
 #
-# One service, one volume. SQLite + project files + run logs persist in the
-# named `slep-data` volume across rebuilds.
+# The console is served over HTTPS by default with a self-signed cert (so the
+# Monaco IDE's clipboard/paste works and traffic is encrypted across the network).
+# Your browser shows a one-time trust warning — expected for a self-signed cert;
+# proceed once. Set SLEP_TLS_HOSTS to your server's IP/hostname to put it in the
+# cert (removes the name-mismatch warning). For a warning-free cert, set SLEP_TLS=0
+# and terminate TLS at a reverse proxy with a real cert (see docs/RUNNING.md).
+#
+# One service, one volume. SQLite + project files + run logs (and the TLS cert)
+# persist in the named `slep-data` volume across rebuilds.
 services:
   slep:
     build:
@@ -13,13 +20,13 @@ services:
     image: sysible-slep:latest
     container_name: sysible-slep
     ports:
-      - "8810:8810"          # the web console (and API via /api)
+      - "8810:8810"          # the web console over HTTPS (API via /api)
     volumes:
       - slep-data:/data
     environment:
       SLEP_DATA_DIR: /data
-      # Point the automation at the Controller you import inventory from, if any.
-      # SLEP_CONTROLLER_URL: https://controller.example.com:9000
+      SLEP_TLS: "1"                        # "0" to serve plain HTTP (behind a proxy)
+      SLEP_TLS_HOSTS: ${SLEP_TLS_HOSTS:-}  # e.g. 192.168.1.50,slep.lan — names/IPs to put in the cert
     restart: unless-stopped
 
 volumes:

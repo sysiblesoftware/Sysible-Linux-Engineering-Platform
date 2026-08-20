@@ -5,6 +5,8 @@ pydantic>=2.6
 python-multipart>=0.0.9
 # HTTP client for importing inventory from a Sysible Controller.
 requests>=2.31
+# Self-signed TLS certificate generation for serving the console over HTTPS.
+cryptography>=42.0
 # Password hashing for the admin model (stdlib hashlib is used, but bcrypt is
 # available if we harden later). Kept minimal on purpose.
 PyYAML>=6.0
