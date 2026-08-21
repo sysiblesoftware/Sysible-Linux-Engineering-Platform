@@ -20,6 +20,26 @@ const ansibleGroup = (name) => {
 // the value; entries with dot paths (ansible_default_ipv4.address) insert the
 // whole path. Kept practical, not exhaustive — the ones people reach for.
 const ANSIBLE_VARS = [
+  // Preferred modern form: ansible_facts['name'] (top-level ansible_* fact vars
+  // are deprecated). `true` = preferred → sorted first in the completion list.
+  ["ansible_facts['hostname']", 'short hostname (preferred over ansible_hostname)', true],
+  ["ansible_facts['fqdn']", 'fully-qualified domain name', true],
+  ["ansible_facts['default_ipv4']['address']", 'primary IPv4 address', true],
+  ["ansible_facts['default_ipv4']['gateway']", 'default gateway', true],
+  ["ansible_facts['distribution']", 'e.g. Ubuntu, Rocky, Debian, Archlinux', true],
+  ["ansible_facts['distribution_version']", 'e.g. 22.04', true],
+  ["ansible_facts['distribution_major_version']", 'e.g. 22', true],
+  ["ansible_facts['os_family']", 'e.g. Debian, RedHat, Suse, Archlinux', true],
+  ["ansible_facts['architecture']", 'e.g. x86_64, aarch64', true],
+  ["ansible_facts['kernel']", 'running kernel version', true],
+  ["ansible_facts['processor_vcpus']", 'number of vCPUs', true],
+  ["ansible_facts['memtotal_mb']", 'total RAM in MB', true],
+  ["ansible_facts['pkg_mgr']", 'package manager, e.g. apt, dnf', true],
+  ["ansible_facts['service_mgr']", 'init system, e.g. systemd', true],
+  ["ansible_facts['python_version']", 'Python version on the target', true],
+  ["ansible_facts['date_time']['iso8601']", 'current time, ISO-8601', true],
+  ["ansible_facts['all_ipv4_addresses']", 'list of all IPv4 addresses', true],
+  // Legacy top-level fact vars (still work; kept for familiarity).
   ['ansible_hostname', 'short hostname of the target'],
   ['ansible_fqdn', 'fully-qualified domain name'],
   ['ansible_nodename', 'hostname as the OS reports it (uname -n)'],
@@ -98,9 +118,10 @@ function registerAnsible(monaco) {
       // Replace the whole dotted token so "ansible_default_ipv4." completes cleanly.
       const range = { startLineNumber: position.lineNumber, endLineNumber: position.lineNumber, startColumn: position.column - token.length, endColumn: position.column }
       return {
-        suggestions: ANSIBLE_VARS.map(([label, doc]) => ({
+        suggestions: ANSIBLE_VARS.map(([label, doc, pref]) => ({
           label, kind: monaco.languages.CompletionItemKind.Variable,
-          insertText: label, detail: 'Ansible variable', documentation: doc, range,
+          insertText: label, detail: pref ? 'Ansible fact (preferred)' : 'Ansible variable',
+          documentation: doc, range, sortText: (pref ? '0' : '1') + label,
         })),
       }
     },

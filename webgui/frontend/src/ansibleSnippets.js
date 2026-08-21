@@ -94,6 +94,24 @@ export const SNIPPET_GROUPS = [
     ],
   },
   {
+    group: 'Remove & teardown',
+    items: [
+      t('Remove packages (any distro)', 'remove uninstall package delete absent', `    - name: Remove packages\n      ansible.builtin.package:\n        name:\n          - your-package\n        state: absent\n      become: true\n`),
+      t('Remove packages (apt)', 'remove uninstall apt purge debian ubuntu', `    - name: Remove apt packages\n      ansible.builtin.apt:\n        name: [your-package]\n        state: absent\n        purge: true\n        autoremove: true\n      become: true\n`),
+      t('Remove packages (dnf)', 'remove uninstall dnf yum rocky fedora rhel', `    - name: Remove dnf packages\n      ansible.builtin.dnf:\n        name: [your-package]\n        state: absent\n        autoremove: true\n      become: true\n`),
+      t('Stop & disable a service', 'stop disable service systemd remove', `    - name: Stop and disable a service\n      ansible.builtin.service:\n        name: your-service\n        state: stopped\n        enabled: false\n      become: true\n`),
+      t('Mask a service', 'mask service systemd block', `    - name: Mask a service (block it from starting)\n      ansible.builtin.systemd:\n        name: your-service\n        masked: true\n      become: true\n`),
+      t('Remove a systemd unit', 'remove delete systemd unit service file', `    - name: Remove a systemd unit\n      ansible.builtin.file:\n        path: /etc/systemd/system/myapp.service\n        state: absent\n      become: true\n      notify: reload systemd\n`),
+      t('Delete a file or directory', 'remove delete file directory rm absent', `    - name: Remove a file or directory\n      ansible.builtin.file:\n        path: /etc/app/old.conf\n        state: absent\n      become: true\n`),
+      t('Remove a user', 'remove delete user account userdel', `    - name: Remove a user and their home\n      ansible.builtin.user:\n        name: olduser\n        state: absent\n        remove: true\n      become: true\n`),
+      t('Remove a group', 'remove delete group', `    - name: Remove a group\n      ansible.builtin.group:\n        name: oldgroup\n        state: absent\n      become: true\n`),
+      t('Remove a cron job', 'remove delete cron crontab', `    - name: Remove a cron job\n      ansible.builtin.cron:\n        name: "nightly backup"\n        state: absent\n      become: true\n`),
+      t('Remove an authorized SSH key', 'remove delete ssh key authorized', `    - name: Remove an authorized SSH key\n      ansible.posix.authorized_key:\n        user: deploy\n        key: "{{ lookup('file', 'files/id_ed25519.pub') }}"\n        state: absent\n      become: true\n`),
+      t('Remove an apt repository', 'remove delete apt repository ppa', `    - name: Remove an apt repository\n      ansible.builtin.apt_repository:\n        repo: "deb https://example.com/apt stable main"\n        state: absent\n      become: true\n`),
+      t('Unmount & remove from fstab', 'unmount remove umount fstab absent', `    - name: Unmount and drop the fstab entry\n      ansible.posix.mount:\n        path: /data\n        state: absent\n      become: true\n`),
+    ],
+  },
+  {
     group: 'Cron & Environment',
     items: [
       t('Cron job', 'cron schedule crontab', `    - name: Schedule a cron job\n      ansible.builtin.cron:\n        name: "nightly backup"\n        minute: "0"\n        hour: "2"\n        job: "/usr/local/bin/backup.sh"\n      become: true\n`),
