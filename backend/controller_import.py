@@ -157,42 +157,34 @@ def test_connection(controller_url: str, api_key: str):
     return {"ok": True, "agents": len(agents), "ssh": ssh, "total": len(agents) + ssh}
 
 
-def import_into_inventory(inventory_id: int, controller_url: str, api_key: str):
-    """Pull the Controller's agent + SSH hosts into an existing SLEP inventory.
-    Returns {imported, agents, ssh, skipped, total, errors}."""
-    inv = db.get_inventory(inventory_id)
-    if not inv:
-        raise ControllerImportError("Inventory not found.")
+def fetch_hosts(controller_url: str, api_key: str):
+    """Return the Controller's hosts as a normalized, importable list WITHOUT
+    writing anything — the console shows this so the operator can pick which hosts
+    go into which inventory. Each entry:
+      {name, address, groups, source: 'agent'|'ssh', variables}
+    Raises ControllerImportError only if it can't reach/authenticate at all."""
     if not api_key:
         raise ControllerImportError("Controller API key is required.")
     base = _normalize_base(controller_url)
+    out, errors = [], []
 
-    agents_n = ssh_n = skipped = 0
-    errors: list[str] = []
+    # agent-enrolled hosts (the primary listing; also validates the key)
+    data = _get(base, "/agents", api_key)
+    agents = data.get("agents", []) if isinstance(data, dict) else (data or [])
+    for a in agents:
+        name = str(a.get("hostname") or a.get("host_id") or "").strip()
+        address = str(a.get("ip") or a.get("address") or name).strip()
+        if not name or not address:
+            continue
+        out.append({
+            "name": name, "address": address,
+            "groups": str(a.get("environment") or ""), "source": "agent",
+            "variables": {"sysible_source": "agent",
+                          "sysible_host_id": a.get("host_id") or name,
+                          "sysible_platform": a.get("platform") or ""},
+        })
 
-    # --- agent-enrolled hosts (the primary listing) ---
-    try:
-        data = _get(base, "/agents", api_key)
-        agents = data.get("agents", []) if isinstance(data, dict) else (data or [])
-        for a in agents:
-            name = str(a.get("hostname") or a.get("host_id") or "").strip()
-            address = str(a.get("ip") or a.get("address") or name).strip()
-            if not name or not address:
-                skipped += 1
-                continue
-            db.upsert_host(
-                inventory_id, name=name, address=address,
-                groups=str(a.get("environment") or ""),
-                variables={"sysible_source": "agent",
-                           "sysible_host_id": a.get("host_id") or name,
-                           "sysible_platform": a.get("platform") or ""},
-                source="controller",
-            )
-            agents_n += 1
-    except ControllerImportError as e:
-        errors.append(f"agents: {e}")
-
-    # --- SSH-managed hosts (carry connection user/port → runnable) ---
+    # SSH-managed hosts (carry connection user/port → runnable)
     try:
         hosts = _get(base, "/remote/hosts", api_key, allow_404=True)
         if isinstance(hosts, dict):
@@ -202,25 +194,44 @@ def import_into_inventory(inventory_id: int, controller_url: str, api_key: str):
                 nm = str(name).strip()
                 address = str(h.get("ip") or nm).strip()
                 if not nm or not address:
-                    skipped += 1
                     continue
                 variables = {"sysible_source": "ssh"}
                 if h.get("user"):
                     variables["ansible_user"] = h["user"]
                 if h.get("port"):
                     variables["ansible_port"] = h["port"]
-                db.upsert_host(
-                    inventory_id, name=nm, address=address,
-                    groups=str(h.get("environment") or ""),
-                    variables=variables, source="controller",
-                )
-                ssh_n += 1
+                out.append({"name": nm, "address": address,
+                            "groups": str(h.get("environment") or ""),
+                            "source": "ssh", "variables": variables})
     except ControllerImportError as e:
         errors.append(f"ssh hosts: {e}")
 
+    return {"hosts": out, "errors": errors}
+
+
+def import_into_inventory(inventory_id: int, controller_url: str, api_key: str, only_names=None):
+    """Import the Controller's hosts into a SLEP inventory. `only_names` (a set/list
+    of host names) restricts the import to that selection — so the operator can send
+    different hosts to different inventories. Returns {imported, agents, ssh, total}."""
+    inv = db.get_inventory(inventory_id)
+    if not inv:
+        raise ControllerImportError("Inventory not found.")
+    fetched = fetch_hosts(controller_url, api_key)
+    wanted = set(only_names) if only_names is not None else None
+
+    agents_n = ssh_n = 0
+    for h in fetched["hosts"]:
+        if wanted is not None and h["name"] not in wanted:
+            continue
+        db.upsert_host(inventory_id, name=h["name"], address=h["address"],
+                       groups=h["groups"], variables=h["variables"], source="controller")
+        if h["source"] == "agent":
+            agents_n += 1
+        else:
+            ssh_n += 1
+
     total = agents_n + ssh_n
-    if total == 0 and errors:
-        # Nothing imported and something went wrong — surface it as a failure.
-        raise ControllerImportError("; ".join(errors))
+    if total == 0 and wanted is None and fetched["errors"]:
+        raise ControllerImportError("; ".join(fetched["errors"]))
     return {"imported": total, "agents": agents_n, "ssh": ssh_n,
-            "skipped": skipped, "total": total, "errors": errors}
+            "total": total, "skipped": 0, "errors": fetched["errors"]}

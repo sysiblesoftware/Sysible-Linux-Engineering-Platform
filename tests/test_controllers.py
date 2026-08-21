@@ -55,6 +55,33 @@ def test_connect_list_import_disconnect(client, monkeypatch):
     assert all(c["id"] != cid for c in client.get("/controllers").json()["controllers"])
 
 
+def test_list_hosts_and_selective_import_to_different_inventories(client, monkeypatch):
+    import backend.controller_import as ci
+    monkeypatch.setattr(ci.requests, "get", _fake_get({
+        "/agents": Resp(200, {"agents": [
+            {"hostname": "web1", "ip": "10.0.0.11", "environment": "web"},
+            {"hostname": "web2", "ip": "10.0.0.12", "environment": "web"}]}),
+        "/remote/hosts": Resp(200, {"db1": {"ip": "10.0.0.21", "user": "deploy", "environment": "db"}}),
+    }))
+    cid = client.post("/controllers", json={"name": "Prod", "base_url": "http://ctrl:9000", "api_key": "K"}).json()["controller"]["id"]
+
+    # List hosts WITHOUT importing.
+    hosts = client.get(f"/controllers/{cid}/hosts").json()["hosts"]
+    assert {h["name"] for h in hosts} == {"web1", "web2", "db1"}
+
+    # Route different hosts to different inventories.
+    web = client.post("/inventories", json={"name": "web-tier"}).json()["id"]
+    dbi = client.post("/inventories", json={"name": "db-tier"}).json()["id"]
+    r1 = client.post(f"/inventories/{web}/import-controller",
+                     json={"controller_id": cid, "host_names": ["web1", "web2"]}).json()
+    r2 = client.post(f"/inventories/{dbi}/import-controller",
+                     json={"controller_id": cid, "host_names": ["db1"]}).json()
+    assert r1["imported"] == 2 and r2["imported"] == 1
+
+    assert {h["name"] for h in client.get(f"/inventories/{web}/hosts").json()["hosts"]} == {"web1", "web2"}
+    assert {h["name"] for h in client.get(f"/inventories/{dbi}/hosts").json()["hosts"]} == {"db1"}
+
+
 def test_connect_rejects_bad_key(client, monkeypatch):
     import backend.controller_import as ci
     monkeypatch.setattr(ci.requests, "get", _fake_get({"/agents": Resp(401, None)}))

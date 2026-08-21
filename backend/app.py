@@ -617,10 +617,24 @@ def delete_host(hid: int, user: str = Depends(current_user)):
     return {"status": "deleted"}
 
 
+@app.get("/controllers/{cid}/hosts")
+def controller_hosts(cid: int, user: str = Depends(current_user)):
+    """List a connected Controller's hosts (agents + SSH) WITHOUT importing — the
+    console shows this so the operator can pick which hosts go to which inventory."""
+    ctrl = db.get_controller(cid, include_key=True)
+    if not ctrl:
+        raise HTTPException(status_code=404, detail="Controller connection not found.")
+    try:
+        return controller_import.fetch_hosts(ctrl["base_url"], ctrl["api_key"])
+    except controller_import.ControllerImportError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @app.post("/inventories/{iid}/import-controller")
 def import_controller(iid: int, body: dict = Body(...), user: str = Depends(current_user)):
-    """Pull hosts into this inventory from a Controller — either a saved one
-    (controller_id) or an ad-hoc controller_url + api_key."""
+    """Import hosts into this inventory from a Controller — either a saved one
+    (controller_id) or an ad-hoc controller_url + api_key. Pass `host_names` (a
+    list) to import only that selection; omit it to import everything."""
     cid = body.get("controller_id")
     if cid:
         ctrl = db.get_controller(int(cid), include_key=True)
@@ -629,8 +643,10 @@ def import_controller(iid: int, body: dict = Body(...), user: str = Depends(curr
         url, key = ctrl["base_url"], ctrl["api_key"]
     else:
         url, key = str(body.get("controller_url") or ""), str(body.get("api_key") or "")
+    names = body.get("host_names")
+    only = list(names) if isinstance(names, list) else None
     try:
-        summary = controller_import.import_into_inventory(iid, url, key)
+        summary = controller_import.import_into_inventory(iid, url, key, only_names=only)
     except controller_import.ControllerImportError as e:
         raise HTTPException(status_code=400, detail=str(e))
     if cid:

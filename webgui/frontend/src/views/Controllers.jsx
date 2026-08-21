@@ -104,36 +104,93 @@ function ConnectModal({ onClose, onDone }) {
   )
 }
 
+// Host-picker import: browse the Controller's hosts, check a subset, and add just
+// those to a chosen (or new) inventory. The modal stays open after each add so you
+// can route different hosts to different inventories in one sitting.
 function ImportModal({ ctrl, onClose, onDone }) {
+  const [hosts, setHosts] = useState(null)         // null = loading
+  const [sel, setSel] = useState(() => new Set())
+  const [q, setQ] = useState('')
   const [invs, setInvs] = useState([])
   const [inv, setInv] = useState('')
   const [newName, setNewName] = useState('')
   const [busy, setBusy] = useState(false)
-  const { wrap, node } = useErr()
-  useEffect(() => { api('inventories').then((d) => { setInvs(d.inventories); if (d.inventories[0]) setInv(String(d.inventories[0].id)) }) }, [])
+  const [flash, setFlash] = useState('')
+  const { wrap, node, setErr } = useErr()
+
+  const loadInvs = () => api('inventories').then((d) => { setInvs(d.inventories); if (!inv && d.inventories[0]) setInv(String(d.inventories[0].id)) })
+  useEffect(() => { loadInvs() }, [])
+  useEffect(() => {
+    api(`controllers/${ctrl.id}/hosts`).then((d) => setHosts(d.hosts || []))
+      .catch((e) => { setHosts([]); setErr(e.message) })
+  }, [ctrl.id])
+
+  const needle = q.trim().toLowerCase()
+  const shown = (hosts || []).filter((h) => !needle
+    || h.name.toLowerCase().includes(needle) || (h.address || '').includes(needle) || (h.groups || '').toLowerCase().includes(needle))
+  const toggle = (name) => setSel((s) => { const n = new Set(s); n.has(name) ? n.delete(name) : n.add(name); return n })
+  const allShownSelected = shown.length > 0 && shown.every((h) => sel.has(h.name))
+  const toggleAll = () => setSel((s) => {
+    const n = new Set(s)
+    if (allShownSelected) shown.forEach((h) => n.delete(h.name)); else shown.forEach((h) => n.add(h.name))
+    return n
+  })
+
+  const add = () => wrap(async () => {
+    if (sel.size === 0) throw new Error('Check one or more hosts first.')
+    setBusy(true)
+    try {
+      let iid = inv
+      let invName = invs.find((i) => String(i.id) === String(inv))?.name
+      if (inv === '__new') {
+        if (!newName.trim()) throw new Error('Name the new inventory.')
+        const created = await api('inventories', { method: 'POST', json: { name: newName.trim() } })
+        iid = created.id; invName = created.name
+        setNewName(''); await loadInvs(); setInv(String(iid))
+      }
+      const d = await api(`inventories/${iid}/import-controller`, { method: 'POST', json: { controller_id: ctrl.id, host_names: [...sel] } })
+      setFlash(`Added ${d.imported} host(s) to “${invName}”. Pick more for another inventory, or close.`)
+      setSel(new Set())
+      onDone()
+    } finally { setBusy(false) }
+  })
+
   return (
-    <Modal title={`Import hosts from ${ctrl.name}`} onClose={onClose}>
-      <div className="muted">Pulls the Controller’s agent + SSH hosts into the chosen inventory. Idempotent — re-importing refreshes, never duplicates.</div>
-      <Field label="Target inventory">
-        <select value={inv} onChange={(e) => setInv(e.target.value)}>
-          {invs.map((i) => <option key={i.id} value={i.id}>{i.name}</option>)}
-          <option value="__new">+ Create a new inventory…</option>
-        </select>
-      </Field>
-      {inv === '__new' && <Field label="New inventory name"><input value={newName} onChange={(e) => setNewName(e.target.value)} placeholder="e.g. imported-fleet" autoFocus /></Field>}
+    <Modal title={`Import hosts from ${ctrl.name}`} onClose={onClose} wide>
+      <div className="muted">Check the hosts you want, choose a target inventory, and add them. Route different hosts to different inventories — the list stays up after each add.</div>
+      {flash && <div className="ok-text" style={{ color: 'var(--ok,#63c869)', fontSize: 13 }}>{flash}</div>}
+
+      <div className="row" style={{ gap: 10, marginTop: 4 }}>
+        <input placeholder="Filter hosts — name, IP, group…" value={q} onChange={(e) => setQ(e.target.value)} style={{ flex: 1 }} />
+        <button className="ghost sm" onClick={toggleAll} disabled={shown.length === 0}>{allShownSelected ? 'Clear' : 'Select all'}</button>
+      </div>
+
+      <div style={{ maxHeight: '40vh', overflow: 'auto', border: '1px solid var(--line)', borderRadius: 8, marginTop: 8 }}>
+        {hosts === null ? <div className="muted" style={{ padding: 10 }}>Loading hosts…</div>
+          : shown.length === 0 ? <div className="muted" style={{ padding: 10 }}>No hosts{needle ? ' match your filter' : ' on this Controller'}.</div>
+            : shown.map((h) => (
+              <label key={h.name} className="row" style={{ gap: 10, padding: '7px 10px', borderBottom: '1px solid var(--line)', cursor: 'pointer' }}>
+                <input type="checkbox" checked={sel.has(h.name)} onChange={() => toggle(h.name)} style={{ width: 'auto' }} />
+                <b className="mono" style={{ fontSize: 13, minWidth: 140 }}>{h.name}</b>
+                <span className="muted mono" style={{ fontSize: 12 }}>{h.address}</span>
+                <div className="spacer" />
+                {h.groups && <span className="pill" style={{ fontSize: 11 }}>{h.groups}</span>}
+                <span className="faint" style={{ fontSize: 11 }}>{h.source}</span>
+              </label>
+            ))}
+      </div>
+
+      <div className="row" style={{ gap: 10, marginTop: 10, alignItems: 'flex-end' }}>
+        <Field label={`Add ${sel.size} selected to inventory`}>
+          <select value={inv} onChange={(e) => setInv(e.target.value)}>
+            {invs.map((i) => <option key={i.id} value={i.id}>{i.name}</option>)}
+            <option value="__new">+ Create a new inventory…</option>
+          </select>
+        </Field>
+        {inv === '__new' && <Field label="New inventory name"><input value={newName} onChange={(e) => setNewName(e.target.value)} placeholder="e.g. web-tier" autoFocus /></Field>}
+        <button className="primary" disabled={busy || sel.size === 0} onClick={add}>{busy ? 'Adding…' : `Add ${sel.size} →`}</button>
+      </div>
       {node}
-      <button className="primary" disabled={busy} onClick={() => wrap(async () => {
-        setBusy(true)
-        try {
-          let iid = inv
-          if (inv === '__new') { const created = await api('inventories', { method: 'POST', json: { name: newName || 'imported-fleet' } }); iid = created.id }
-          const d = await api(`inventories/${iid}/import-controller`, { method: 'POST', json: { controller_id: ctrl.id } })
-          let msg = `Imported ${d.imported} host(s): ${d.agents} agent + ${d.ssh} SSH`
-          if (d.skipped) msg += ` (${d.skipped} skipped)`
-          if (d.errors && d.errors.length) msg += `\n\nNote: ${d.errors.join('; ')}`
-          alert(msg); onDone()
-        } finally { setBusy(false) }
-      })}>{busy ? 'Importing…' : 'Import'}</button>
     </Modal>
   )
 }
