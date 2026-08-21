@@ -1,0 +1,226 @@
+#!/usr/bin/env bash
+# Sysible Linux Engineering Platform (SLEP) — management CLI.
+#
+# A thin, friendly wrapper around `docker compose` so an operator can update and
+# manage the running SLEP container without memorising docker invocations. It
+# drives the single `slep` service (container `sysible-slep`, image
+# `sysible-slep:latest`) defined in deploy/docker-compose.yml, and always
+# preserves the named `slep-data` volume — the SQLite DB, project files, run
+# logs, and TLS cert live there and must survive every rebuild.
+#
+# Usage: ./deploy/sysible-slep <command> [args]
+#        (run `sysible-slep help` for the full list)
+set -euo pipefail
+
+# --- Locate the compose file relative to THIS script -----------------------
+# Resolve from the script's own directory so the CLI works no matter what the
+# current working directory is (invoked as ./deploy/sysible-slep, from an
+# absolute path, or via a symlink on PATH).
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+COMPOSE_FILE="$SCRIPT_DIR/docker-compose.yml"
+
+SERVICE="slep"
+CONTAINER="sysible-slep"
+IMAGE="sysible-slep:latest"
+VOLUME="slep-data"
+CONSOLE_PORT="8810"
+
+# --- Colours (degrade gracefully when stdout isn't a TTY) ------------------
+# Only emit ANSI escapes when writing to a terminal, so piped/redirected output
+# (logs, CI, `| tee`) stays free of raw escape codes.
+if [[ -t 1 ]]; then
+  BOLD=$'\033[1m'; RED=$'\033[31m'; GREEN=$'\033[32m'
+  YELLOW=$'\033[33m'; CYAN=$'\033[36m'; RESET=$'\033[0m'
+else
+  BOLD=''; RED=''; GREEN=''; YELLOW=''; CYAN=''; RESET=''
+fi
+
+_hdr()  { printf '%s\n' "${BOLD}${CYAN}==> $*${RESET}"; }
+_ok()   { printf '%s\n' "${GREEN}$*${RESET}"; }
+_warn() { printf '%s\n' "${YELLOW}$*${RESET}" >&2; }
+_err()  { printf '%s\n' "${RED}ERROR: $*${RESET}" >&2; }
+_die()  { _err "$@"; exit 1; }
+
+# --- Detect the compose command (v2 plugin vs legacy binary) ---------------
+# Prefer `docker compose` (the v2 plugin); fall back to a standalone
+# `docker-compose`. Error clearly if docker itself, or any compose, is missing.
+DC=()
+_detect_compose() {
+  if ! command -v docker >/dev/null 2>&1; then
+    _die "docker is not installed or not on PATH. Install Docker Engine first: https://docs.docker.com/engine/install/"
+  fi
+  if docker compose version >/dev/null 2>&1; then
+    DC=(docker compose)
+  elif command -v docker-compose >/dev/null 2>&1; then
+    DC=(docker-compose)
+  else
+    _die "neither 'docker compose' (v2 plugin) nor 'docker-compose' (legacy) is available. Install the Compose plugin: https://docs.docker.com/compose/install/"
+  fi
+}
+
+# Run a compose subcommand against our compose file.
+dc() {
+  [[ ${#DC[@]} -gt 0 ]] || _detect_compose
+  [[ -f "$COMPOSE_FILE" ]] || _die "compose file not found at $COMPOSE_FILE"
+  "${DC[@]}" -f "$COMPOSE_FILE" "$@"
+}
+
+# --- Health probe ----------------------------------------------------------
+# Try HTTPS first (the console serves TLS by default with a self-signed cert, so
+# -k skips verification), then fall back to plain HTTP for SLEP_TLS=0 setups.
+_health() {
+  local url
+  for url in "https://localhost:${CONSOLE_PORT}/api/health" \
+             "http://localhost:${CONSOLE_PORT}/api/health"; do
+    if curl -fsk --max-time 5 "$url" >/dev/null 2>&1; then
+      _ok "  health: OK   ($url)"
+      return 0
+    fi
+  done
+  _warn "  health: '' (no response on ${CONSOLE_PORT} — the console may still be starting, or TLS/port differs)"
+  return 1
+}
+
+# =========================================================
+# Subcommands
+# =========================================================
+
+cmd_update() {
+  _hdr "Updating SLEP"
+  # 1) Refresh the code if this is a git checkout; a plain tarball install has no
+  #    .git, so skip cleanly with a note rather than failing.
+  if [[ -d "$SCRIPT_DIR/../.git" ]] && command -v git >/dev/null 2>&1; then
+    _hdr "Pulling latest code (git)"
+    git -C "$SCRIPT_DIR/.." pull --ff-only
+  else
+    _warn "Not a git checkout (no .git) — skipping 'git pull'; rebuilding the code already present."
+  fi
+
+  # 2) Rebuild the image and restart in place. `up -d --build` recreates only the
+  #    container; the named slep-data volume is untouched (never `down -v`).
+  _hdr "Rebuilding + restarting the container"
+  dc up -d --build
+
+  _hdr "New state"
+  dc ps
+  _health || true
+}
+
+cmd_status() {
+  _hdr "Container status"
+  dc ps
+  _hdr "Console health"
+  _health || true
+}
+
+cmd_logs() {
+  # Follow logs; pass through any extra args (e.g. a different --tail, or a
+  # service name). Defaults to the last 200 lines.
+  dc logs -f --tail=200 "$@"
+}
+
+cmd_restart() {
+  _hdr "Restarting SLEP"
+  dc restart
+  dc ps
+}
+
+cmd_start() {
+  _hdr "Starting SLEP"
+  dc up -d
+  dc ps
+  _health || true
+}
+
+cmd_stop() {
+  # Stop the container but keep it (and the volume) around — this is NOT `down`,
+  # so nothing is removed and slep-data is preserved.
+  _hdr "Stopping SLEP"
+  dc stop
+  _ok "Stopped. Data volume '$VOLUME' is preserved. Start again with: $(basename "$0") start"
+}
+
+cmd_backup() {
+  # Stream the entire slep-data volume (SQLite DB, project files, run logs, TLS
+  # cert) into a timestamped tarball in the CURRENT directory, using a throwaway
+  # alpine container so no host-side tar/DB tooling is required. Read-only mount
+  # of the data volume; the volume is never modified.
+  [[ ${#DC[@]} -gt 0 ]] || _detect_compose  # ensures docker exists
+  local stamp file
+  stamp="$(date +%Y%m%d-%H%M%S)"
+  file="slep-backup-${stamp}.tgz"
+  _hdr "Backing up volume '$VOLUME' -> $PWD/$file"
+  docker run --rm \
+    -v "${VOLUME}:/data:ro" \
+    -v "$PWD:/backup" \
+    alpine tar czf "/backup/${file}" -C /data .
+  _ok "Backup written: $PWD/$file"
+}
+
+cmd_version() {
+  _hdr "Version"
+  printf '  image:   %s\n' "$IMAGE"
+  # Image ID + creation date if the image has been built locally.
+  local img_id
+  img_id="$(docker image inspect --format '{{.Id}} (built {{.Created}})' "$IMAGE" 2>/dev/null || true)"
+  [[ -n "$img_id" ]] && printf '  built:   %s\n' "$img_id" || printf '  built:   (image not present locally — run: %s update)\n' "$(basename "$0")"
+
+  # Git short SHA if this is a checkout.
+  if [[ -d "$SCRIPT_DIR/../.git" ]] && command -v git >/dev/null 2>&1; then
+    local sha
+    sha="$(git -C "$SCRIPT_DIR/.." rev-parse --short HEAD 2>/dev/null || echo unknown)"
+    printf '  git:     %s\n' "$sha"
+  else
+    printf '  git:     (not a git checkout)\n'
+  fi
+}
+
+usage() {
+  cat <<EOF
+${BOLD}sysible-slep${RESET} — manage the Sysible Linux Engineering Platform container
+
+${BOLD}Usage:${RESET} $(basename "$0") <command> [args]
+
+${BOLD}Commands:${RESET}
+  ${CYAN}update${RESET}    Pull latest code (if a git checkout), rebuild the image, and
+              restart in place. Preserves the ${VOLUME} data volume.
+  ${CYAN}status${RESET}    Show container status and probe the console health endpoint.
+  ${CYAN}logs${RESET}      Follow container logs (last 200 lines; extra args passed through).
+  ${CYAN}restart${RESET}   Restart the running container.
+  ${CYAN}start${RESET}     Start the container (docker compose up -d).
+  ${CYAN}stop${RESET}      Stop the container — data volume is kept intact.
+  ${CYAN}backup${RESET}    Write a timestamped tarball of the ${VOLUME} volume to the
+              current directory (slep-backup-<stamp>.tgz).
+  ${CYAN}version${RESET}   Print the running image and git short SHA (if available).
+  ${CYAN}help${RESET}      Show this help.
+
+The console listens on https://localhost:${CONSOLE_PORT} by default.
+EOF
+}
+
+# =========================================================
+# Dispatch
+# =========================================================
+main() {
+  local cmd="${1:-help}"
+  [[ $# -gt 0 ]] && shift || true
+  case "$cmd" in
+    update)  cmd_update ;;
+    status)  cmd_status ;;
+    logs)    cmd_logs "$@" ;;
+    restart) cmd_restart ;;
+    start)   cmd_start ;;
+    stop)    cmd_stop ;;
+    backup)  cmd_backup ;;
+    version) cmd_version ;;
+    help|-h|--help) usage ;;
+    *)
+      _err "unknown command: $cmd"
+      echo >&2
+      usage >&2
+      exit 1
+      ;;
+  esac
+}
+
+main "$@"

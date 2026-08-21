@@ -10,6 +10,21 @@ docker compose -f deploy/docker-compose.yml up -d --build
 # open https://localhost:8810 and create your admin on the first-run screen
 ```
 
+### Managing / updating
+
+A small management CLI (`deploy/sysible-slep`) wraps the docker commands so you
+don't have to remember them. To pull the latest code and rebuild + restart the
+container in place (the `slep-data` volume is always preserved):
+
+```sh
+./deploy/sysible-slep update
+```
+
+Other commands: `status` (container state + console health probe), `logs`,
+`restart`, `start`, `stop`, `backup` (timestamped tarball of the data volume in
+the current dir), and `version`. Run `./deploy/sysible-slep help` for the full
+list.
+
 ### HTTPS / TLS
 
 The console is served over **HTTPS** by default with a **self-signed** certificate,
