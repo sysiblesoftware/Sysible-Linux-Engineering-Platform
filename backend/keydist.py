@@ -176,11 +176,33 @@ def _key_cmd(bastion: str, keyfile: str, target: str, remote: str) -> list[str]:
     return ["ssh", *opts, target, remote]
 
 
-def _err_line(r) -> str:
-    """The most informative one-line reason from a failed SSH — last non-empty
-    stderr/stdout line, or the exit code when the process said nothing."""
+def _friendly_err(raw: str, has_bastion: bool) -> str:
+    """Translate a raw SSH failure into a short, plain-English reason."""
+    low = (raw or "").lower()
+    if "connection closed by unknown" in low or "channel .* open failed" in low:
+        return ("jump host reached it, but the tunnel closed before login — the target likely "
+                "has SSH off or the jump host can't route to it") if has_bastion else \
+               "the host closed the connection before login (SSH may be off)"
+    if "permission denied" in low:
+        return "login refused — key not installed yet, or wrong username/password"
+    if "connection timed out" in low or "operation timed out" in low or "timed out" in low:
+        return "no response — host down, firewalled, or wrong address"
+    if "connection refused" in low:
+        return "connection refused — nothing is listening on SSH (port 22)"
+    if "no route to host" in low or "network is unreachable" in low:
+        return "no network route to the host"
+    if "could not resolve" in low or "name or service not known" in low:
+        return "address didn't resolve"
+    if "host key verification failed" in low:
+        return "host key check failed"
+    return (raw or "").strip() or "unknown error"
+
+
+def _err_line(r, has_bastion: bool = False) -> str:
+    """A short, human reason from a failed SSH — the raw last line translated."""
     lines = [ln for ln in (r.stderr or r.stdout or "").splitlines() if ln.strip()]
-    return lines[-1].strip() if lines else f"ssh exited {r.returncode}"
+    raw = lines[-1].strip() if lines else f"ssh exited {r.returncode}"
+    return _friendly_err(raw, has_bastion)
 
 
 def _install_cmd(pubkey: str) -> str:
@@ -225,7 +247,7 @@ def _run_distribute(inventory_id: int, only: set, username: str, password: str, 
                     if rb.returncode == 0 and "SLEP_KEY_OK" in rb.stdout:
                         emit("   ✓ jump host ready — targets will hop through it with the key")
                     else:
-                        emit(f"   ✗ jump host {bastion}: {_err_line(rb)}")
+                        emit(f"   ✗ jump host {bastion}: {_err_line(rb, has_bastion=False)}")
                         emit("!! Can't reach targets until the jump host accepts the key. Check the "
                              "jump host address / password and try again.")
                         return
@@ -245,7 +267,7 @@ def _run_distribute(inventory_id: int, only: set, username: str, password: str, 
                 if r.returncode == 0 and "SLEP_KEY_OK" in r.stdout:
                     emit(f"   ✓ key installed on {h['name']}"); ok_hosts.append(h["name"])
                 else:
-                    emit(f"   ✗ {h['name']}: {_err_line(r)}")
+                    emit(f"   ✗ {h['name']}: {_err_line(r, has_bastion=bool(hop))}")
                     fail_hosts.append(h["name"])
             emit("")
             if ok_hosts:
@@ -306,7 +328,7 @@ def _run_prepare_bastion(key: str, bastion: str, password: str):
                 emit("")
                 emit("== Jump host ready — runs and key distribution now hop through it with the key ==")
             else:
-                emit(f"   ✗ {bastion}: {_err_line(r)}")
+                emit(f"   ✗ {bastion}: {_err_line(r, has_bastion=False)}")
         except subprocess.TimeoutExpired:
             emit(f"   ✗ timed out connecting to {bastion}")
         except Exception as e:  # noqa: BLE001
@@ -389,7 +411,7 @@ def _run_test(key: str, inventory_id: int, only: set, credential_id, bastion: st
                 if r.returncode == 0 and "SLEP_CONN_OK" in r.stdout:
                     emit(f"   ✓ {h['name']} ({target}) — reachable"); reachable.append(h["name"])
                 else:
-                    emit(f"   ✗ {h['name']} ({target}) — {_err_line(r)}")
+                    emit(f"   ✗ {h['name']} ({target}) — {_err_line(r, has_bastion=bool(hop))}")
                     unreachable.append(h["name"])
             emit("")
             emit(f"== {len(reachable)} reachable, {len(unreachable)} unreachable ==")

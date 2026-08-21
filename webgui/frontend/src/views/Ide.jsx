@@ -222,17 +222,17 @@ export default function Ide({ project, onBack, onRun }) {
         <button className="ghost sm" onClick={onBack}>← Projects</button>
         <h2 style={{ margin: 0 }}>{project.name}</h2><span className="muted">{project.slug}</span>
         <div className="spacer" />
-        <button className="ghost sm" onClick={() => setNewOpen(true)}>+ File</button>
+        <button className="ghost sm" onClick={() => setNewOpen(true)}>Add File</button>
         {snip.engine === 'ansible' && (
           <button className="ghost sm" onClick={() => setPlayOpen(true)} disabled={path == null}
-            title="Wrap this file in a play, or insert a play header (hosts, become, tasks)">+ Play</button>
+            title="Wrap this file in a play, or insert a play header (hosts, become, tasks)">Add Play</button>
         )}
         {snip.engine === 'ansible' && (
           <button className="ghost sm" onClick={() => setCollOpen(true)}
             title="Install the Ansible Galaxy collections the modules need (community.general, ansible.posix, …)">Collections</button>
         )}
         <button className="ghost sm" onClick={() => setTaskOpen(true)} disabled={path == null}
-          title={`Insert a ready-made ${snip.engine} ${snip.verb.toLowerCase()} at the cursor`}>+ {snip.verb}</button>
+          title={`Insert a ready-made ${snip.engine} ${snip.verb.toLowerCase()} at the cursor`}>Add {snip.verb}</button>
         <button className="ghost sm" onClick={save} disabled={path == null}>{saved ? 'Saved' : 'Save'}</button>
         <button className="primary sm" onClick={() => setRunOpen(true)}>▶ Run</button>
       </div>

@@ -153,6 +153,36 @@ function useLogStream() {
   return { log, running, run }
 }
 
+// Render a streamed SSH-action log as a readable report: bold section headers,
+// green ✓ / red ✗ per-host rows (host in strong text, reason muted), dim
+// progress and notes. Falls back to a placeholder when empty.
+function JobLog({ text, empty }) {
+  if (!text) return <div className="job-log empty">{empty}</div>
+  const rows = text.split('\n').map((raw, i) => {
+    const t = raw.replace(/\s+$/, '')
+    if (!t.trim()) return <div key={i} style={{ height: 6 }} />
+    const bare = t.trim()
+    if (/^==.*==$/.test(bare)) return <div key={i} className="jl-head">{bare.replace(/^=+\s*|\s*=+$/g, '')}</div>
+    if (bare.startsWith('→')) return <div key={i} className="jl-prog">{bare.replace(/^→\s*/, '')}</div>
+    if (bare.startsWith('--')) return <div key={i} className="jl-note">{bare.replace(/^--\s*/, '')}</div>
+    if (bare.startsWith('Tip:') || bare.startsWith('!!')) return <div key={i} className="jl-tip">{bare.replace(/^!!\s*/, '')}</div>
+    const ok = bare.includes('✓'), bad = bare.includes('✗')
+    if (ok || bad) {
+      const body = bare.replace(/^.*?[✓✗]\s*/, '')
+      const m = body.match(/^(.*?)(?:\s+—\s+|:\s+)(.*)$/)
+      const host = m ? m[1] : body, reason = m ? m[2] : ''
+      return (
+        <div key={i} className={ok ? 'jl-ok' : 'jl-bad'}>
+          <span className="jl-ico">{ok ? '✓' : '✗'}</span>
+          <b>{host}</b>{reason && <span className="jl-reason">— {reason}</span>}
+        </div>
+      )
+    }
+    return <div key={i} className="jl-line">{bare}</div>
+  })
+  return <div className="job-log">{rows}</div>
+}
+
 // Test SSH reachability of the inventory's hosts with a chosen credential (or
 // SLEP's managed key), through the jump host. Read-only — just a per-host verdict.
 function TestConnection({ inv, hosts, onClose }) {
@@ -207,7 +237,7 @@ function TestConnection({ inv, hosts, onClose }) {
         </div>
         <div className="job-col">
           <div className="pane-title">Result</div>
-          <pre className={'job-log' + (log ? '' : ' empty')}>{log || 'The per-host result appears here when you test.'}</pre>
+          <JobLog text={log} empty="The per-host result appears here when you test." />
         </div>
       </div>
     </Modal>
@@ -245,7 +275,7 @@ function PrepareBastion({ inv, onClose }) {
         </div>
         <div className="job-col">
           <div className="pane-title">Progress</div>
-          <pre className={'job-log' + (log ? '' : ' empty')}>{log || 'Progress appears here when you start.'}</pre>
+          <JobLog text={log} empty="Progress appears here when you start." />
         </div>
       </div>
     </Modal>
@@ -322,7 +352,7 @@ function DistributeKey({ inv, hosts, onClose }) {
         </div>
         <div className="job-col">
           <div className="pane-title">Progress</div>
-          <pre className={'job-log' + (log ? '' : ' empty')}>{log || 'The per-host log appears here when you start.'}</pre>
+          <JobLog text={log} empty="The per-host log appears here when you start." />
         </div>
       </div>
     </Modal>

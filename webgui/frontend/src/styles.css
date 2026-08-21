@@ -109,6 +109,18 @@ th{color:var(--muted);font-weight:600;font-size:12px}
 .job-log{background:#0a0c10;border:1px solid var(--line);border-radius:8px;padding:10px;
   font:12px/1.5 ui-monospace,Menlo,monospace;white-space:pre-wrap;overflow:auto;height:100%;min-height:260px;max-height:64vh;color:#d7dde7}
 .job-log.empty{display:flex;align-items:center;justify-content:center;color:var(--faint)}
+.jl-head{font-weight:700;color:var(--text);margin:10px 0 4px;font-size:12.5px}
+.jl-head:first-child{margin-top:0}
+.jl-prog{color:var(--muted)}
+.jl-note{color:var(--faint)}
+.jl-tip{color:var(--accent2);margin-top:8px}
+.jl-line{color:#d7dde7}
+.jl-ok,.jl-bad{display:flex;gap:7px;align-items:baseline;padding:1px 0}
+.jl-ok .jl-ico{color:var(--ok)}
+.jl-bad .jl-ico{color:var(--danger)}
+.jl-ico{flex:0 0 auto;width:12px}
+.jl-ok b,.jl-bad b{color:var(--text);font-weight:600}
+.jl-reason{color:var(--muted)}
 .modal-bg{position:fixed;inset:0;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;z-index:50}
 .modal{width:min(520px,92vw);max-height:88vh;overflow:auto}
 .modal.wide{width:min(760px,94vw)}
