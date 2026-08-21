@@ -1,0 +1,179 @@
+"""Distribute SLEP's SSH key to a fleet.
+
+SLEP runs reach hosts over SSH. Password auth works, but keeping a password in a
+credential is clumsy and less safe than a key. This module lets the operator, in
+one action, push SLEP's own public key onto a set of hosts — authenticating that
+one time with the host password (through the inventory's jump host if it has one)
+— and then auto-creates a key credential so every future run is key-based.
+
+Mechanics, deliberately simple and portable:
+  * A single SLEP-managed ed25519 keypair lives at DATA_DIR/ssh/ (0600). It is
+    generated once and reused, so every host trusts the same key.
+  * For each host we open one SSH session (sshpass feeds the password via the
+    SSHPASS env var, never argv) and append the public key to the host user's
+    ~/.ssh/authorized_keys — idempotently (grep -qxF guard), creating ~/.ssh with
+    umask 077. No sudo needed: it's the login user's own home.
+  * On success we upsert a credential ("SLEP managed key") holding the private
+    key, so the operator can pick it for runs immediately.
+
+Progress streams to DATA_DIR/keydist/<inventory_id>.log, tailed by the console
+exactly like an engine-install or run log.
+"""
+from __future__ import annotations
+
+import os
+import shutil
+import subprocess
+import threading
+import time
+from pathlib import Path
+
+from . import db
+
+_CRED_NAME = "SLEP managed key"
+_lock = threading.Lock()
+_state: dict[int, dict] = {}   # inventory_id -> {status, started}
+
+
+def _ssh_dir() -> Path:
+    d = db.DATA_DIR / "ssh"
+    d.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(d, 0o700)
+    except OSError:
+        pass
+    return d
+
+
+def _key_paths() -> tuple[Path, Path]:
+    d = _ssh_dir()
+    return d / "slep_ed25519", d / "slep_ed25519.pub"
+
+
+def ensure_key() -> str:
+    """Generate the SLEP managed keypair if absent; return the public key text."""
+    priv, pub = _key_paths()
+    if not priv.exists() or not pub.exists():
+        keygen = shutil.which("ssh-keygen")
+        if not keygen:
+            raise RuntimeError("ssh-keygen is not available in this image.")
+        # -N '' → no passphrase (unattended runs); -C labels the key.
+        subprocess.run([keygen, "-t", "ed25519", "-N", "", "-C", "slep-managed",
+                        "-f", str(priv)], capture_output=True, text=True, check=True)
+        try:
+            os.chmod(priv, 0o600)
+        except OSError:
+            pass
+    return pub.read_text().strip()
+
+
+def public_key() -> str:
+    priv, pub = _key_paths()
+    return pub.read_text().strip() if pub.exists() else ""
+
+
+def _log_path(inventory_id: int) -> Path:
+    d = db.DATA_DIR / "keydist"
+    d.mkdir(parents=True, exist_ok=True)
+    return d / f"{inventory_id}.log"
+
+
+def distribute_log(inventory_id: int, offset: int = 0):
+    p = _log_path(inventory_id)
+    if not p.exists():
+        return "", 0
+    data = p.read_bytes()
+    return data[offset:].decode("utf-8", "replace"), len(data)
+
+
+def is_running(inventory_id: int) -> bool:
+    return _state.get(inventory_id, {}).get("status") == "running"
+
+
+def start_distribute(inventory_id: int, host_names, username: str, password: str, bastion: str = ""):
+    """Kick off key distribution on a background thread. `host_names` restricts to
+    a selection (None/empty = every host in the inventory)."""
+    if not username:
+        raise ValueError("An SSH username is required.")
+    if not password:
+        raise ValueError("The host password is required to install the key the first time.")
+    inv = db.get_inventory(inventory_id)
+    if not inv:
+        raise ValueError("Inventory not found.")
+    with _lock:
+        if is_running(inventory_id):
+            return
+        _state[inventory_id] = {"status": "running", "started": time.time()}
+    threading.Thread(target=_run_distribute,
+                     args=(inventory_id, set(host_names or []), username, password, bastion or (inv.get("bastion") or "")),
+                     daemon=True).start()
+
+
+def _ssh_base(bastion: str) -> list[str]:
+    args = ["ssh", "-o", "StrictHostKeyChecking=accept-new",
+            "-o", "PasswordAuthentication=yes",
+            "-o", "PubkeyAuthentication=no",             # force the password leg
+            "-o", "ConnectTimeout=15"]
+    if bastion:
+        args += ["-o", f"ProxyJump={bastion}"]
+    return args
+
+
+def _install_cmd(pubkey: str) -> str:
+    # Append the key idempotently to the login user's authorized_keys.
+    safe = pubkey.replace("'", "'\\''")
+    return ("umask 077; mkdir -p ~/.ssh; touch ~/.ssh/authorized_keys; "
+            f"grep -qxF '{safe}' ~/.ssh/authorized_keys || echo '{safe}' >> ~/.ssh/authorized_keys; "
+            "echo SLEP_KEY_OK")
+
+
+def _run_distribute(inventory_id: int, only: set, username: str, password: str, bastion: str):
+    log = _log_path(inventory_id)
+    ok_hosts, fail_hosts = [], []
+    with log.open("w", buffering=1) as f:
+        def emit(m):
+            f.write(m if m.endswith("\n") else m + "\n"); f.flush()
+        try:
+            pubkey = ensure_key()
+            hosts = db.list_hosts(inventory_id)
+            if only:
+                hosts = [h for h in hosts if h["name"] in only]
+            if not hosts:
+                emit("!! No hosts selected — nothing to do."); return
+            emit(f"== Distributing SLEP key to {len(hosts)} host(s) as {username}"
+                 + (f" via jump host {bastion}" if bastion else "") + " ==")
+            emit(f"-- key: {pubkey.split()[0]} …{pubkey.split()[-1][-12:]}")
+            emit("")
+            sshpass = shutil.which("sshpass")
+            if not sshpass:
+                emit("!! sshpass is not available in this image — cannot feed the password."); return
+            remote = _install_cmd(pubkey)
+            env = dict(os.environ, SSHPASS=password)
+            for h in hosts:
+                target = f"{username}@{h['address']}"
+                emit(f"→ {h['name']} ({target}) …")
+                cmd = [sshpass, "-e", *_ssh_base(bastion), target, remote]
+                try:
+                    r = subprocess.run(cmd, capture_output=True, text=True, timeout=60, env=env)
+                except subprocess.TimeoutExpired:
+                    emit(f"   ✗ timed out connecting to {h['name']}"); fail_hosts.append(h["name"]); continue
+                if r.returncode == 0 and "SLEP_KEY_OK" in r.stdout:
+                    emit(f"   ✓ key installed on {h['name']}"); ok_hosts.append(h["name"])
+                else:
+                    detail = (r.stderr or r.stdout or "").strip().splitlines()
+                    emit(f"   ✗ {h['name']}: {(detail[-1] if detail else 'unknown error')}")
+                    fail_hosts.append(h["name"])
+            emit("")
+            if ok_hosts:
+                cid = db.upsert_credential(_CRED_NAME, kind="ssh", username=username,
+                                           secret=_key_paths()[0].read_text())
+                emit(f"== {len(ok_hosts)} succeeded, {len(fail_hosts)} failed ==")
+                emit(f"Credential “{_CRED_NAME}” (id {cid}) is ready — pick it for key-based runs.")
+            else:
+                emit(f"== 0 succeeded, {len(fail_hosts)} failed — no credential created ==")
+        except Exception as e:  # noqa: BLE001 — surface any failure into the log
+            emit(f"!! key distribution failed: {e}")
+        finally:
+            with _lock:
+                _state[inventory_id] = {"status": "done" if ok_hosts else "failed",
+                                        "ok": len(ok_hosts), "failed": len(fail_hosts)}

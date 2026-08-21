@@ -1,5 +1,5 @@
-import React, { useEffect, useState } from 'react'
-import { api } from '../api.js'
+import React, { useEffect, useRef, useState } from 'react'
+import { api, tail } from '../api.js'
 import { Field, Modal, useErr } from '../ui.jsx'
 
 export default function Inventories() {
@@ -58,6 +58,8 @@ function InventoryDetail({ inv, onBack, onChanged }) {
         <div className="spacer" />
         <button className="ghost sm" onClick={() => setModal('bastion')}>{inv.bastion ? 'Jump host' : '+ Jump host'}</button>
         <button className="ghost sm" onClick={() => setModal('import')}>Import from Controller</button>
+        <button className="ghost sm" disabled={hosts.length === 0}
+          title="Install SLEP's SSH key on these hosts so runs are key-based" onClick={() => setModal('keydist')}>🔑 Distribute SSH key</button>
         <button className="ghost sm" onClick={() => setModal('host')}>+ Host</button>
         <button className="danger ghost sm" onClick={async () => { if (confirm('Delete inventory ' + inv.name + '?')) { await api('inventories/' + inv.id, { method: 'DELETE' }); onChanged() } }}>Delete</button>
       </div>
@@ -77,6 +79,7 @@ function InventoryDetail({ inv, onBack, onChanged }) {
       {modal === 'host' && <AddHost inv={inv} onClose={() => setModal(null)} onDone={() => { setModal(null); load(); onChanged() }} />}
       {modal === 'import' && <ImportController inv={inv} onClose={() => setModal(null)} onDone={() => { setModal(null); load(); onChanged() }} />}
       {modal === 'bastion' && <SetBastion inv={inv} onClose={() => setModal(null)} onDone={() => { setModal(null); onChanged() }} />}
+      {modal === 'keydist' && <DistributeKey inv={inv} hosts={hosts} onClose={() => setModal(null)} />}
       </div>
     </div>
   )
@@ -120,6 +123,79 @@ function AddHost({ inv, onClose, onDone }) {
       <Field label="Groups (comma-separated)"><input value={groups} onChange={(e) => setGroups(e.target.value)} /></Field>
       {node}
       <button className="primary" onClick={() => wrap(async () => { await api(`inventories/${inv.id}/hosts`, { method: 'POST', json: { name, address, groups } }); onDone() })}>Add</button>
+    </Modal>
+  )
+}
+
+// Push SLEP's managed public key onto the inventory's hosts, authenticating once
+// with the host password (through the jump host if set). On success SLEP creates
+// a "SLEP managed key" credential so future runs are key-based — no stored
+// password. Streams the per-host progress log live.
+function DistributeKey({ inv, hosts, onClose }) {
+  const [username, setUsername] = useState('')
+  const [password, setPassword] = useState('')
+  const [bastion, setBastion] = useState(inv.bastion || '')
+  const [sel, setSel] = useState(() => new Set(hosts.map((h) => h.name)))
+  const [pubkey, setPubkey] = useState('')
+  const [running, setRunning] = useState(false)
+  const [log, setLog] = useState('')
+  const timer = useRef(null)
+  const { wrap, node } = useErr()
+
+  useEffect(() => { api('keydist/public-key').then((d) => setPubkey(d.public_key || '')).catch(() => {}) }, [])
+  useEffect(() => () => { if (timer.current) clearInterval(timer.current) }, [])
+
+  const toggle = (name) => setSel((s) => { const n = new Set(s); n.has(name) ? n.delete(name) : n.add(name); return n })
+
+  const poll = () => {
+    let off = 0
+    const tick = async () => {
+      const { text, next, status } = await tail(`inventories/${inv.id}/distribute-key/log?offset=${off}`)
+      if (text) { off = next; setLog((l) => l + text) }
+      if (status !== 'running') { clearInterval(timer.current); timer.current = null; setRunning(false) }
+    }
+    timer.current = setInterval(tick, 900); tick()
+  }
+
+  const start = () => wrap(async () => {
+    if (!username.trim()) throw new Error('Enter the SSH username for these hosts.')
+    if (!password) throw new Error('Enter the host password (used once to install the key).')
+    if (sel.size === 0) throw new Error('Select at least one host.')
+    setLog(''); setRunning(true)
+    await api(`inventories/${inv.id}/distribute-key`, { method: 'POST', json: {
+      username: username.trim(), password, bastion: bastion.trim(), host_names: [...sel] } })
+    poll()
+  })
+
+  return (
+    <Modal title={`Distribute SSH key — ${inv.name}`} onClose={onClose} wide>
+      <div className="muted">SLEP installs its own key on the selected hosts, authenticating once with the password below (through the jump host if set). After that, runs use the key — no stored password. The password is used for this action only; it is never saved.</div>
+      {pubkey && <div className="mono faint" style={{ fontSize: 11, wordBreak: 'break-all', margin: '6px 0' }}>{pubkey}</div>}
+
+      <div className="row" style={{ gap: 10 }}>
+        <Field label="SSH username"><input value={username} autoComplete="off" onChange={(e) => setUsername(e.target.value)} placeholder="e.g. admin" autoFocus /></Field>
+        <Field label="Host password (used once)"><input type="password" value={password} autoComplete="off" onChange={(e) => setPassword(e.target.value)} /></Field>
+      </div>
+      <Field label="Jump host (optional)"><input value={bastion} onChange={(e) => setBastion(e.target.value)} placeholder="user@192.168.8.212" /></Field>
+
+      <div className="faint" style={{ fontSize: 12, margin: '4px 2px' }}>{sel.size} of {hosts.length} host(s) selected</div>
+      <div style={{ maxHeight: '22vh', overflow: 'auto', border: '1px solid var(--line)', borderRadius: 8 }}>
+        {hosts.map((h) => (
+          <label key={h.id} className="row" style={{ gap: 10, padding: '5px 10px', borderBottom: '1px solid var(--line)', cursor: 'pointer' }}>
+            <input type="checkbox" checked={sel.has(h.name)} onChange={() => toggle(h.name)} style={{ width: 'auto' }} />
+            <b className="mono" style={{ fontSize: 12, minWidth: 130 }}>{h.name}</b>
+            <span className="muted mono" style={{ fontSize: 12 }}>{h.address}</span>
+          </label>
+        ))}
+      </div>
+
+      {node}
+      {log && <pre className="log" style={{ marginTop: 8, maxHeight: '26vh' }}>{log}</pre>}
+      <div className="row" style={{ marginTop: 8 }}>
+        <div className="spacer" />
+        <button className="ghost" onClick={onClose}>{running ? 'Close (keeps running)' : 'Close'}</button>
+        <button className="primary" disabled={running} onClick={start}>{running ? 'Distributing…' : `Install key on ${sel.size} host(s)`}</button>
+      </div>
     </Modal>
   )
 }

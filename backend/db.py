@@ -618,6 +618,23 @@ def create_credential(name, kind="ssh", username="", secret=""):
         return cur.lastrowid
 
 
+def upsert_credential(name, kind="ssh", username="", secret=""):
+    """Create a credential, or refresh an existing one with the same name in place
+    (keeping its id, so runs already pointing at it keep working). Used by the
+    'distribute SSH key' flow to (re)publish the SLEP managed key credential."""
+    with _connect() as c:
+        row = c.execute("SELECT id FROM credentials WHERE name=?", (name,)).fetchone()
+        if row:
+            c.execute("UPDATE credentials SET kind=?, username=?, secret=? WHERE id=?",
+                      (kind, username, secret, row["id"]))
+            return row["id"]
+        cur = c.execute(
+            "INSERT INTO credentials(name,kind,username,secret,created) VALUES(?,?,?,?,?)",
+            (name, kind, username, secret, _now()),
+        )
+        return cur.lastrowid
+
+
 def delete_credential(cid: int):
     with _connect() as c:
         c.execute("DELETE FROM credentials WHERE id=?", (cid,))

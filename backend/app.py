@@ -27,7 +27,7 @@ from contextlib import asynccontextmanager
 from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse
 
-from . import controller_import, db, engines, infra, policy, vault
+from . import controller_import, db, engines, infra, keydist, policy, vault
 from .runners import ansible_runner, salt_runner, terraform_runner
 
 # Engine name -> runner.launch(run_id). Each runs to completion on a thread.
@@ -939,6 +939,41 @@ def collections_install_log(offset: int = 0, user: str = Depends(current_user)):
     install_status = "installing" if st["installing"] else (st["last_status"] or "")
     return PlainTextResponse(text, headers={"X-Log-Next": str(nxt),
                                             "X-Install-Status": install_status})
+
+
+# ------------------------------------------------------------------ distribute SSH key
+@app.get("/keydist/public-key")
+def keydist_public_key(user: str = Depends(current_user)):
+    """SLEP's managed public key (generated on first use) — shown so an operator
+    can also install it by hand if they prefer."""
+    try:
+        return {"public_key": keydist.ensure_key()}
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/inventories/{iid}/distribute-key")
+def keydist_distribute(iid: int, body: dict = Body(...), user: str = Depends(require_superuser)):
+    """Install SLEP's public key on the inventory's hosts (a selection via
+    host_names, or all), authenticating once with the supplied SSH password
+    through the inventory's jump host. On success a 'SLEP managed key' credential
+    is (re)created for key-based runs. Streams progress to the distribute log."""
+    names = body.get("host_names")
+    only = list(names) if isinstance(names, list) else None
+    try:
+        keydist.start_distribute(iid, only, str(body.get("username") or "").strip(),
+                                 str(body.get("password") or ""), str(body.get("bastion") or "").strip())
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    db.log_audit("keydist", user, f"inventory:{iid}")
+    return {"status": "started"}
+
+
+@app.get("/inventories/{iid}/distribute-key/log", response_class=PlainTextResponse)
+def keydist_log(iid: int, offset: int = 0, user: str = Depends(current_user)):
+    text, nxt = keydist.distribute_log(iid, offset)
+    status = "running" if keydist.is_running(iid) else "idle"
+    return PlainTextResponse(text, headers={"X-Log-Next": str(nxt), "X-Install-Status": status})
 
 
 # ------------------------------------------------------------------ create infrastructure
