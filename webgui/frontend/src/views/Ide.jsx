@@ -16,6 +16,121 @@ const ansibleGroup = (name) => {
   return g || 'ungrouped'
 }
 
+// Ansible facts + magic variables offered as editor autocomplete. `d` documents
+// the value; entries with dot paths (ansible_default_ipv4.address) insert the
+// whole path. Kept practical, not exhaustive — the ones people reach for.
+const ANSIBLE_VARS = [
+  ['ansible_hostname', 'short hostname of the target'],
+  ['ansible_fqdn', 'fully-qualified domain name'],
+  ['ansible_nodename', 'hostname as the OS reports it (uname -n)'],
+  ['ansible_domain', 'DNS domain of the host'],
+  ['ansible_distribution', 'e.g. Ubuntu, Rocky, Debian, Archlinux'],
+  ['ansible_distribution_version', 'e.g. 22.04'],
+  ['ansible_distribution_major_version', 'e.g. 22'],
+  ['ansible_distribution_release', 'e.g. jammy'],
+  ['ansible_os_family', 'e.g. Debian, RedHat, Suse, Archlinux'],
+  ['ansible_system', 'e.g. Linux'],
+  ['ansible_kernel', 'running kernel version'],
+  ['ansible_architecture', 'e.g. x86_64, aarch64'],
+  ['ansible_machine', 'hardware machine type'],
+  ['ansible_processor_vcpus', 'number of vCPUs'],
+  ['ansible_processor_cores', 'CPU cores per socket'],
+  ['ansible_memtotal_mb', 'total RAM in MB'],
+  ['ansible_memfree_mb', 'free RAM in MB'],
+  ['ansible_default_ipv4.address', 'primary IPv4 address'],
+  ['ansible_default_ipv4.gateway', 'default gateway'],
+  ['ansible_default_ipv4.interface', 'primary interface name'],
+  ['ansible_all_ipv4_addresses', 'list of all IPv4 addresses'],
+  ['ansible_interfaces', 'list of network interface names'],
+  ['ansible_default_ipv6.address', 'primary IPv6 address'],
+  ['ansible_dns.nameservers', 'configured DNS servers'],
+  ['ansible_env', 'dict of the remote user’s environment'],
+  ['ansible_user_id', 'remote user name'],
+  ['ansible_user_dir', 'remote user home directory'],
+  ['ansible_python_version', 'Python version on the target'],
+  ['ansible_python.executable', 'Python interpreter path'],
+  ['ansible_date_time.iso8601', 'current time, ISO-8601'],
+  ['ansible_date_time.date', 'current date (YYYY-MM-DD)'],
+  ['ansible_date_time.epoch', 'current time, epoch seconds'],
+  ['ansible_uptime_seconds', 'seconds since boot'],
+  ['ansible_mounts', 'list of mounted filesystems'],
+  ['ansible_devices', 'dict of block devices'],
+  ['ansible_selinux.status', 'SELinux status'],
+  ['ansible_service_mgr', 'init system, e.g. systemd'],
+  ['ansible_pkg_mgr', 'package manager, e.g. apt, dnf'],
+  ['ansible_virtualization_type', 'e.g. kvm, docker, VMware'],
+  ['ansible_facts', 'the full facts dict (ansible_facts.hostname, …)'],
+  // magic / connection variables
+  ['inventory_hostname', 'name of the current host in the inventory'],
+  ['inventory_hostname_short', 'inventory hostname up to the first dot'],
+  ['group_names', 'list of groups the current host is in'],
+  ['groups', 'dict of all groups → their hosts'],
+  ['hostvars', 'dict of every host’s variables (hostvars[name])'],
+  ['ansible_play_hosts', 'hosts remaining in the current play'],
+  ['ansible_host', 'address Ansible connects to'],
+  ['ansible_port', 'SSH port'],
+  ['ansible_user', 'SSH user'],
+  ['ansible_become_user', 'user to become (sudo)'],
+  ['inventory_dir', 'directory of the inventory source'],
+  ['playbook_dir', 'directory of the running playbook'],
+  ['role_name', 'name of the current role'],
+  ['role_path', 'path of the current role'],
+  ['ansible_version.full', 'Ansible version string'],
+  ['item', 'the current item in a loop'],
+  ['ansible_loop.index', '1-based loop index'],
+  ['omit', 'placeholder to skip a parameter'],
+]
+
+// Register Ansible-variable autocomplete once per Monaco instance. Suggestions
+// appear inside a {{ … }} expression, or when the token being typed looks like an
+// Ansible variable (ansible_*, inventory_*, groups, hostvars, item, …).
+let _ansibleSetup = false
+function registerAnsible(monaco) {
+  if (_ansibleSetup) return
+  _ansibleSetup = true
+  monaco.languages.registerCompletionItemProvider('yaml', {
+    triggerCharacters: ['_', '.', '{', ' '],
+    provideCompletionItems(model, position) {
+      const line = model.getValueInRange({ startLineNumber: position.lineNumber, startColumn: 1, endLineNumber: position.lineNumber, endColumn: position.column })
+      const token = (line.match(/[\w.]*$/) || [''])[0]
+      const inJinja = line.lastIndexOf('{{') > line.lastIndexOf('}}')
+      if (!inJinja && !/^(ansible|inventory|group|host|item|play|role|omit)/i.test(token)) return { suggestions: [] }
+      // Replace the whole dotted token so "ansible_default_ipv4." completes cleanly.
+      const range = { startLineNumber: position.lineNumber, endLineNumber: position.lineNumber, startColumn: position.column - token.length, endColumn: position.column }
+      return {
+        suggestions: ANSIBLE_VARS.map(([label, doc]) => ({
+          label, kind: monaco.languages.CompletionItemKind.Variable,
+          insertText: label, detail: 'Ansible variable', documentation: doc, range,
+        })),
+      }
+    },
+  })
+}
+
+// A lightweight YAML syntax checker — no full parser (airgap-friendly), just the
+// gotchas that actually bite: tab indentation, and unbalanced Jinja/flow brackets.
+// Returns markers {line, col, endCol, message, severity}.
+function lintYaml(text) {
+  const out = []
+  const M = (line, col, endCol, message, severity) => out.push({ line, col, endCol, message, severity })
+  text.split('\n').forEach((raw, i) => {
+    const line = i + 1
+    const indent = (raw.match(/^[ \t]*/) || [''])[0]
+    const tab = indent.indexOf('\t')
+    if (tab >= 0) M(line, tab + 1, indent.length + 1, 'YAML forbids tabs for indentation — use spaces.', 'error')
+    const s = raw.replace(/#.*/, '')                       // drop trailing comment (naive)
+    const count = (str, re) => (str.match(re) || []).length
+    if (count(s, /\{\{/g) !== count(s, /\}\}/g)) M(line, 1, raw.length + 1, "Unbalanced '{{ … }}' on this line.", 'warning')
+    if (count(s, /\{%/g) !== count(s, /%\}/g)) M(line, 1, raw.length + 1, "Unbalanced '{% … %}' on this line.", 'warning')
+    // Flow collections: strip Jinja + quoted strings, then balance [] and {}.
+    const c = s.replace(/\{\{[\s\S]*?\}\}|\{%[\s\S]*?%\}|\{#[\s\S]*?#\}/g, '')
+      .replace(/"(?:\\.|[^"\\])*"|'[^']*'/g, '')
+    if (count(c, /\[/g) !== count(c, /\]/g)) M(line, 1, raw.length + 1, "Unbalanced '[ ]' on this line.", 'warning')
+    if (count(c, /\{/g) !== count(c, /\}/g)) M(line, 1, raw.length + 1, "Unbalanced '{ }' on this line.", 'warning')
+  })
+  return out
+}
+
 const langFor = (path) => {
   if (path.endsWith('.tf') || path.endsWith('.hcl')) return 'hcl'
   if (path.endsWith('.yml') || path.endsWith('.yaml') || path.endsWith('.sls')) return 'yaml'
@@ -98,6 +213,23 @@ export default function Ide({ project, onBack, onRun }) {
         'editorWidget.border': '#232b3a',
       },
     })
+  }
+  const monacoRef = useRef(null)
+
+  // Before mount: brand theme + Ansible-variable autocomplete.
+  const beforeMount = (monaco) => { defineTheme(monaco); registerAnsible(monaco) }
+
+  // Lightweight YAML syntax check → editor squiggles/markers. YAML files only.
+  const validate = () => {
+    const ed = editorRef.current, monaco = monacoRef.current
+    if (!ed || !monaco) return
+    const model = ed.getModel(); if (!model) return
+    if (langFor(path || '') !== 'yaml') { monaco.editor.setModelMarkers(model, 'slep-yaml', []); return }
+    const markers = lintYaml(model.getValue()).map((m) => ({
+      startLineNumber: m.line, startColumn: m.col, endLineNumber: m.line, endColumn: m.endCol,
+      message: m.message, severity: m.severity === 'error' ? monaco.MarkerSeverity.Error : monaco.MarkerSeverity.Warning,
+    }))
+    monaco.editor.setModelMarkers(model, 'slep-yaml', markers)
   }
 
   // Read the current selection (or the whole current line when nothing is
@@ -223,25 +355,29 @@ export default function Ide({ project, onBack, onRun }) {
     return () => window.removeEventListener('keydown', onKey)
   }, [save])
 
+  // Re-lint when the open file changes (switching files doesn't fire onChange).
+  useEffect(() => { validate() }, [path])
+
   return (
     <>
-      <div className="row" style={{ marginBottom: 10 }}>
+      <div className="row" style={{ marginBottom: 10, flexWrap: 'wrap' }}>
         <button className="ghost sm" onClick={onBack}>← Projects</button>
         <h2 style={{ margin: 0 }}>{project.name}</h2><span className="muted">{project.slug}</span>
-        <div className="spacer" />
-        <button className="ghost sm" onClick={() => setNewOpen(true)}>Add File</button>
-        {snip.engine === 'ansible' && (
-          <button className="ghost sm" onClick={() => setPlayOpen(true)} disabled={path == null}
-            title="Wrap this file in a play, or insert a play header (hosts, become, tasks)">Add Play</button>
-        )}
-        {snip.engine === 'ansible' && (
-          <button className="ghost sm" onClick={() => setCollOpen(true)}
-            title="Install the Ansible Galaxy collections the modules need (community.general, ansible.posix, …)">Collections</button>
-        )}
-        <button className="ghost sm" onClick={() => setTaskOpen(true)} disabled={path == null}
-          title={`Insert a ready-made ${snip.engine} ${snip.verb.toLowerCase()} at the cursor`}>Add {snip.verb}</button>
-        <button className="ghost sm" onClick={save} disabled={path == null}>{saved ? 'Saved' : 'Save'}</button>
-        <button className="primary sm" onClick={() => setRunOpen(true)}>▶ Run</button>
+        <div className="row" style={{ marginLeft: 'auto', gap: 8 }}>
+          <button className="ghost sm" onClick={() => setNewOpen(true)}>Add File</button>
+          {snip.engine === 'ansible' && (
+            <button className="ghost sm" onClick={() => setPlayOpen(true)} disabled={path == null}
+              title="Wrap this file in a play, or insert a play header (hosts, become, tasks)">Add Play</button>
+          )}
+          {snip.engine === 'ansible' && (
+            <button className="ghost sm" onClick={() => setCollOpen(true)}
+              title="Install the Ansible Galaxy collections the modules need (community.general, ansible.posix, …)">Collections</button>
+          )}
+          <button className="ghost sm" onClick={() => setTaskOpen(true)} disabled={path == null}
+            title={`Insert a ready-made ${snip.engine} ${snip.verb.toLowerCase()} at the cursor`}>Add {snip.verb}</button>
+          <button className="ghost sm" onClick={save} disabled={path == null}>{saved ? 'Saved' : 'Save'}</button>
+          <button className="primary sm" onClick={() => setRunOpen(true)}>▶ Run</button>
+        </div>
       </div>
       <div className="ide">
         <div className="tree">
@@ -256,9 +392,9 @@ export default function Ide({ project, onBack, onRun }) {
         <div className="edwrap" onContextMenu={(e) => { if (path != null) { e.preventDefault(); setMenu({ x: e.clientX, y: e.clientY }) } }}>
           <div className="edtool"><span className="muted">{path || 'No file open'}{!saved && ' •'}</span></div>
           <Editor height="100%" theme="sysible-dark" path={path || 'untitled'} language={langFor(path || '')}
-            value={content} onChange={(v) => { setContent(v ?? ''); setSaved(false) }}
-            beforeMount={defineTheme}
-            onMount={(ed) => { editorRef.current = ed }}
+            value={content} onChange={(v) => { setContent(v ?? ''); setSaved(false); validate() }}
+            beforeMount={beforeMount}
+            onMount={(ed, monaco) => { editorRef.current = ed; monacoRef.current = monaco; validate() }}
             options={{ minimap: { enabled: false }, fontSize: 13, automaticLayout: true, contextmenu: false }} />
         </div>
       </div>
