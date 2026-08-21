@@ -50,7 +50,7 @@ function ControllerCard({ ctrl, onChanged }) {
       {status && !status.error && <div className="muted">{status.agents} agent + {status.ssh} SSH host(s) available to import.</div>}
       {status && status.error && <div className="err">{status.error}</div>}
       {ctrl.last_import ? <div className="faint">Last import: {new Date(ctrl.last_import * 1000).toLocaleString()}</div> : null}
-      {importOpen && <ImportModal ctrl={ctrl} onClose={() => setImportOpen(false)} onDone={() => { setImportOpen(false); onChanged() }} />}
+      {importOpen && <ImportModal ctrl={ctrl} onClose={() => setImportOpen(false)} onDone={onChanged} />}
     </div>
   )
 }
