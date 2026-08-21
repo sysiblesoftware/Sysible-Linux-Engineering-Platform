@@ -81,6 +81,39 @@ def _render_inventory(hosts, credential, dest: Path, bastion: str = "") -> None:
                     "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null\n")
 
 
+def _emit_unreachable_help(emit, has_bastion: bool, proxy_hop_closed: bool,
+                           auth_denied: bool, timed_out: bool) -> None:
+    """Translate an all-UNREACHABLE recap into plain next steps. Ansible's raw
+    'Connection closed by UNKNOWN port 65535' is opaque: with a ProxyJump, UNKNOWN
+    means SSH got PAST the jump host and the onward hop to the target closed."""
+    emit("")
+    emit("!! Hosts were UNREACHABLE — SSH couldn't connect. This is a connectivity/")
+    emit("   credential issue on the target side, not a playbook error. Likely causes:")
+    if auth_denied:
+        emit("   • Auth was refused — the selected credential's user/key isn't accepted")
+        emit("     on the target. Check the SSH credential and that its key is authorized.")
+    if proxy_hop_closed:
+        emit("   • 'Connection closed by UNKNOWN' = the jump host connected but the hop to")
+        emit("     the target closed. The bastion can reach itself but not the target:")
+        emit("       – the target has no SSH server running (Sysible Linux ships SSH OFF by")
+        emit("         default — enable sshd on the host, or manage it via its agent), or")
+        emit("       – the bastion can't route to the target's subnet / a firewall blocks it, or")
+        emit("       – the bastion's sshd has 'AllowTcpForwarding no'.")
+    if timed_out:
+        emit("   • The connection timed out — the host/port is unreachable from SLEP")
+        emit("     (wrong address, host down, or firewalled).")
+    if not (auth_denied or proxy_hop_closed or timed_out):
+        emit("   • The target isn't accepting SSH: sshd not running (Sysible Linux ships SSH")
+        emit("     OFF by default), wrong port, or a firewall in the way.")
+    if has_bastion:
+        emit("   • Verify the jump host manually:")
+        emit("       ssh -J <user>@<bastion> <user>@<target>")
+    else:
+        emit("   • Verify SSH manually from the SLEP host:  ssh <user>@<target>")
+    emit("   Note: agent-enrolled hosts are managed by the Controller's agent (outbound")
+    emit("   poll) — Ansible needs INBOUND SSH to them, which is a separate path.")
+
+
 def _write_key(secret: str, dest: Path) -> None:
     fd = os.open(str(dest), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
@@ -172,12 +205,23 @@ def launch(run_id: int) -> None:
                 cmd, cwd=str(workdir), env=env,
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
             )
+            unreachable = proxy_hop_closed = auth_denied = timed_out = False
             for line in proc.stdout:      # live stream
                 log.write(line)
                 log.flush()
+                if "UNREACHABLE!" in line:
+                    unreachable = True
+                if "Connection closed by UNKNOWN" in line:
+                    proxy_hop_closed = True
+                if "Permission denied" in line or "Authentication failed" in line:
+                    auth_denied = True
+                if "Connection timed out" in line or "Operation timed out" in line:
+                    timed_out = True
             rc = proc.wait()
 
             emit(f"\n== finished: exit code {rc} ==")
+            if unreachable:
+                _emit_unreachable_help(emit, bool(bastion), proxy_hop_closed, auth_denied, timed_out)
             db.set_run_status(
                 run_id, "success" if rc == 0 else "failed",
                 exit_code=rc, finished=int(time.time()),
