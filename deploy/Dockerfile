@@ -63,4 +63,11 @@ RUN chmod +x /entrypoint.sh \
 USER slep
 VOLUME ["/data"]
 EXPOSE 8810
+
+# Liveness: the console answers on 8810. Works in both modes — HTTPS (self-signed,
+# hence -k) by default, or plain HTTP when SLEP_TLS=0.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD curl -fsk https://127.0.0.1:8810/api/health >/dev/null 2>&1 \
+   || curl -fs  http://127.0.0.1:8810/api/health  >/dev/null 2>&1 || exit 1
+
 ENTRYPOINT ["/entrypoint.sh"]
