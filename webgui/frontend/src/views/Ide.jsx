@@ -742,14 +742,19 @@ function TaskPalette({ groups: SNIPPET_GROUPS, verb = 'Task', onClose, onInsert 
   )
 }
 
-function RunModal({ project, currentFile, onClose, onLaunched }) {
-  const [engine, setEngine] = useState('ansible')
-  const [target, setTarget] = useState(currentFile || 'site.yml')
+export function RunModal({ project, currentFile, onClose, onLaunched, initial }) {
+  const ini = initial || {}
+  const [engine, setEngine] = useState(ini.engine || 'ansible')
+  const [target, setTarget] = useState(ini.target || currentFile || 'site.yml')
   const [invs, setInvs] = useState([]); const [creds, setCreds] = useState([])
-  const [inv, setInv] = useState(''); const [cred, setCred] = useState('')
+  const [inv, setInv] = useState(ini.inventory_id ? String(ini.inventory_id) : '')
+  const [cred, setCred] = useState(ini.credential_id ? String(ini.credential_id) : '')
   const [vars, setVars] = useState('')       // KEY=value per line
   const [saltTest, setSaltTest] = useState(false)
   const [becomePw, setBecomePw] = useState('')   // per-run sudo override
+  const [limit, setLimit] = useState(ini.limit || '')          // --limit
+  const [startAt, setStartAt] = useState(ini.start_at_task || '')  // --start-at-task
+  const startTasks = ini.tasks || []           // task names for the start-at dropdown
   const { wrap, node } = useErr()
 
   // Parse the KEY=value textarea into an object (blank lines / #comments ignored).
@@ -764,9 +769,11 @@ function RunModal({ project, currentFile, onClose, onLaunched }) {
     return out
   }
 
-  useEffect(() => { api('inventories').then((d) => { setInvs(d.inventories); if (d.inventories[0]) setInv(String(d.inventories[0].id)) }) }, [])
+  useEffect(() => { api('inventories').then((d) => { setInvs(d.inventories); setInv((cur) => cur || (d.inventories[0] ? String(d.inventories[0].id) : '')) }) }, [])
   useEffect(() => { api('credentials').then((d) => setCreds(d.credentials)) }, [])
+  const firstEngine = useRef(true)
   useEffect(() => {
+    if (firstEngine.current) { firstEngine.current = false; return }   // keep a pre-filled target
     if (engine === 'terraform') setTarget('plan')
     else if (engine === 'salt') setTarget('highstate')
     else setTarget(currentFile || 'site.yml')
@@ -816,6 +823,19 @@ function RunModal({ project, currentFile, onClose, onLaunched }) {
                    : 'for become tasks on password-sudo hosts'} />
         </Field>
       )}
+      {engine === 'ansible' && (
+        <div className="row" style={{ gap: 10 }}>
+          <Field label="Limit to hosts (optional → --limit)"><input value={limit} onChange={(e) => setLimit(e.target.value)} placeholder="rocky-01, web-tier" /></Field>
+          <Field label="Start at task (optional → --start-at-task)">
+            {startTasks.length
+              ? <select value={startAt} onChange={(e) => setStartAt(e.target.value)}>
+                  <option value="">(from the beginning)</option>
+                  {startTasks.map((t) => <option key={t} value={t}>{t}</option>)}
+                </select>
+              : <input value={startAt} onChange={(e) => setStartAt(e.target.value)} placeholder="exact task name" />}
+          </Field>
+        </div>
+      )}
       {engine === 'salt' && (
         <label className="row" style={{ gap: 8, fontSize: 13, cursor: 'pointer' }}>
           <input type="checkbox" checked={saltTest} onChange={(e) => setSaltTest(e.target.checked)} style={{ width: 'auto' }} />
@@ -831,6 +851,8 @@ function RunModal({ project, currentFile, onClose, onLaunched }) {
           project_id: project.id, kind: engine, target,
           inventory_id: needsInv ? Number(inv) : null, credential_id: cred ? Number(cred) : null,
           extra_vars: extra, become_password: engine === 'ansible' ? becomePw : '',
+          limit: engine === 'ansible' ? limit.trim() : '',
+          start_at_task: engine === 'ansible' ? startAt.trim() : '',
         } })
         onClose(); onLaunched(d.run_id)
       })}>▶ Launch</button>

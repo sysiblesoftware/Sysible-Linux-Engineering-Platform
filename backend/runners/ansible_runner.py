@@ -40,6 +40,20 @@ def pop_become(run_id: int) -> str:
     return _BECOME.pop(run_id, "")
 
 
+# Transient per-run CLI options (--limit, --start-at-task), same pattern as above.
+_RUNOPTS: dict[int, dict] = {}
+
+
+def stash_opts(run_id: int, opts: dict) -> None:
+    opts = {k: v for k, v in (opts or {}).items() if v}
+    if opts:
+        _RUNOPTS[run_id] = opts
+
+
+def pop_opts(run_id: int) -> dict:
+    return _RUNOPTS.pop(run_id, {})
+
+
 def _ansible_group(name: str) -> str:
     """Ansible INI group names allow only letters, digits and underscores — a
     Controller environment like "Sysible Labs" (with a space) would otherwise
@@ -212,6 +226,15 @@ def launch(run_id: int) -> None:
             if credential and credential.get("kind") == "ssh" and credential.get("secret"):
                 _write_key(credential["secret"], key_file)
                 cmd += ["--private-key", str(key_file)]
+            # Targeted re-run: --limit narrows to a subset of hosts, --start-at-task
+            # resumes at a named task (skipping the ones that already succeeded).
+            opts = pop_opts(run_id)
+            if opts.get("limit"):
+                cmd += ["--limit", str(opts["limit"])]
+                emit(f"-- limited to: {opts['limit']}")
+            if opts.get("start_at_task"):
+                cmd += ["--start-at-task", str(opts["start_at_task"])]
+                emit(f"-- starting at task: {opts['start_at_task']}")
             for k, v in extra_vars.items():
                 cmd += ["-e", f"{k}={v}"]
 

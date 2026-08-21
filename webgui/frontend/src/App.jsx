@@ -113,7 +113,7 @@ export default function App() {
       </aside>
       <main className="view">
         {runId == null && !project && <HealthBanner />}
-        {runId != null ? <RunLog runId={runId} onBack={() => setRunId(null)} />
+        {runId != null ? <RunLog runId={runId} onBack={() => setRunId(null)} onOpenRun={setRunId} />
           : project ? <Ide project={project} onBack={() => setProject(null)} onRun={(id) => setRunId(id)} />
             : view === 'projects' ? <Projects onOpen={setProject} />
               : view === 'inventories' ? <Inventories />

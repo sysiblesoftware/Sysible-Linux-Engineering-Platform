@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react'
 import { api, tail } from '../api.js'
 import { parseRun } from '../runParse.js'
 import RunViz from './RunViz.jsx'
+import { RunModal } from './Ide.jsx'
 
 // Render ANSI-coloured tool output (ansible-playbook et al. emit SGR codes) as
 // coloured spans, so the run log reads like a real terminal instead of showing
@@ -62,7 +63,8 @@ export default function Runs({ onOpen }) {
   )
 }
 
-export function RunLog({ runId, onBack }) {
+export function RunLog({ runId, onBack, onOpenRun }) {
+  const [rerun, setRerun] = useState(null)   // {run, failed, tasks} → opens the Run dialog
   const [text, setText] = useState('')
   const [status, setStatus] = useState('pending')
   const [engine, setEngine] = useState('ansible')
@@ -122,6 +124,24 @@ export function RunLog({ runId, onBack }) {
   }, [runId])
 
   const model = parseRun(engine, text)
+  // Hosts that failed/were unreachable, and the earliest task that broke — for a
+  // targeted "re-run failed hosts" (--limit + --start-at-task).
+  const failedHosts = engine === 'ansible'
+    ? Object.entries(model.hosts || {}).filter(([, h]) => (h.failed || 0) > 0 || (h.unreachable || 0) > 0 || h.last === 'failed' || h.last === 'unreachable').map(([n]) => n)
+    : []
+  let firstFail = Infinity
+  for (const h of failedHosts) {
+    const i = ((model.hostTasks || {})[h] || []).findIndex((s) => s === 'failed' || s === 'unreachable')
+    if (i >= 0) firstFail = Math.min(firstFail, i)
+  }
+  const startAt = firstFail < Infinity ? (model.taskList?.[firstFail]?.name || '') : ''
+  const done = ['success', 'failed', 'canceled'].includes(status)
+
+  const openRerun = async () => {
+    const run = await api(`runs/${runId}`)
+    setRerun({ run, limit: failedHosts.join(','), startAt, tasks: (model.taskList || []).map((t) => t.name) })
+  }
+
   return (
     <>
       <div className="row" style={{ marginBottom: 10 }}>
@@ -129,6 +149,11 @@ export function RunLog({ runId, onBack }) {
         <h2 style={{ margin: 0 }}>Run #{runId}</h2>
         <span className="muted">{engine}</span>
         <span className={'pill ' + status}>{status}</span>
+        <div className="spacer" />
+        {done && failedHosts.length > 0 && (
+          <button className="ghost sm" title={`Re-run the playbook against just: ${failedHosts.join(', ')}`}
+            onClick={openRerun}>↻ Re-run failed ({failedHosts.length})</button>
+        )}
       </div>
       {/* Visualize and Log together, with a draggable divider to size them (they
           stack on narrow screens). Each pane scrolls on its own. */}
@@ -146,6 +171,12 @@ export function RunLog({ runId, onBack }) {
           <div className="log run-scroll" ref={boxRef}>{text ? ansiToSpans(text) : 'connecting…'}</div>
         </div>
       </div>
+      {rerun && (
+        <RunModal project={{ id: rerun.run.project_id }} onClose={() => setRerun(null)}
+          onLaunched={(id) => { setRerun(null); onOpenRun ? onOpenRun(id) : onBack() }}
+          initial={{ engine: rerun.run.kind, target: rerun.run.target, inventory_id: rerun.run.inventory_id,
+            credential_id: rerun.run.credential_id, limit: rerun.limit, start_at_task: rerun.startAt, tasks: rerun.tasks }} />
+      )}
     </>
   )
 }

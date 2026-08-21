@@ -847,7 +847,7 @@ def disconnect_controller(cid: int, user: str = Depends(require_superuser)):
 
 # ------------------------------------------------------------------ runs
 def _dispatch_run(project, kind, target, inventory_id, credential_id, extra_vars, actor,
-                  become_password=""):
+                  become_password="", limit="", start_at_task=""):
     """Create a run row and launch its engine on a background thread. Shared by the
     manual /runs route and the scheduler. Returns the run id. `become_password` is
     a transient per-run sudo password — stashed in memory, never persisted."""
@@ -855,9 +855,12 @@ def _dispatch_run(project, kind, target, inventory_id, credential_id, extra_vars
         project["id"], kind, target, inventory_id=inventory_id,
         credential_id=credential_id, extra_vars=extra_vars or {}, created_by=actor,
     )
-    if become_password and kind == "ansible":
+    if kind == "ansible":
         from .runners import ansible_runner
-        ansible_runner.stash_become(run_id, become_password)
+        if become_password:
+            ansible_runner.stash_become(run_id, become_password)
+        if limit or start_at_task:
+            ansible_runner.stash_opts(run_id, {"limit": limit, "start_at_task": start_at_task})
     db.log_audit("run_launched", actor, f"#{run_id} {kind} '{target}' on {project['name']}")
     threading.Thread(target=RUNNERS[kind], args=(run_id,), daemon=True).start()
     return run_id
@@ -881,7 +884,9 @@ def launch_run(body: dict = Body(...), user: str = Depends(current_user)):
         raise HTTPException(status_code=400, detail=f"target ({what}) is required.")
     run_id = _dispatch_run(project, kind, target, body.get("inventory_id"),
                            body.get("credential_id"), body.get("extra_vars") or {}, user,
-                           become_password=str(body.get("become_password") or ""))
+                           become_password=str(body.get("become_password") or ""),
+                           limit=str(body.get("limit") or "").strip(),
+                           start_at_task=str(body.get("start_at_task") or "").strip())
     return {"status": "launched", "run_id": run_id}
 
 

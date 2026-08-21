@@ -132,3 +132,23 @@ def test_terraform_run_without_tf_fails_fast(client, project):
                                      "target": "plan"}).json()["run_id"]
     assert _wait_terminal(client, rid) == "failed"
     assert "No .tf files" in client.get(f"/runs/{rid}/log").text
+
+
+def test_run_accepts_limit_and_start_at(client, project, monkeypatch):
+    # Don't actually launch a runner thread — capture the dispatch.
+    import backend.app as appmod
+    seen = {}
+    monkeypatch.setattr(appmod, "_dispatch_run",
+                        lambda *a, **k: (seen.update(k) or 42))
+    r = client.post("/runs", json={"project_id": project["id"], "kind": "ansible",
+                                   "target": "site.yml", "limit": "rocky-01",
+                                   "start_at_task": "Install packages"})
+    assert r.status_code == 200 and r.json()["run_id"] == 42
+    assert seen["limit"] == "rocky-01" and seen["start_at_task"] == "Install packages"
+
+
+def test_runner_stash_opts_roundtrip():
+    from backend.runners import ansible_runner as ar
+    ar.stash_opts(999, {"limit": "web", "start_at_task": "", "junk": None})
+    assert ar.pop_opts(999) == {"limit": "web"}
+    assert ar.pop_opts(999) == {}      # popped once
