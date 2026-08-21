@@ -20,6 +20,13 @@ export function setRole(r) {
 export const canWrite = () => role === 'operator' || role === 'superuser'
 export const isSuperuser = () => role === 'superuser'
 
+// Theme (dark default / light), persisted per browser and applied to <html>.
+export const getTheme = () => localStorage.getItem('slep_theme') || 'dark'
+export function applyTheme(t) {
+  document.documentElement.setAttribute('data-theme', t)
+  localStorage.setItem('slep_theme', t)
+}
+
 export async function api(path, { method = 'GET', json, headers = {} } = {}) {
   const h = { ...headers }
   if (token) h.Authorization = 'Bearer ' + token

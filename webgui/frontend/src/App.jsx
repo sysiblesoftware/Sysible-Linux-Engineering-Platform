@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react'
-import { api, setToken, getToken, setRole, isSuperuser } from './api.js'
+import { api, setToken, getToken, setRole, isSuperuser, getTheme, applyTheme } from './api.js'
 import { Field, useErr } from './ui.jsx'
 import Logo from './Logo.jsx'
 import Projects from './views/Projects.jsx'
@@ -60,6 +60,8 @@ export default function App() {
   const [view, setView] = useState('projects')
   const [project, setProject] = useState(null)
   const [runId, setRunId] = useState(null)
+  const [theme, setTheme] = useState(getTheme())
+  useEffect(() => { applyTheme(theme) }, [theme])
 
   useEffect(() => {
     const onLogout = () => setAuthed(false)
@@ -102,7 +104,11 @@ export default function App() {
             <span className="avatar">{initials}</span>
             <div style={{ lineHeight: 1.2 }}>{username || 'admin'}<br /><span className="faint" style={{ fontSize: 12 }}>{roleName || 'operator'}</span></div>
           </div>
-          <button className="ghost" onClick={async () => { try { await api('logout', { method: 'POST' }) } catch {} setToken(''); setRole(''); setAuthed(false) }}>Sign out</button>
+          <div className="row" style={{ gap: 8 }}>
+            <button className="ghost sm" style={{ flex: 1 }} title="Toggle light / dark"
+              onClick={() => setTheme((t) => (t === 'light' ? 'dark' : 'light'))}>{theme === 'light' ? '☾ Dark' : '☀ Light'}</button>
+            <button className="ghost sm" style={{ flex: 1 }} onClick={async () => { try { await api('logout', { method: 'POST' }) } catch {} setToken(''); setRole(''); setAuthed(false) }}>Sign out</button>
+          </div>
         </div>
       </aside>
       <main className="view">

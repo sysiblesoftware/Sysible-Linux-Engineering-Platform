@@ -10,7 +10,32 @@
   --accent2:#5580ee;     /* brand blue — links, active-nav trace */
   --danger:#e5534b; --ok:#63c869; --green:#43a047; --green-bright:#63c869; --warn:#e0a83b;
   --rail-bg:#0a0d13;
+  --input-bg:#0c0e12; --log-bg:#0a0c10;   /* logs stay dark in both themes */
 }
+/* Light mode: same brand accents on a bright ground. Logs/terminals stay dark. */
+:root[data-theme="light"]{
+  color-scheme: light;
+  --bg:#f3f6fb; --panel:#ffffff; --panel2:#eef2f8; --line:#d7dee8; --line-strong:#bcc6d4;
+  --text:#131a26; --muted:#556072; --faint:#7c8698;
+  --accent:#2e7d32; --accent2:#2f57c4;
+  --danger:#c62f2f; --ok:#2e9e4e; --green:#2e7d32; --green-bright:#2e9e4e; --warn:#b3781a;
+  --rail-bg:#e9edf4;
+  --input-bg:#ffffff;
+}
+:root[data-theme="light"] body::before{opacity:0.14}
+:root[data-theme="light"] body::after{opacity:0.5}
+:root[data-theme="light"] button.primary{color:#fff}
+:root[data-theme="light"] .avatar{color:#fff}
+:root[data-theme="light"] .tree .f.active,
+:root[data-theme="light"] .tree .f.active .f-del,
+:root[data-theme="light"] .ctx-item:hover,
+:root[data-theme="light"] .ctx-item:hover .ctx-accel,
+:root[data-theme="light"] .task-palette .ghost:hover{color:#fff}
+:root[data-theme="light"] button.danger{color:var(--danger)}
+:root[data-theme="light"] .pill.failed,
+:root[data-theme="light"] .pill.canceled{color:var(--danger);border-color:#e0b4b4}
+:root[data-theme="light"] .pill.ok,
+:root[data-theme="light"] .pill.success{box-shadow:none}
 *{box-sizing:border-box}
 html,body,#root{margin:0;height:100%}
 body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:14px;-webkit-font-smoothing:antialiased}
@@ -34,7 +59,7 @@ button.ghost{background:transparent}
 button.ghost.active{background:var(--panel);color:var(--text);border-color:var(--accent)}
 button.danger{border-color:var(--danger);color:#ffb3b3}
 button.sm{padding:4px 9px;font-size:13px}
-input,select,textarea{font:inherit;background:#0c0e12;border:1px solid var(--line);
+input,select,textarea{font:inherit;background:var(--input-bg);border:1px solid var(--line);
   color:var(--text);padding:7px 9px;border-radius:7px;width:100%}
 textarea{resize:vertical;font-family:ui-monospace,Menlo,monospace}
 a{color:var(--accent2);cursor:pointer}
@@ -98,7 +123,7 @@ th{color:var(--muted);font-weight:600;font-size:12px}
 .ctx-item:hover .ctx-accel{color:#06210c}
 .ctx-accel{color:var(--faint);font-size:12px}
 .ctx-sep{height:1px;background:var(--line);margin:4px 6px}
-.log{background:#0a0c10;border:1px solid var(--line);border-radius:8px;padding:12px;
+.log{background:var(--log-bg);border:1px solid var(--line);border-radius:8px;padding:12px;
   font:12.5px/1.5 ui-monospace,Menlo,monospace;white-space:pre-wrap;overflow:auto;max-height:64vh;color:#d7dde7}
 /* Run detail: Visualize + Log side by side (stack on narrow screens). */
 .run-split{display:grid;grid-template-columns:minmax(0,1fr) 8px minmax(0,1fr);gap:0;align-items:start}
@@ -114,7 +139,7 @@ th{color:var(--muted);font-weight:600;font-size:12px}
 .job-split{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.1fr);gap:16px;align-items:start;margin-top:8px}
 @media (max-width:820px){.job-split{grid-template-columns:1fr}}
 .job-col{min-width:0;display:flex;flex-direction:column;gap:2px}
-.job-log{background:#0a0c10;border:1px solid var(--line);border-radius:8px;padding:10px;
+.job-log{background:var(--log-bg);border:1px solid var(--line);border-radius:8px;padding:10px;
   font:12px/1.5 ui-monospace,Menlo,monospace;white-space:pre-wrap;overflow:auto;height:100%;min-height:260px;max-height:64vh;color:#d7dde7}
 .job-log.empty{display:flex;align-items:center;justify-content:center;color:var(--faint)}
 .git-cols{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px;margin-top:10px}

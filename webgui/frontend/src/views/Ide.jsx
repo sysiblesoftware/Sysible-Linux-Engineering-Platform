@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react'
 import Editor from '@monaco-editor/react'
-import { api } from '../api.js'
+import { api, getTheme } from '../api.js'
 import { Field, Modal, useErr } from '../ui.jsx'
 import { SNIPPET_GROUPS as ANSIBLE_SNIPPETS, PLAY_GROUPS } from '../ansibleSnippets.js'
 import CollectionsInstall from '../components/CollectionsInstall.jsx'
@@ -236,6 +236,20 @@ export default function Ide({ project, onBack, onRun }) {
         'editorWidget.border': '#232b3a',
       },
     })
+    monaco.editor.defineTheme('sysible-light', {
+      base: 'vs', inherit: true, rules: [],
+      colors: {
+        'editor.background': '#ffffff',
+        'editor.foreground': '#131a26',
+        'editorLineNumber.foreground': '#9aa7bd',
+        'editorLineNumber.activeForeground': '#556072',
+        'editorCursor.foreground': '#2e7d32',
+        'editor.selectionBackground': '#cfe3d3',
+        'editor.lineHighlightBackground': '#f1f4f9',
+        'editorIndentGuide.background': '#e5e9f0',
+        'editorGutter.background': '#ffffff',
+      },
+    })
   }
   const monacoRef = useRef(null)
 
@@ -407,7 +421,7 @@ export default function Ide({ project, onBack, onRun }) {
         </div>
         <div className="edwrap" onContextMenu={(e) => { if (path != null) { e.preventDefault(); setMenu({ x: e.clientX, y: e.clientY }) } }}>
           <div className="edtool"><span className="muted">{path || 'No file open'}{!saved && ' •'}</span></div>
-          <Editor height="100%" theme="sysible-dark" path={path || 'untitled'} language={langFor(path || '')}
+          <Editor height="100%" theme={getTheme() === 'light' ? 'sysible-light' : 'sysible-dark'} path={path || 'untitled'} language={langFor(path || '')}
             value={content} onChange={(v) => { setContent(v ?? ''); setSaved(false); validate() }}
             beforeMount={beforeMount}
             onMount={(ed, monaco) => { editorRef.current = ed; monacoRef.current = monaco; validate() }}
