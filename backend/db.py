@@ -16,9 +16,11 @@ server) with WAL enabled for concurrent readers during a long run.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sqlite3
+import threading
 import time
 from pathlib import Path
 
@@ -139,6 +141,37 @@ def init_db() -> None:
                 created INTEGER NOT NULL,
                 FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
             );
+
+            -- Durable console sessions (mirrors Controller): the raw bearer token
+            -- is NEVER stored — only its SHA-256, so a leaked DB snapshot can't be
+            -- replayed as a live session. Survives restarts; resolve() cross-checks
+            -- the live account role so a demotion/removal revokes within the TTL.
+            CREATE TABLE IF NOT EXISTS admin_tokens (
+                token TEXT PRIMARY KEY,          -- sha256(token) at rest
+                username TEXT NOT NULL,
+                role TEXT NOT NULL,
+                expiry REAL NOT NULL
+            );
+
+            -- Per-username login throttle + durable lockout (survives restart).
+            CREATE TABLE IF NOT EXISTS login_throttle (
+                key TEXT PRIMARY KEY,            -- username (or ip:<addr>)
+                fails TEXT NOT NULL DEFAULT '[]',-- JSON array of recent failure epochs
+                until REAL NOT NULL DEFAULT 0    -- locked until this epoch
+            );
+
+            -- Tamper-evident admin/activity audit log. Each row's entry_hash chains
+            -- the previous one (SHA-256 over length-prefixed fields), so any edit,
+            -- reorder, or deletion in the middle breaks the chain from that point on.
+            CREATE TABLE IF NOT EXISTS admin_audit_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts REAL NOT NULL,
+                event TEXT NOT NULL,
+                username TEXT NOT NULL DEFAULT '',
+                detail TEXT NOT NULL DEFAULT '',
+                prev_hash TEXT NOT NULL,
+                entry_hash TEXT NOT NULL
+            );
             """
         )
         c.execute(
@@ -149,6 +182,152 @@ def init_db() -> None:
         inv_cols = [r["name"] for r in c.execute("PRAGMA table_info(inventories)")]
         if "bastion" not in inv_cols:
             c.execute("ALTER TABLE inventories ADD COLUMN bastion TEXT DEFAULT ''")
+    # The DB holds password hashes, session tokens, encrypted vault + Controller
+    # keys — keep it owner-only so a stray world-read can't harvest them.
+    _restrict_db_permissions()
+
+
+def _restrict_db_permissions() -> None:
+    for suffix in ("", "-wal", "-shm"):
+        p = Path(str(DB_PATH) + suffix)
+        try:
+            if p.exists():
+                os.chmod(p, 0o600)
+        except OSError:
+            pass
+
+
+# ---------------------------------------------------------------- sessions & security
+def _token_at_rest(token: str) -> str:
+    """Only the SHA-256 of a bearer token is stored, so a DB leak can't be replayed
+    as a live session (same pattern Controller uses for admin/agent secrets)."""
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def create_admin_token(token: str, username: str, role: str, expiry: float) -> None:
+    with _connect() as c:
+        c.execute("INSERT OR REPLACE INTO admin_tokens(token,username,role,expiry) VALUES(?,?,?,?)",
+                  (_token_at_rest(token), username, role, expiry))
+
+
+def resolve_admin_token(token: str):
+    """Return {username, role} for a live token, or None. Deletes + rejects on
+    expiry, on a removed account, or when the account's role changed since the
+    token was minted (so a demotion/removal revokes the session within its TTL)."""
+    if not token:
+        return None
+    th = _token_at_rest(token)
+    with _connect() as c:
+        r = c.execute("SELECT username,role,expiry FROM admin_tokens WHERE token=?", (th,)).fetchone()
+        if not r:
+            return None
+        if (r["expiry"] or 0) < time.time():
+            c.execute("DELETE FROM admin_tokens WHERE token=?", (th,))
+            return None
+        admin = c.execute("SELECT role FROM admins WHERE username=?", (r["username"],)).fetchone()
+        if not admin or admin["role"] != r["role"]:
+            c.execute("DELETE FROM admin_tokens WHERE token=?", (th,))
+            return None
+        return {"username": r["username"], "role": r["role"]}
+
+
+def delete_admin_token(token: str) -> None:
+    with _connect() as c:
+        c.execute("DELETE FROM admin_tokens WHERE token=?", (_token_at_rest(token),))
+
+
+def delete_admin_tokens_for_user(username: str) -> None:
+    """Drop every live session for an account — called on role change, password
+    reset, or deletion so the change takes effect immediately."""
+    with _connect() as c:
+        c.execute("DELETE FROM admin_tokens WHERE username=?", (username,))
+
+
+def purge_expired_tokens() -> None:
+    with _connect() as c:
+        c.execute("DELETE FROM admin_tokens WHERE expiry < ?", (time.time(),))
+
+
+# ---- per-username login throttle + durable lockout --------------------------
+def login_throttle_locked_for(key: str) -> int:
+    with _connect() as c:
+        r = c.execute("SELECT until FROM login_throttle WHERE key=?", (key,)).fetchone()
+    if not r:
+        return 0
+    rem = (r["until"] or 0) - time.time()
+    return int(rem) if rem > 0 else 0
+
+
+def login_throttle_record_failure(key: str, window_s: int, max_failures: int, lockout_s: int) -> int:
+    now = time.time()
+    with _connect() as c:
+        r = c.execute("SELECT fails FROM login_throttle WHERE key=?", (key,)).fetchone()
+        fails = json.loads(r["fails"]) if r and r["fails"] else []
+        fails = [t for t in fails if now - t < window_s]
+        fails.append(now)
+        until = 0.0
+        if len(fails) >= max_failures:
+            until = now + lockout_s
+            fails = []
+        c.execute("INSERT INTO login_throttle(key,fails,until) VALUES(?,?,?) "
+                  "ON CONFLICT(key) DO UPDATE SET fails=excluded.fails, until=excluded.until",
+                  (key, json.dumps(fails), until))
+    return int(until - now) if until else 0
+
+
+def login_throttle_clear(key: str) -> None:
+    with _connect() as c:
+        c.execute("DELETE FROM login_throttle WHERE key=?", (key,))
+
+
+# ---- tamper-evident audit log ------------------------------------------------
+_AUDIT_GENESIS = "0" * 64
+_audit_lock = threading.Lock()
+
+
+def _audit_digest(prev_hash: str, ts: float, event: str, username: str, detail: str) -> str:
+    # Length-prefix each field so no combination of field contents can be shifted
+    # across boundaries to forge an identical digest.
+    parts = [prev_hash, repr(ts), event, username, detail]
+    msg = "\x00".join(f"{len(p)}:{p}" for p in parts)
+    return hashlib.sha256(msg.encode()).hexdigest()
+
+
+def log_audit(event: str, username: str = "", detail: str = "") -> None:
+    """Append a hash-chained audit/activity row. Never raises into the caller —
+    an audit hiccup must not fail the action it records."""
+    try:
+        with _audit_lock, _connect() as c:
+            row = c.execute("SELECT entry_hash FROM admin_audit_log ORDER BY id DESC LIMIT 1").fetchone()
+            prev = row["entry_hash"] if row else _AUDIT_GENESIS
+            ts = time.time()
+            eh = _audit_digest(prev, ts, event, username or "", detail or "")
+            c.execute("INSERT INTO admin_audit_log(ts,event,username,detail,prev_hash,entry_hash) "
+                      "VALUES(?,?,?,?,?,?)", (ts, event, username or "", detail or "", prev, eh))
+    except Exception:
+        pass
+
+
+def list_audit(limit: int = 100, since_id: int = 0):
+    limit = max(1, min(int(limit or 100), 500))
+    with _connect() as c:
+        rows = c.execute("SELECT id,ts,event,username,detail FROM admin_audit_log "
+                         "WHERE id > ? ORDER BY id DESC LIMIT ?", (since_id, limit)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def verify_audit_chain():
+    """Recompute the chain from genesis; report the first broken row (if any)."""
+    with _connect() as c:
+        rows = c.execute("SELECT id,ts,event,username,detail,prev_hash,entry_hash "
+                         "FROM admin_audit_log ORDER BY id").fetchall()
+    prev = _AUDIT_GENESIS
+    for r in rows:
+        calc = _audit_digest(prev, r["ts"], r["event"], r["username"] or "", r["detail"] or "")
+        if r["prev_hash"] != prev or r["entry_hash"] != calc:
+            return {"ok": False, "broken_at": r["id"], "entries": len(rows)}
+        prev = r["entry_hash"]
+    return {"ok": True, "entries": len(rows)}
 
 
 # ---------------------------------------------------------------- admins

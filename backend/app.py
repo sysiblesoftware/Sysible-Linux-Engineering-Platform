@@ -25,7 +25,7 @@ from contextlib import asynccontextmanager
 from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse
 
-from . import controller_import, db, vault
+from . import controller_import, db, policy, vault
 from .runners import ansible_runner, salt_runner, terraform_runner
 
 # Engine name -> runner.launch(run_id). Each runs to completion on a thread.
@@ -44,41 +44,82 @@ async def lifespan(_app):
 
 app = FastAPI(title="Sysible Linux Engineering Platform", version="0.1.0", lifespan=lifespan)
 
-# In-memory sessions: token -> {"user", "role", "created"}. Cleared on restart.
-_SESSIONS: dict[str, dict] = {}
 _SESSION_TTL = 12 * 3600
 
 # RBAC: viewer (read-only) < operator (author + run) < superuser (manage users).
 ROLE_RANK = {"viewer": 1, "operator": 2, "superuser": 3}
 ROLES = set(ROLE_RANK)
 
+# Login throttle knobs (mirrors Controller): 10 failures in 15 min → 10-min lock,
+# keyed per-username and stored durably so a restart can't clear a lockout.
+_LOGIN_MAX_FAILURES = 10
+_LOGIN_WINDOW_S = 15 * 60
+_LOGIN_LOCKOUT_S = 10 * 60
+
 
 # ------------------------------------------------------------------ auth utils
+# PBKDF2-HMAC-SHA256. Hashes are stored as "<iters>$<hexdigest>" so the cost can
+# rise over time and old hashes upgrade transparently on next login. A bare digest
+# (no "$") is a legacy 200k hash.
+_PBKDF2_ITERS = 600_000
+_LEGACY_ITERS = 200_000
+
+
+def _pbkdf2(password: str, salt: str, iters: int) -> str:
+    return hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), iters).hex()
+
+
 def _hash_password(password: str, salt: str | None = None):
     salt = salt or secrets.token_hex(16)
-    h = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 200_000)
-    return h.hex(), salt
+    return f"{_PBKDF2_ITERS}${_pbkdf2(password, salt, _PBKDF2_ITERS)}", salt
+
+
+def _parse_hash(stored: str):
+    if "$" in stored:
+        it, _, dig = stored.partition("$")
+        try:
+            return int(it), dig
+        except ValueError:
+            return _LEGACY_ITERS, stored
+    return _LEGACY_ITERS, stored
 
 
 def _check_password(password: str, pw_hash: str, salt: str) -> bool:
-    calc, _ = _hash_password(password, salt)
-    return secrets.compare_digest(calc, pw_hash)
+    iters, digest = _parse_hash(pw_hash)
+    ok = secrets.compare_digest(_pbkdf2(password, salt, iters), digest)
+    # Burn the shortfall so a legacy (200k) verify costs the same wall-time as a
+    # current (600k) one — no timing signal distinguishes account cost tiers.
+    if iters < _PBKDF2_ITERS:
+        _pbkdf2(password, salt, _PBKDF2_ITERS - iters)
+    return ok
+
+
+def _needs_rehash(pw_hash: str) -> bool:
+    iters, _ = _parse_hash(pw_hash)
+    return iters < _PBKDF2_ITERS
+
+
+# A throwaway decoy hash so a login for an UNKNOWN username costs the same PBKDF2
+# time as a real one — closes the username-enumeration timing oracle.
+_DECOY_HASH, _DECOY_SALT = _hash_password(secrets.token_hex(16))
 
 
 def _new_session(user: str, role: str) -> str:
     token = secrets.token_urlsafe(32)
-    _SESSIONS[token] = {"user": user, "role": role, "created": time.time()}
+    db.create_admin_token(token, user, role, time.time() + _SESSION_TTL)
     return token
 
 
-def _session_or_401(request: Request) -> dict:
+def _bearer(request: Request) -> str:
     auth = request.headers.get("authorization", "")
-    token = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
-    sess = _SESSIONS.get(token)
-    if not sess or (time.time() - sess["created"]) > _SESSION_TTL:
-        _SESSIONS.pop(token, None)
+    return auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+
+
+def _session_or_401(request: Request) -> dict:
+    sess = db.resolve_admin_token(_bearer(request))
+    if not sess:
         raise HTTPException(status_code=401, detail="Not authenticated.")
-    return sess
+    return {"user": sess["username"], "role": sess["role"]}
 
 
 def current_user(request: Request) -> str:
@@ -111,13 +152,40 @@ _AUTH_PATHS = {"/login", "/logout", "/setup"}
 @app.middleware("http")
 async def viewer_read_only(request: Request, call_next):
     if request.method in _WRITE_METHODS and request.url.path not in _AUTH_PATHS:
-        auth = request.headers.get("authorization", "")
-        token = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
-        s = _SESSIONS.get(token)
+        s = db.resolve_admin_token(_bearer(request))
         if s and ROLE_RANK.get(s.get("role", "viewer"), 1) < ROLE_RANK["operator"]:
             from fastapi.responses import JSONResponse
             return JSONResponse({"detail": "Your role is read-only (viewer)."}, status_code=403)
     return await call_next(request)
+
+
+# Bound request bodies so an unbounded upload can't exhaust memory (the file-write
+# routes accept arbitrary content). 16 MiB default, overridable.
+_MAX_REQUEST_BYTES = int(os.environ.get("SLEP_MAX_REQUEST_BYTES", str(16 * 1024 * 1024)))
+
+
+@app.middleware("http")
+async def body_limit(request: Request, call_next):
+    cl = request.headers.get("content-length")
+    if cl and cl.isdigit() and int(cl) > _MAX_REQUEST_BYTES:
+        from fastapi.responses import JSONResponse
+        return JSONResponse({"detail": "Request body too large."}, status_code=413)
+    return await call_next(request)
+
+
+# Defense-in-depth response headers. The backend is a JSON API, so it can run the
+# strictest CSP (default-src 'none'); the console BFF serves the SPA with its own.
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    resp = await call_next(request)
+    resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+    resp.headers.setdefault("X-Frame-Options", "DENY")
+    resp.headers.setdefault("Referrer-Policy", "no-referrer")
+    resp.headers.setdefault("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'")
+    resp.headers.setdefault("Cache-Control", "no-store")
+    if request.url.scheme == "https":
+        resp.headers.setdefault("Strict-Transport-Security", "max-age=63072000; includeSubDomains")
+    return resp
 
 
 # ------------------------------------------------------------------ health/setup
@@ -133,10 +201,14 @@ def setup(body: dict = Body(...)):
         raise HTTPException(status_code=409, detail="Setup already complete.")
     user = str(body.get("username") or "").strip()
     pw = str(body.get("password") or "")
-    if not user or len(pw) < 10:
-        raise HTTPException(status_code=400, detail="Username and a 10+ char password required.")
+    if not user:
+        raise HTTPException(status_code=400, detail="Username is required.")
+    ok, msg = policy.validate_password(pw)
+    if not ok:
+        raise HTTPException(status_code=400, detail=msg)
     pw_hash, salt = _hash_password(pw)
     db.add_admin(user, pw_hash, salt, role="superuser")
+    db.log_audit("setup", user, "first administrator created")
     return {"status": "created", "username": user, "role": "superuser",
             "token": _new_session(user, "superuser")}
 
@@ -145,10 +217,40 @@ def setup(body: dict = Body(...)):
 def login(body: dict = Body(...)):
     user = str(body.get("username") or "").strip()
     pw = str(body.get("password") or "")
+    throttle_key = user or "(empty)"
+
+    locked = db.login_throttle_locked_for(throttle_key)
+    if locked:
+        db.log_audit("login_throttled", user, f"locked {locked}s")
+        raise HTTPException(status_code=429,
+                            detail=f"Too many failed attempts. Try again in about "
+                                   f"{max(1, locked // 60)} minute(s).")
+
     row = db.get_admin(user)
-    if not row or not _check_password(pw, row["pw_hash"], row["salt"]):
+    if row is not None:
+        valid = _check_password(pw, row["pw_hash"], row["salt"])
+    else:
+        # Decoy verify so an unknown username costs the same as a real one.
+        _check_password(pw, _DECOY_HASH, _DECOY_SALT)
+        valid = False
+
+    if not valid:
+        db.login_throttle_record_failure(throttle_key, _LOGIN_WINDOW_S,
+                                         _LOGIN_MAX_FAILURES, _LOGIN_LOCKOUT_S)
+        db.log_audit("login_failed", user, "invalid username or password")
         raise HTTPException(status_code=401, detail="Invalid username or password.")
+
+    # Transparently upgrade a legacy/under-cost hash now that we hold the plaintext.
+    if _needs_rehash(row["pw_hash"]):
+        try:
+            nh, ns = _hash_password(pw)
+            db.set_admin_password(user, nh, ns, must_change=row.get("must_change_password", 0))
+        except Exception:
+            pass
+
+    db.login_throttle_clear(throttle_key)
     role = row.get("role") or "operator"
+    db.log_audit("login", user, f"role={role}")
     return {"status": "ok", "username": user, "role": role,
             "token": _new_session(user, role),
             "must_change_password": bool(row.get("must_change_password"))}
@@ -156,9 +258,7 @@ def login(body: dict = Body(...)):
 
 @app.post("/logout")
 def logout(request: Request):
-    auth = request.headers.get("authorization", "")
-    token = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
-    _SESSIONS.pop(token, None)
+    db.delete_admin_token(_bearer(request))
     return {"status": "ok"}
 
 
@@ -166,6 +266,18 @@ def logout(request: Request):
 def me(request: Request):
     s = _session_or_401(request)
     return {"username": s["user"], "role": s.get("role", "operator")}
+
+
+@app.get("/audit")
+def audit(limit: int = 100, since_id: int = 0, user: str = Depends(require_superuser)):
+    """Tamper-evident activity/audit feed (superuser). Newest first."""
+    return {"entries": db.list_audit(limit=limit, since_id=since_id)}
+
+
+@app.get("/audit/verify")
+def audit_verify(user: str = Depends(require_superuser)):
+    """Recompute the audit hash-chain and report whether it's intact."""
+    return db.verify_audit_chain()
 
 
 # ------------------------------------------------------------------ projects
@@ -359,12 +471,14 @@ def users_create(body: dict = Body(...), acting: str = Depends(require_superuser
         raise HTTPException(status_code=400, detail="Username is required.")
     if role not in ROLES:
         raise HTTPException(status_code=400, detail=f"Role must be one of: {', '.join(ROLES)}.")
-    if len(pw) < 10:
-        raise HTTPException(status_code=400, detail="Password must be at least 10 characters.")
+    ok, msg = policy.validate_password(pw)
+    if not ok:
+        raise HTTPException(status_code=400, detail=msg)
     if db.get_admin(name):
         raise HTTPException(status_code=409, detail="That username already exists.")
     pw_hash, salt = _hash_password(pw)
     db.add_admin(name, pw_hash, salt, role=role)
+    db.log_audit("user_created", acting, f"{name} (role={role})")
     return {"status": "created", "username": name, "role": role}
 
 
@@ -381,13 +495,21 @@ def users_update(username: str, body: dict = Body(...), acting: str = Depends(re
             raise HTTPException(status_code=400, detail=f"Role must be one of: {', '.join(ROLES)}.")
         if row.get("role") == "superuser" and role != "superuser" and db.count_superusers() <= 1:
             raise HTTPException(status_code=400, detail="Can't demote the last superuser.")
-        db.set_admin_role(username, role)
+        if role != row.get("role"):
+            db.set_admin_role(username, role)
+            # Live sessions carry the old role — drop them so the change is immediate.
+            db.delete_admin_tokens_for_user(username)
+            db.log_audit("user_role_changed", acting, f"{username}: {row.get('role')} -> {role}")
     if body.get("password"):
         pw = str(body.get("password"))
-        if len(pw) < 10:
-            raise HTTPException(status_code=400, detail="Password must be at least 10 characters.")
+        ok, msg = policy.validate_password(pw)
+        if not ok:
+            raise HTTPException(status_code=400, detail=msg)
         pw_hash, salt = _hash_password(pw)
         db.set_admin_password(username, pw_hash, salt)
+        # A password reset revokes existing sessions (forces re-auth).
+        db.delete_admin_tokens_for_user(username)
+        db.log_audit("user_password_reset", acting, username)
     r = db.get_admin(username)
     return {"status": "ok", "username": r["username"], "role": r.get("role")}
 
@@ -402,6 +524,8 @@ def users_delete(username: str, acting: str = Depends(require_superuser)):
     if row.get("role") == "superuser" and db.count_superusers() <= 1:
         raise HTTPException(status_code=400, detail="Can't delete the last superuser.")
     db.delete_admin(username)
+    db.delete_admin_tokens_for_user(username)
+    db.log_audit("user_deleted", acting, username)
     return {"status": "deleted"}
 
 
@@ -568,6 +692,7 @@ def launch_run(body: dict = Body(...), user: str = Depends(current_user)):
         credential_id=body.get("credential_id"), extra_vars=body.get("extra_vars") or {},
         created_by=user,
     )
+    db.log_audit("run_launched", user, f"#{run_id} {kind} '{target}' on {project['name']}")
     # Launch the right engine on a background thread; the console tails the log.
     threading.Thread(target=RUNNERS[kind], args=(run_id,), daemon=True).start()
     return {"status": "launched", "run_id": run_id}

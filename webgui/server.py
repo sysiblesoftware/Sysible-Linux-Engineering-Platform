@@ -27,6 +27,29 @@ STATIC = HERE / "static"
 app = FastAPI(title="SLEP Console")
 
 _HOP = {"content-length", "transfer-encoding", "connection", "host"}
+_MAX_REQUEST_BYTES = int(os.environ.get("SLEP_MAX_REQUEST_BYTES", str(16 * 1024 * 1024)))
+
+# CSP for the SPA: self-hosted only (airgap-friendly). Monaco runs its language
+# services in blob workers and uses eval in its tokenizer, so worker-src blob:
+# and script-src 'unsafe-eval' are required; images/fonts allow data: URIs.
+_CSP = ("default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; "
+        "script-src 'self' 'unsafe-eval'; worker-src 'self' blob:; font-src 'self' data:; "
+        "connect-src 'self'; frame-ancestors 'none'; base-uri 'self'")
+
+
+@app.middleware("http")
+async def guard(request: Request, call_next):
+    cl = request.headers.get("content-length")
+    if cl and cl.isdigit() and int(cl) > _MAX_REQUEST_BYTES:
+        return JSONResponse({"detail": "Request body too large."}, status_code=413)
+    resp = await call_next(request)
+    resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+    resp.headers.setdefault("X-Frame-Options", "DENY")
+    resp.headers.setdefault("Referrer-Policy", "no-referrer")
+    resp.headers.setdefault("Content-Security-Policy", _CSP)
+    if request.url.scheme == "https":
+        resp.headers.setdefault("Strict-Transport-Security", "max-age=63072000; includeSubDomains")
+    return resp
 
 
 @app.get("/api/health")
