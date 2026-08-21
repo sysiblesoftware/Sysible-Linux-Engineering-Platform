@@ -489,13 +489,38 @@ def controllers(user: str = Depends(current_user)):
 
 @app.post("/controllers")
 def connect_controller(body: dict = Body(...), user: str = Depends(require_superuser)):
-    """Connect to a Sysible Controller: validate the URL + API key, then save it.
-    The key is stored server-side and never returned to the browser."""
+    """Connect to a Sysible Controller and save it. Two ways to authenticate:
+
+      * username + password — a Controller *superuser* signs in with the same
+        credentials they use for the Controller console; SLEP exchanges them for
+        the backend API key behind the scenes (POST /auth/api-key). The friendly
+        default — no key-hunting.
+      * api_key — the raw backend key, for older Controllers or headless setups.
+
+    Either way the resolved key is stored server-side and never returned."""
     name = str(body.get("name") or "").strip()
     url = str(body.get("base_url") or body.get("controller_url") or "").strip()
     key = str(body.get("api_key") or "")
-    if not url or not key:
-        raise HTTPException(status_code=400, detail="Controller URL and API key are required.")
+    username = str(body.get("username") or "").strip()
+    password = str(body.get("password") or "")
+    totp_code = str(body.get("totp_code") or "").strip()
+    if not url:
+        raise HTTPException(status_code=400, detail="Controller URL is required.")
+
+    # Username/password path: exchange console creds for the API key first.
+    if not key and (username or password):
+        try:
+            key = controller_import.exchange_credentials_for_key(url, username, password, totp_code)
+        except controller_import.ControllerMFARequired as e:
+            # Not an error for the SLEP session — tell the UI to collect a second
+            # factor and resubmit. (A 401 here would trip api.js's auto-logout.)
+            return {"status": "mfa_required", "detail": str(e)}
+        except controller_import.ControllerImportError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+    if not key:
+        raise HTTPException(status_code=400,
+                            detail="Provide a Controller superuser username + password, or its backend API key.")
     try:
         probe = controller_import.test_connection(url, key)   # fails closed on a bad key/URL
     except controller_import.ControllerImportError as e:

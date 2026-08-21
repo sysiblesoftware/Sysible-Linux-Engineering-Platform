@@ -31,6 +31,7 @@ button:hover{border-color:var(--accent)}
 button:disabled{opacity:.5;cursor:not-allowed}
 button.primary{background:var(--accent);border-color:var(--accent);color:#06210c;font-weight:600}
 button.ghost{background:transparent}
+button.ghost.active{background:var(--panel);color:var(--text);border-color:var(--accent)}
 button.danger{border-color:var(--danger);color:#ffb3b3}
 button.sm{padding:4px 9px;font-size:13px}
 input,select,textarea{font:inherit;background:#0c0e12;border:1px solid var(--line);

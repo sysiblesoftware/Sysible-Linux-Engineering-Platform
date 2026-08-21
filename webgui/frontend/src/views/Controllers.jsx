@@ -17,7 +17,7 @@ export default function Controllers() {
         <button className="primary" onClick={() => setConnectOpen(true)}>+ Connect to Controller</button>
       </div>
       {controllers.length === 0
-        ? <div className="muted">No Controllers connected. Connect one to import its fleet as inventory — you’ll need its base URL and backend API key. Host install: <span className="mono">/opt/sysible/api_key.txt</span>. Docker: <span className="mono">docker exec &lt;controller&gt; cat /opt/sysible/secrets/api_key.txt</span>.</div>
+        ? <div className="muted">No Controllers connected. Connect one to import its fleet as inventory — sign in with a Controller <b>superuser</b> username &amp; password (SLEP fetches the key for you). No key-hunting; the raw backend API key still works as a fallback.</div>
         : controllers.map((c) => <ControllerCard key={c.id} ctrl={c} onChanged={load} />)}
       {connectOpen && <ConnectModal onClose={() => setConnectOpen(false)} onDone={() => { setConnectOpen(false); load() }} />}
     </>
@@ -58,21 +58,48 @@ function ControllerCard({ ctrl, onChanged }) {
 function ConnectModal({ onClose, onDone }) {
   const [name, setName] = useState('')
   const [url, setUrl] = useState('')
+  const [mode, setMode] = useState('creds')   // 'creds' | 'key'
+  const [username, setUsername] = useState('')
+  const [password, setPassword] = useState('')
+  const [totp, setTotp] = useState('')
+  const [mfa, setMfa] = useState(false)        // Controller asked for a second factor
   const [key, setKey] = useState('')
   const [busy, setBusy] = useState(false)
-  const { wrap, node } = useErr()
+  const { wrap, node, setErr } = useErr()
+
+  const connect = () => wrap(async () => {
+    setBusy(true)
+    try {
+      const json = mode === 'key'
+        ? { name, base_url: url, api_key: key }
+        : { name, base_url: url, username, password, totp_code: totp }
+      const d = await api('controllers', { method: 'POST', json })
+      if (d.status === 'mfa_required') { setMfa(true); setErr(d.detail || 'Enter your authentication code.'); return }
+      alert(`Connected to ${d.controller.name} — ${d.total} host(s) visible (${d.agents} agent + ${d.ssh} SSH).`)
+      onDone()
+    } finally { setBusy(false) }
+  })
+
   return (
     <Modal title="Connect to a Sysible Controller" onClose={onClose}>
-      <div className="muted">SLEP validates the connection, then stores the key server-side (never shown again) so you can import without re-entering it.</div>
+      <div className="muted">Sign in as a Controller <b>superuser</b> and SLEP fetches the connection key for you — then stores it server-side (never shown again) so imports don’t need it re-entered.</div>
+      <div className="row" style={{ gap: 6, marginTop: 4 }}>
+        <button className={'ghost sm' + (mode === 'creds' ? ' active' : '')} onClick={() => setMode('creds')}>Username &amp; password</button>
+        <button className={'ghost sm' + (mode === 'key' ? ' active' : '')} onClick={() => setMode('key')}>API key</button>
+      </div>
       <Field label="Name (optional)"><input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Production Controller" autoFocus /></Field>
       <Field label="Controller URL"><input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://controller-host:9000" /></Field>
-      <Field label="Backend API key"><input type="password" value={key} onChange={(e) => setKey(e.target.value)} placeholder="host: /opt/sysible/api_key.txt · docker: /opt/sysible/secrets/api_key.txt" /></Field>
+      {mode === 'creds' ? (
+        <>
+          <Field label="Superuser username"><input value={username} autoComplete="off" onChange={(e) => setUsername(e.target.value)} /></Field>
+          <Field label="Password"><input type="password" value={password} autoComplete="off" onChange={(e) => setPassword(e.target.value)} /></Field>
+          {mfa && <Field label="Authentication code (MFA)"><input value={totp} autoFocus onChange={(e) => setTotp(e.target.value)} placeholder="6-digit code" /></Field>}
+        </>
+      ) : (
+        <Field label="Backend API key"><input type="password" value={key} onChange={(e) => setKey(e.target.value)} placeholder="host: /opt/sysible/api_key.txt · docker: /opt/sysible/secrets/api_key.txt" /></Field>
+      )}
       {node}
-      <button className="primary" disabled={busy} onClick={() => wrap(async () => {
-        setBusy(true)
-        try { const d = await api('controllers', { method: 'POST', json: { name, base_url: url, api_key: key } }); alert(`Connected to ${d.controller.name} — ${d.total} host(s) visible (${d.agents} agent + ${d.ssh} SSH).`); onDone() }
-        finally { setBusy(false) }
-      })}>{busy ? 'Connecting…' : 'Connect'}</button>
+      <button className="primary" disabled={busy} onClick={connect}>{busy ? 'Connecting…' : 'Connect'}</button>
     </Modal>
   )
 }

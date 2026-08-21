@@ -58,6 +58,57 @@ def _get(base_url: str, path: str, api_key: str, allow_404: bool = False):
         raise ControllerImportError(f"The Controller's {path} response was not JSON.")
 
 
+class ControllerMFARequired(ControllerImportError):
+    """Raised when the Controller superuser has MFA enrolled and no code was
+    supplied — the caller should collect a TOTP code and retry."""
+
+
+def exchange_credentials_for_key(controller_url: str, username: str, password: str, totp_code: str = ""):
+    """Trade a Controller superuser's console username+password (and TOTP code,
+    if their account has MFA) for the Controller's backend API key, via the
+    Controller's POST /auth/api-key. This is the friendly path: the operator
+    signs in with the same credentials they use for the Controller console
+    instead of hunting down /opt/sysible/api_key.txt.
+
+    Returns the api_key string. Raises ControllerMFARequired when a second
+    factor is needed, or ControllerImportError on bad creds / network / an
+    older Controller that lacks the endpoint (404)."""
+    if not username or not password:
+        raise ControllerImportError("Controller username and password are required.")
+    base = _normalize_base(controller_url)
+    url = base + "/auth/api-key"
+    payload = {"username": username, "password": password}
+    if totp_code:
+        payload["totp_code"] = totp_code
+    try:
+        resp = requests.post(url, json=payload, verify=False, timeout=20)
+    except requests.exceptions.RequestException as e:
+        raise ControllerImportError(f"Could not reach the Controller at {url}: {e}")
+    if resp.status_code == 404:
+        raise ControllerImportError(
+            "This Controller doesn't support username/password connect (it predates the "
+            "feature). Update the Controller, or connect with its backend API key instead.")
+    if resp.status_code in (401, 403, 429):
+        detail = "The Controller rejected those credentials."
+        try:
+            detail = resp.json().get("detail") or detail
+        except ValueError:
+            pass
+        raise ControllerImportError(detail)
+    if resp.status_code != 200:
+        raise ControllerImportError(f"The Controller returned HTTP {resp.status_code}.")
+    try:
+        data = resp.json()
+    except ValueError:
+        raise ControllerImportError("The Controller's response was not JSON.")
+    if data.get("status") == "mfa_required":
+        raise ControllerMFARequired("This account has multi-factor authentication — enter the current code.")
+    key = data.get("api_key")
+    if not key:
+        raise ControllerImportError("The Controller did not return an API key.")
+    return key
+
+
 def test_connection(controller_url: str, api_key: str):
     """Probe a Controller with the given key — used by 'Connect to Controller'.
     Returns {ok, agents, ssh, total} (host counts it can see). Raises

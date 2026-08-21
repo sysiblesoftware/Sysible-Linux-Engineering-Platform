@@ -59,3 +59,78 @@ def test_connect_rejects_bad_key(client, monkeypatch):
     import backend.controller_import as ci
     monkeypatch.setattr(ci.requests, "get", _fake_get({"/agents": Resp(401, None)}))
     assert client.post("/controllers", json={"base_url": "http://c:9000", "api_key": "BAD"}).status_code == 400
+
+
+def _fake_post(routes):
+    def post(url, json=None, headers=None, verify=None, timeout=None):
+        for suffix, resp in routes.items():
+            if url.endswith(suffix):
+                return resp(json) if callable(resp) else resp
+        return Resp(404, None)
+    return post
+
+
+def test_connect_with_username_password(client, monkeypatch):
+    """Superuser username/password is exchanged for the API key via /auth/api-key,
+    then the key validates against /agents — no raw key entered by the operator."""
+    import backend.controller_import as ci
+    monkeypatch.setattr(ci.requests, "post", _fake_post({
+        "/auth/api-key": Resp(200, {"status": "ok", "api_key": "SECRET"}),
+    }))
+    monkeypatch.setattr(ci.requests, "get", _fake_get({
+        "/agents": Resp(200, {"agents": [{"hostname": "web1", "ip": "10.0.0.11"}]}),
+    }))
+    r = client.post("/controllers", json={
+        "name": "Creds", "base_url": "http://ctrl:9000", "username": "root", "password": "pw"})
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "connected" and r.json()["total"] == 1
+    # The saved connection carries the exchanged key (never surfaced to the client).
+    listed = client.get("/controllers").json()["controllers"]
+    assert any(c["name"] == "Creds" for c in listed)
+    assert all("api_key" not in c for c in listed)
+
+
+def test_connect_mfa_two_step(client, monkeypatch):
+    """When the Controller superuser has MFA, the first call returns mfa_required;
+    resubmitting with a TOTP code completes the exchange."""
+    import backend.controller_import as ci
+    state = {"seen_code": False}
+
+    def api_key_route(payload):
+        if (payload or {}).get("totp_code"):
+            state["seen_code"] = True
+            return Resp(200, {"status": "ok", "api_key": "SECRET"})
+        return Resp(200, {"status": "mfa_required"})
+
+    monkeypatch.setattr(ci.requests, "post", _fake_post({"/auth/api-key": api_key_route}))
+    monkeypatch.setattr(ci.requests, "get", _fake_get({"/agents": Resp(200, {"agents": []})}))
+
+    first = client.post("/controllers", json={
+        "base_url": "http://ctrl:9000", "username": "root", "password": "pw"})
+    assert first.status_code == 200 and first.json()["status"] == "mfa_required"
+
+    second = client.post("/controllers", json={
+        "base_url": "http://ctrl:9000", "username": "root", "password": "pw", "totp_code": "123456"})
+    assert second.status_code == 200 and second.json()["status"] == "connected"
+    assert state["seen_code"]
+
+
+def test_connect_bad_creds_rejected(client, monkeypatch):
+    import backend.controller_import as ci
+    monkeypatch.setattr(ci.requests, "post", _fake_post({
+        "/auth/api-key": Resp(401, {"detail": "Invalid username or password"}),
+    }))
+    r = client.post("/controllers", json={
+        "base_url": "http://ctrl:9000", "username": "root", "password": "nope"})
+    assert r.status_code == 400
+    assert "Invalid username or password" in r.json()["detail"]
+
+
+def test_connect_old_controller_no_endpoint(client, monkeypatch):
+    """A Controller predating /auth/api-key (404) yields a clear 'use the key' error."""
+    import backend.controller_import as ci
+    monkeypatch.setattr(ci.requests, "post", _fake_post({"/auth/api-key": Resp(404, None)}))
+    r = client.post("/controllers", json={
+        "base_url": "http://ctrl:9000", "username": "root", "password": "pw"})
+    assert r.status_code == 400
+    assert "API key" in r.json()["detail"]
