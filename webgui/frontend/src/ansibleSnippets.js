@@ -7,6 +7,49 @@
 // `ansible` package baked into the SLEP image.
 const t = (name, search, yaml) => ({ name, search, yaml })
 
+// Playbook-structure building blocks — the scaffolding a task list needs to
+// become a runnable playbook (play header, targeting, vars, handlers, roles),
+// plus the common task modifiers. Offered alongside the task library so a
+// playbook can be assembled from the palette or right-click, not hand-typed.
+// These sit at play/task level, so they're not indented for a `tasks:` list.
+export const PLAY_GROUPS = [
+  {
+    group: 'Play & structure',
+    items: [
+      t('Play header (hosts + tasks)', 'play header hosts tasks header', `- name: Configure hosts\n  hosts: all\n  become: true\n  gather_facts: true\n  tasks:\n`),
+      t('Full playbook skeleton', 'playbook skeleton scaffold full', `- name: Configure hosts\n  hosts: all\n  become: true\n  gather_facts: true\n  vars:\n    example_var: value\n  tasks:\n    - name: Ping the host\n      ansible.builtin.ping:\n  handlers:\n    - name: restart sshd\n      ansible.builtin.service:\n        name: sshd\n        state: restarted\n`),
+      t('hosts: (targets)', 'hosts target group pattern', `  hosts: all\n`),
+      t('become (privilege escalation)', 'become sudo root privilege', `  become: true\n  become_user: root\n`),
+      t('gather_facts: false', 'gather facts speed', `  gather_facts: false\n`),
+      t('serial (rolling batches)', 'serial rolling batch canary', `  serial: 2\n`),
+      t('vars: block', 'vars variables', `  vars:\n    app_name: myapp\n    app_port: 8080\n`),
+      t('vars_files', 'vars files include external', `  vars_files:\n    - vars/main.yml\n`),
+      t('vars_prompt', 'vars prompt interactive input', `  vars_prompt:\n    - name: username\n      prompt: "Username?"\n      private: false\n`),
+      t('handlers: section', 'handlers notify restart', `  handlers:\n    - name: restart service\n      ansible.builtin.service:\n        name: your-service\n        state: restarted\n`),
+      t('roles: section', 'roles role', `  roles:\n    - common\n    - webserver\n`),
+      t('pre_tasks / post_tasks', 'pre post tasks', `  pre_tasks:\n    - name: Update apt cache\n      ansible.builtin.apt:\n        update_cache: true\n      become: true\n  post_tasks:\n    - name: Notify done\n      ansible.builtin.debug:\n        msg: "Play complete"\n`),
+    ],
+  },
+  {
+    group: 'Task modifiers',
+    items: [
+      t('when (conditional)', 'when condition if', `      when: ansible_facts['os_family'] == 'Debian'\n`),
+      t('loop', 'loop with_items iterate', `      loop:\n        - one\n        - two\n        - three\n`),
+      t('loop over dicts', 'loop dict key value', `      loop: "{{ users }}"\n      loop_control:\n        label: "{{ item.name }}"\n`),
+      t('register + debug', 'register capture output', `      register: result\n`),
+      t('notify a handler', 'notify handler trigger', `      notify: restart service\n`),
+      t('tags', 'tags tag selective', `      tags:\n        - config\n`),
+      t('become (per task)', 'become task sudo', `      become: true\n`),
+      t('delegate_to', 'delegate local run-on', `      delegate_to: localhost\n`),
+      t('run_once', 'run once single', `      run_once: true\n`),
+      t('ignore_errors', 'ignore errors continue', `      ignore_errors: true\n`),
+      t('changed_when / failed_when', 'changed failed when idempotent', `      changed_when: false\n      failed_when: false\n`),
+      t('block / rescue / always', 'block rescue always try', `    - name: Attempt with recovery\n      block:\n        - name: Try this\n          ansible.builtin.command: /usr/bin/false\n      rescue:\n        - name: On failure\n          ansible.builtin.debug:\n            msg: "recovering"\n      always:\n        - name: Always run\n          ansible.builtin.debug:\n            msg: "cleanup"\n`),
+      t('import_tasks / include_tasks', 'import include tasks file', `    - name: Include task file\n      ansible.builtin.include_tasks: tasks/setup.yml\n`),
+    ],
+  },
+]
+
 export const SNIPPET_GROUPS = [
   {
     group: 'Basics',

@@ -2,7 +2,7 @@ import React, { useEffect, useState, useCallback, useRef } from 'react'
 import Editor from '@monaco-editor/react'
 import { api } from '../api.js'
 import { Field, Modal, useErr } from '../ui.jsx'
-import { SNIPPET_GROUPS as ANSIBLE_SNIPPETS } from '../ansibleSnippets.js'
+import { SNIPPET_GROUPS as ANSIBLE_SNIPPETS, PLAY_GROUPS } from '../ansibleSnippets.js'
 import { SNIPPET_GROUPS as TERRAFORM_SNIPPETS } from '../terraformSnippets.js'
 import { SNIPPET_GROUPS as SALT_SNIPPETS } from '../saltSnippets.js'
 
@@ -22,7 +22,8 @@ const snippetsFor = (path) => {
   const p = (path || '').toLowerCase()
   if (p.endsWith('.tf') || p.endsWith('.hcl')) return { groups: TERRAFORM_SNIPPETS, verb: 'Resource', engine: 'terraform' }
   if (p.endsWith('.sls')) return { groups: SALT_SNIPPETS, verb: 'State', engine: 'salt' }
-  return { groups: ANSIBLE_SNIPPETS, verb: 'Task', engine: 'ansible' }
+  // Ansible palette leads with playbook-structure blocks, then the task library.
+  return { groups: [...PLAY_GROUPS, ...ANSIBLE_SNIPPETS], verb: 'Task', engine: 'ansible' }
 }
 
 export default function Ide({ project, onBack, onRun }) {
@@ -33,10 +34,33 @@ export default function Ide({ project, onBack, onRun }) {
   const [runOpen, setRunOpen] = useState(false)
   const [newOpen, setNewOpen] = useState(false)
   const [taskOpen, setTaskOpen] = useState(false)
+  const [playOpen, setPlayOpen] = useState(false)
+  const [targets, setTargets] = useState(['all', 'localhost'])   // host patterns for `hosts:`
   const [delPath, setDelPath] = useState(null)
   const [menu, setMenu] = useState(null)   // {x, y} custom editor context menu
   const editorRef = useRef(null)
   const snip = snippetsFor(path)
+
+  // Gather `hosts:` targets from the operator's inventories — the group names
+  // (Controller environments) their hosts carry — so play targeting can be picked,
+  // not memorized. Always offers all/localhost even with no inventories.
+  useEffect(() => {
+    let live = true
+    ;(async () => {
+      try {
+        const d = await api('inventories')
+        const groups = new Set()
+        for (const inv of d.inventories || []) {
+          try {
+            const h = await api(`inventories/${inv.id}/hosts`)
+            for (const host of h.hosts || []) (host.groups || '').split(/[,\s]+/).forEach((g) => g && groups.add(g))
+          } catch { /* skip an unreadable inventory */ }
+        }
+        if (live) setTargets(['all', 'localhost', ...[...groups].sort()])
+      } catch { /* no inventories yet — defaults stand */ }
+    })()
+    return () => { live = false }
+  }, [project.id])
 
   // A brand-matched Monaco theme (defined once, before the editor mounts) so the
   // editor surface uses the SLEP palette instead of stock vs-dark.
@@ -124,6 +148,46 @@ export default function Ide({ project, onBack, onRun }) {
     ed.focus()
     setTaskOpen(false)
   }
+
+  // Build a play header from the dialog's choices.
+  const buildPlayHeader = ({ name, hosts, become, gather }) => {
+    let h = `- name: ${name || 'Configure hosts'}\n  hosts: ${hosts || 'all'}\n`
+    if (become) h += '  become: true\n'
+    h += `  gather_facts: ${gather ? 'true' : 'false'}\n  tasks:\n`
+    return h
+  }
+
+  // Wrap the whole file's bare task list in a play: prepend a header ending in
+  // `tasks:`, and re-indent the existing content so its list markers sit at 4
+  // spaces (nested under tasks:). This is the fix for "not a valid attribute for
+  // a Play" — a task list run as a playbook with no play around it.
+  const wrapInPlay = (opts) => {
+    const header = buildPlayHeader(opts)
+    const lines = (content || '').replace(/\s+$/, '').split('\n')
+    const firstDash = lines.find((l) => /^\s*-\s/.test(l))
+    const curIndent = firstDash ? (firstDash.match(/^\s*/)[0].length) : 0
+    const delta = 4 - curIndent
+    const shift = (l) => {
+      if (l.trim() === '') return ''
+      if (delta > 0) return ' '.repeat(delta) + l
+      if (delta < 0) { const lead = l.match(/^\s*/)[0].length; return l.slice(Math.min(-delta, lead)) }
+      return l
+    }
+    const body = lines.map(shift).join('\n')
+    setContent(header + body + '\n'); setSaved(false); setPlayOpen(false)
+  }
+
+  // Insert just a play header at the cursor (for starting a second play, etc.).
+  const insertPlayHeader = (opts) => {
+    const ed = editorRef.current
+    if (ed) {
+      const sel = ed.getSelection()
+      ed.executeEdits('insert-play', [{ range: sel, text: buildPlayHeader(opts), forceMoveMarkers: true }])
+      ed.focus(); setSaved(false)
+    } else { setContent((c) => buildPlayHeader(opts) + (c || '')); setSaved(false) }
+    setPlayOpen(false)
+  }
+
   const save = useCallback(async () => {
     if (path == null) return
     await api(`projects/${project.id}/file`, { method: 'PUT', json: { path, content } })
@@ -143,6 +207,10 @@ export default function Ide({ project, onBack, onRun }) {
         <h2 style={{ margin: 0 }}>{project.name}</h2><span className="muted">{project.slug}</span>
         <div className="spacer" />
         <button className="ghost sm" onClick={() => setNewOpen(true)}>+ File</button>
+        {snip.engine === 'ansible' && (
+          <button className="ghost sm" onClick={() => setPlayOpen(true)} disabled={path == null}
+            title="Wrap this file in a play, or insert a play header (hosts, become, tasks)">+ Play</button>
+        )}
         <button className="ghost sm" onClick={() => setTaskOpen(true)} disabled={path == null}
           title={`Insert a ready-made ${snip.engine} ${snip.verb.toLowerCase()} at the cursor`}>+ {snip.verb}</button>
         <button className="ghost sm" onClick={save} disabled={path == null}>{saved ? 'Saved' : 'Save'}</button>
@@ -169,6 +237,8 @@ export default function Ide({ project, onBack, onRun }) {
       </div>
       {newOpen && <NewFile project={project} onClose={() => setNewOpen(false)} onCreated={(p) => { setNewOpen(false); loadTree(); open(p) }} />}
       {taskOpen && <TaskPalette groups={snip.groups} verb={snip.verb} onClose={() => setTaskOpen(false)} onInsert={insertTask} />}
+      {playOpen && <PlayModal targets={targets} hasContent={(content || '').trim().length > 0}
+        onClose={() => setPlayOpen(false)} onWrap={wrapInPlay} onInsert={insertPlayHeader} />}
       {delPath && (
         <Modal title="Delete file" onClose={() => setDelPath(null)}>
           <div>Delete <b>{delPath}</b>? This can’t be undone.</div>
@@ -186,6 +256,14 @@ export default function Ide({ project, onBack, onRun }) {
           { label: 'Copy', accel: 'Ctrl+C', run: () => menuAction(doCopy) },
           { label: 'Paste', accel: 'Ctrl+V', run: () => menuAction(doPaste) },
           { sep: true },
+          ...(snip.engine === 'ansible' ? [
+            { label: 'Play header / wrap in play…', run: () => { setMenu(null); setPlayOpen(true) } },
+            { label: `Insert building block…`, run: () => { setMenu(null); setTaskOpen(true) } },
+            { sep: true },
+          ] : [
+            { label: `Insert ${snip.verb.toLowerCase()}…`, run: () => { setMenu(null); setTaskOpen(true) } },
+            { sep: true },
+          ]),
           { label: 'Select all', accel: 'Ctrl+A', run: () => menuAction((ed) => { ed.setSelection(ed.getModel().getFullModelRange()); ed.focus() }) },
           { label: 'Command palette', accel: 'F1', run: () => menuAction((ed) => { ed.focus(); ed.trigger('menu', 'editor.action.quickCommand') }) },
         ]} />}
@@ -215,6 +293,44 @@ function EditorMenu({ at, items, onClose }) {
             <span>{it.label}</span>{it.accel && <span className="ctx-accel">{it.accel}</span>}
           </button>)}
     </div>
+  )
+}
+
+// Play scaffolding: turn a bare task list into a runnable playbook (a play needs
+// hosts + tasks). Targets are picked from the operator's inventories (the group
+// names their hosts carry) so you don't have to remember them. "Wrap this file"
+// nests the whole file's tasks under the header; "Insert header" drops one at the
+// cursor for a second play.
+function PlayModal({ targets, hasContent, onClose, onWrap, onInsert }) {
+  const [name, setName] = useState('Configure hosts')
+  const [hosts, setHosts] = useState(targets[0] || 'all')
+  const [custom, setCustom] = useState('')
+  const [become, setBecome] = useState(true)
+  const [gather, setGather] = useState(true)
+  const opts = () => ({ name, hosts: hosts === '__custom' ? (custom.trim() || 'all') : hosts, become, gather })
+
+  return (
+    <Modal title="Play — target hosts & structure" onClose={onClose}>
+      <div className="muted">A playbook is one or more <b>plays</b>; each play points <span className="mono">hosts:</span> at part of your inventory and runs <span className="mono">tasks:</span>. Pick a target and SLEP writes the header.</div>
+      <Field label="Play name"><input value={name} onChange={(e) => setName(e.target.value)} autoFocus /></Field>
+      <Field label="Target hosts (from your inventories)">
+        <select value={hosts} onChange={(e) => setHosts(e.target.value)}>
+          {targets.map((t) => <option key={t} value={t}>{t}</option>)}
+          <option value="__custom">Custom pattern…</option>
+        </select>
+      </Field>
+      {hosts === '__custom' && <Field label="Pattern (group, host, or wildcard)"><input value={custom} onChange={(e) => setCustom(e.target.value)} placeholder="web:&prod, db-*, 10.0.0.5" /></Field>}
+      <div className="row" style={{ gap: 16, marginTop: 4 }}>
+        <label className="row" style={{ gap: 7 }}><input type="checkbox" checked={become} onChange={(e) => setBecome(e.target.checked)} style={{ width: 'auto' }} /> become (sudo)</label>
+        <label className="row" style={{ gap: 7 }}><input type="checkbox" checked={gather} onChange={(e) => setGather(e.target.checked)} style={{ width: 'auto' }} /> gather_facts</label>
+      </div>
+      <div className="row" style={{ gap: 8, marginTop: 10 }}>
+        <div className="spacer" />
+        <button className="ghost" onClick={() => onInsert(opts())}>Insert header at cursor</button>
+        <button className="primary" disabled={!hasContent} title={hasContent ? '' : 'Nothing to wrap yet'} onClick={() => onWrap(opts())}>Wrap this file in a play</button>
+      </div>
+      {!hasContent && <div className="faint" style={{ fontSize: 12 }}>Add tasks first, then “Wrap this file” to make them runnable — or just insert a header to start from the top.</div>}
+    </Modal>
   )
 }
 
