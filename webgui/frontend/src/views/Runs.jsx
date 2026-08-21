@@ -67,7 +67,24 @@ export function RunLog({ runId, onBack }) {
   const [status, setStatus] = useState('pending')
   const [engine, setEngine] = useState('ansible')
   const [seedHosts, setSeedHosts] = useState([])
+  const [leftPct, setLeftPct] = useState(50)   // Visualize/Log split, % of width
   const boxRef = useRef(null)
+  const splitRef = useRef(null)
+
+  // Drag the divider: translate the pointer x into a left-pane percentage.
+  const startDrag = (e) => {
+    e.preventDefault()
+    const move = (ev) => {
+      const el = splitRef.current; if (!el) return
+      const r = el.getBoundingClientRect()
+      const pct = ((ev.clientX - r.left) / r.width) * 100
+      setLeftPct(Math.min(80, Math.max(20, pct)))
+    }
+    const up = () => { window.removeEventListener('mousemove', move); window.removeEventListener('mouseup', up); document.body.style.cursor = '' }
+    document.body.style.cursor = 'col-resize'
+    window.addEventListener('mousemove', move)
+    window.addEventListener('mouseup', up)
+  }
 
   // Run metadata drives the viz: which engine, and (for Ansible) the inventory's
   // hosts so the "reaching hosts" grid shows every target before it reports in.
@@ -113,9 +130,9 @@ export function RunLog({ runId, onBack }) {
         <span className="muted">{engine}</span>
         <span className={'pill ' + status}>{status}</span>
       </div>
-      {/* Visualize and Log together: the graph on the left, the raw log on the
-          right (they stack on narrow screens). Each pane scrolls on its own. */}
-      <div className="run-split">
+      {/* Visualize and Log together, with a draggable divider to size them (they
+          stack on narrow screens). Each pane scrolls on its own. */}
+      <div className="run-split" ref={splitRef} style={{ gridTemplateColumns: `minmax(0,${leftPct}fr) 8px minmax(0,${100 - leftPct}fr)` }}>
         <div className="run-pane">
           <div className="pane-title">Visualize</div>
           <div className="run-scroll">
@@ -123,6 +140,7 @@ export function RunLog({ runId, onBack }) {
               : <div className="muted" style={{ padding: 8 }}>connecting…</div>}
           </div>
         </div>
+        <div className="run-gutter" onMouseDown={startDrag} title="Drag to resize" />
         <div className="run-pane">
           <div className="pane-title">Log</div>
           <div className="log run-scroll" ref={boxRef}>{text ? ansiToSpans(text) : 'connecting…'}</div>

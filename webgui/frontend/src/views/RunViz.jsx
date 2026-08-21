@@ -100,17 +100,23 @@ function HostReachFlow({ hosts, tasks, hostTasks, taskList, done, zoom = 1 }) {
   const dotGap = nTasks > 60 ? 8 : nTasks > 30 ? 11 : dense ? 15 : 22
   const dotR = nTasks > 60 ? 2.6 : nTasks > 30 ? 3.2 : 4.5
   const rowH = n > 40 ? 15 : n > 20 ? 20 : 26
-  const headerH = (tasks > 0 && !dense) ? 66 : 10   // room for angled task-name headers
+  const maxLabel = 26
+  const trunc = (s) => (s.length > maxLabel ? s.slice(0, maxLabel - 1) + '…' : s)
+  // Header height must fit the angled (-40°) labels so their tops aren't clipped:
+  // rise ≈ sin(40°)·labelWidth. Size it from the longest visible label.
+  const longest = (tasks > 0 && !dense)
+    ? Math.min(maxLabel, Math.max(6, ...Array.from({ length: nTasks }, (_, i) => (taskList[i]?.name || '').length)))
+    : 0
+  const headerH = (tasks > 0 && !dense) ? Math.round(20 + longest * 4.2) : 10
   const bodyH = Math.max(84, n * rowH + 18)
   const H = headerH + bodyH
   const cx = 46, cy = headerH + bodyH / 2, ex = 150   // ex = where the fan lines end
   const dotsX = ex + 20
   const lastDotX = dotsX + (nTasks - 1) * dotGap
   const nameX = lastDotX + 16
-  const W = nameX + 150
+  const W = nameX + 160 + Math.round(longest * 3)   // room for the rightmost angled label
   const step = n > 1 ? (bodyH - 26) / (n - 1) : 0
   const rowY = (i) => n > 1 ? headerH + 13 + i * step : cy
-  const trunc = (s) => (s.length > 22 ? s.slice(0, 21) + '…' : s)
   return (
     <div style={{ overflow: 'auto', height: '100%' }}>
       <svg className="viz-flow" width={Math.round(W * zoom)} height={Math.round(H * zoom)} viewBox={`0 0 ${W} ${H}`}>

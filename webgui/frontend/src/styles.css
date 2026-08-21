@@ -101,8 +101,11 @@ th{color:var(--muted);font-weight:600;font-size:12px}
 .log{background:#0a0c10;border:1px solid var(--line);border-radius:8px;padding:12px;
   font:12.5px/1.5 ui-monospace,Menlo,monospace;white-space:pre-wrap;overflow:auto;max-height:64vh;color:#d7dde7}
 /* Run detail: Visualize + Log side by side (stack on narrow screens). */
-.run-split{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:14px;align-items:start}
-@media (max-width:1080px){.run-split{grid-template-columns:1fr}}
+.run-split{display:grid;grid-template-columns:minmax(0,1fr) 8px minmax(0,1fr);gap:0;align-items:start}
+.run-gutter{align-self:stretch;cursor:col-resize;background:linear-gradient(var(--line),var(--line)) center/2px 100% no-repeat;border-radius:3px}
+.run-gutter:hover{background:linear-gradient(var(--accent),var(--accent)) center/2px 100% no-repeat}
+.run-split > .run-pane:first-child{padding-right:12px}
+.run-split > .run-pane:last-child{padding-left:12px}
 .run-pane{min-width:0}
 .pane-title{font-size:11px;color:var(--muted);letter-spacing:.05em;text-transform:uppercase;margin:0 2px 6px}
 .run-scroll{max-height:74vh;overflow:auto}
