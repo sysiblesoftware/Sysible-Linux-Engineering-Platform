@@ -22,6 +22,7 @@ import os
 import sqlite3
 import threading
 import time
+from datetime import datetime, timedelta
 from pathlib import Path
 
 DATA_DIR = Path(os.environ.get("SLEP_DATA_DIR", "./data")).resolve()
@@ -158,6 +159,30 @@ def init_db() -> None:
                 key TEXT PRIMARY KEY,            -- username (or ip:<addr>)
                 fails TEXT NOT NULL DEFAULT '[]',-- JSON array of recent failure epochs
                 until REAL NOT NULL DEFAULT 0    -- locked until this epoch
+            );
+
+            -- Recurring runs: a saved run spec + a cadence. A scheduler thread
+            -- launches the same engine/target/inventory on the computed next_run.
+            CREATE TABLE IF NOT EXISTS schedules (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL DEFAULT '',
+                project_id INTEGER NOT NULL,
+                kind TEXT NOT NULL DEFAULT 'ansible',
+                target TEXT NOT NULL,
+                inventory_id INTEGER,
+                credential_id INTEGER,
+                extra_vars TEXT DEFAULT '{}',
+                cadence TEXT NOT NULL DEFAULT 'daily',   -- hourly | daily | weekly
+                at TEXT NOT NULL DEFAULT '02:00',        -- HH:MM (local) for daily/weekly; MM used for hourly
+                weekday INTEGER NOT NULL DEFAULT 0,      -- 0=Mon .. 6=Sun (weekly)
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_by TEXT DEFAULT '',
+                last_run INTEGER,
+                last_status TEXT DEFAULT '',
+                last_run_id INTEGER,
+                next_run INTEGER,
+                created INTEGER NOT NULL,
+                FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
             );
 
             -- Tamper-evident admin/activity audit log. Each row's entry_hash chains
@@ -328,6 +353,111 @@ def verify_audit_chain():
             return {"ok": False, "broken_at": r["id"], "entries": len(rows)}
         prev = r["entry_hash"]
     return {"ok": True, "entries": len(rows)}
+
+
+# ---------------------------------------------------------------- schedules
+def compute_next_run(cadence: str, at: str = "02:00", weekday: int = 0, now_ts: float | None = None) -> int:
+    """Next fire time (epoch seconds, local clock) for a cadence. hourly fires at
+    minute :MM of every hour; daily at HH:MM; weekly on `weekday` at HH:MM."""
+    now = datetime.fromtimestamp(now_ts if now_ts is not None else time.time())
+    try:
+        hh, mm = (int(x) for x in (at or "02:00").split(":"))
+    except ValueError:
+        hh, mm = 2, 0
+    if cadence == "hourly":
+        cand = now.replace(minute=mm % 60, second=0, microsecond=0)
+        if cand <= now:
+            cand += timedelta(hours=1)
+    elif cadence == "weekly":
+        cand = now.replace(hour=hh % 24, minute=mm % 60, second=0, microsecond=0)
+        cand += timedelta(days=(int(weekday) - now.weekday()) % 7)
+        if cand <= now:
+            cand += timedelta(days=7)
+    else:  # daily
+        cand = now.replace(hour=hh % 24, minute=mm % 60, second=0, microsecond=0)
+        if cand <= now:
+            cand += timedelta(days=1)
+    return int(cand.timestamp())
+
+
+def _schedule_row(r) -> dict:
+    d = dict(r)
+    try:
+        d["extra_vars"] = json.loads(d.get("extra_vars") or "{}")
+    except (TypeError, ValueError):
+        d["extra_vars"] = {}
+    return d
+
+
+def list_schedules(project_id: int | None = None):
+    with _connect() as c:
+        if project_id:
+            rows = c.execute("SELECT * FROM schedules WHERE project_id=? ORDER BY id DESC", (project_id,)).fetchall()
+        else:
+            rows = c.execute("SELECT * FROM schedules ORDER BY id DESC").fetchall()
+    return [_schedule_row(r) for r in rows]
+
+
+def get_schedule(sid: int):
+    with _connect() as c:
+        r = c.execute("SELECT * FROM schedules WHERE id=?", (sid,)).fetchone()
+    return _schedule_row(r) if r else None
+
+
+def create_schedule(name, project_id, kind, target, cadence, at, weekday=0,
+                    inventory_id=None, credential_id=None, extra_vars=None, created_by=""):
+    nxt = compute_next_run(cadence, at, weekday)
+    with _connect() as c:
+        cur = c.execute(
+            "INSERT INTO schedules(name,project_id,kind,target,inventory_id,credential_id,"
+            "extra_vars,cadence,at,weekday,enabled,created_by,next_run,created) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,1,?,?,?)",
+            (name, project_id, kind, target, inventory_id, credential_id,
+             json.dumps(extra_vars or {}), cadence, at, int(weekday), created_by, nxt, _now()))
+        return cur.lastrowid
+
+
+def update_schedule(sid: int, **fields):
+    allowed = {"name", "target", "inventory_id", "credential_id", "cadence", "at",
+               "weekday", "enabled", "extra_vars"}
+    sets, vals = [], []
+    for k, v in fields.items():
+        if k not in allowed:
+            continue
+        sets.append(f"{k}=?")
+        vals.append(json.dumps(v) if k == "extra_vars" else (int(v) if k in ("enabled", "weekday") else v))
+    if not sets:
+        return
+    with _connect() as c:
+        c.execute(f"UPDATE schedules SET {', '.join(sets)} WHERE id=?", (*vals, sid))
+        r = c.execute("SELECT cadence,at,weekday FROM schedules WHERE id=?", (sid,)).fetchone()
+        if r:
+            c.execute("UPDATE schedules SET next_run=? WHERE id=?",
+                      (compute_next_run(r["cadence"], r["at"], r["weekday"]), sid))
+
+
+def delete_schedule(sid: int):
+    with _connect() as c:
+        c.execute("DELETE FROM schedules WHERE id=?", (sid,))
+
+
+def due_schedules(now_ts: float | None = None):
+    """Enabled schedules whose next_run is in the past."""
+    now = now_ts if now_ts is not None else time.time()
+    with _connect() as c:
+        rows = c.execute("SELECT * FROM schedules WHERE enabled=1 AND next_run IS NOT NULL "
+                         "AND next_run <= ? ORDER BY next_run", (now,)).fetchall()
+    return [_schedule_row(r) for r in rows]
+
+
+def mark_schedule_fired(sid: int, run_id: int, status: str = "launched"):
+    """Record a firing and advance next_run past now (so a missed window doesn't
+    replay for every elapsed interval — it schedules the next future slot)."""
+    with _connect() as c:
+        r = c.execute("SELECT cadence,at,weekday FROM schedules WHERE id=?", (sid,)).fetchone()
+        nxt = compute_next_run(r["cadence"], r["at"], r["weekday"]) if r else None
+        c.execute("UPDATE schedules SET last_run=?, last_status=?, last_run_id=?, next_run=? WHERE id=?",
+                  (_now(), status, run_id, nxt, sid))
 
 
 # ---------------------------------------------------------------- admins

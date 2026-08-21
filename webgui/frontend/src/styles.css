@@ -117,5 +117,10 @@ th{color:var(--muted);font-weight:600;font-size:12px}
 textarea{width:100%;box-sizing:border-box;background:var(--panel2);color:var(--text);
   border:1px solid var(--line);border-radius:8px;padding:8px 10px}
 textarea:focus{outline:none;border-color:var(--accent)}
+
+/* Health warnings banner */
+.health-banner{display:flex;align-items:center;gap:12px;padding:9px 12px;border-radius:8px;border:1px solid var(--line)}
+.health-banner.warn{background:rgba(224,168,59,0.10);border-color:#5b4a2f}
+.health-banner.crit{background:rgba(229,83,75,0.10);border-color:#5b2f2f}
 .err{color:#ffb3b3;font-size:13px;min-height:1.2em}
 label.fld{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--muted)}

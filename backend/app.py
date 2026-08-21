@@ -36,10 +36,40 @@ RUNNERS = {
 }
 
 
+_scheduler_stop = threading.Event()
+
+
+def _scheduler_loop():
+    """Fire due schedules. Polls every 30s; each due schedule launches its saved
+    run and advances to the next slot. Resilient — one bad schedule never stops
+    the loop. Runs in the backend process (where the runners live)."""
+    while not _scheduler_stop.wait(30):
+        try:
+            for s in db.due_schedules():
+                try:
+                    project = db.get_project(s["project_id"])
+                    if not project:
+                        db.delete_schedule(s["id"])
+                        continue
+                    run_id = _dispatch_run(project, s["kind"], s["target"], s.get("inventory_id"),
+                                           s.get("credential_id"), s.get("extra_vars") or {},
+                                           f"schedule:{s.get('name') or s['id']}")
+                    db.mark_schedule_fired(s["id"], run_id)
+                    db.log_audit("schedule_fired", "system",
+                                 f"schedule '{s.get('name') or s['id']}' → run #{run_id}")
+                except Exception:  # noqa: BLE001 — never let one schedule stall the loop
+                    db.mark_schedule_fired(s["id"], 0, status="error")
+        except Exception:  # noqa: BLE001
+            pass
+
+
 @asynccontextmanager
 async def lifespan(_app):
     db.init_db()
+    t = threading.Thread(target=_scheduler_loop, daemon=True)
+    t.start()
     yield
+    _scheduler_stop.set()
 
 
 app = FastAPI(title="Sysible Linux Engineering Platform", version="0.1.0", lifespan=lifespan)
@@ -671,6 +701,18 @@ def disconnect_controller(cid: int, user: str = Depends(require_superuser)):
 
 
 # ------------------------------------------------------------------ runs
+def _dispatch_run(project, kind, target, inventory_id, credential_id, extra_vars, actor):
+    """Create a run row and launch its engine on a background thread. Shared by the
+    manual /runs route and the scheduler. Returns the run id."""
+    run_id = db.create_run(
+        project["id"], kind, target, inventory_id=inventory_id,
+        credential_id=credential_id, extra_vars=extra_vars or {}, created_by=actor,
+    )
+    db.log_audit("run_launched", actor, f"#{run_id} {kind} '{target}' on {project['name']}")
+    threading.Thread(target=RUNNERS[kind], args=(run_id,), daemon=True).start()
+    return run_id
+
+
 @app.post("/runs")
 def launch_run(body: dict = Body(...), user: str = Depends(current_user)):
     pid = body.get("project_id")
@@ -687,14 +729,8 @@ def launch_run(body: dict = Body(...), user: str = Depends(current_user)):
         what = {"ansible": "playbook path", "terraform": "action (plan/apply/destroy)",
                 "salt": "state name"}.get(kind, "target")
         raise HTTPException(status_code=400, detail=f"target ({what}) is required.")
-    run_id = db.create_run(
-        pid, kind, target, inventory_id=body.get("inventory_id"),
-        credential_id=body.get("credential_id"), extra_vars=body.get("extra_vars") or {},
-        created_by=user,
-    )
-    db.log_audit("run_launched", user, f"#{run_id} {kind} '{target}' on {project['name']}")
-    # Launch the right engine on a background thread; the console tails the log.
-    threading.Thread(target=RUNNERS[kind], args=(run_id,), daemon=True).start()
+    run_id = _dispatch_run(project, kind, target, body.get("inventory_id"),
+                           body.get("credential_id"), body.get("extra_vars") or {}, user)
     return {"status": "launched", "run_id": run_id}
 
 
@@ -726,3 +762,81 @@ def run_log(run_id: int, offset: int = 0, user: str = Depends(current_user)):
         headers={"X-Log-Next": str(len(data)),
                  "X-Run-Status": (run or {}).get("status", "unknown")},
     )
+
+
+# ------------------------------------------------------------------ schedules
+_CADENCES = {"hourly", "daily", "weekly"}
+
+
+@app.get("/schedules")
+def schedules_list(project_id: int | None = None, user: str = Depends(current_user)):
+    return {"schedules": db.list_schedules(project_id)}
+
+
+@app.post("/schedules")
+def schedules_create(body: dict = Body(...), user: str = Depends(require_operator)):
+    pid = body.get("project_id")
+    project = db.get_project(pid) if pid else None
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    kind = str(body.get("kind") or "ansible")
+    if kind not in RUNNERS:
+        raise HTTPException(status_code=400, detail=f"Unknown engine '{kind}'.")
+    target = str(body.get("target") or "").strip()
+    if not target:
+        raise HTTPException(status_code=400, detail="target is required.")
+    cadence = str(body.get("cadence") or "daily")
+    if cadence not in _CADENCES:
+        raise HTTPException(status_code=400, detail=f"cadence must be one of: {', '.join(_CADENCES)}.")
+    sid = db.create_schedule(
+        str(body.get("name") or "").strip(), pid, kind, target, cadence,
+        str(body.get("at") or "02:00"), int(body.get("weekday") or 0),
+        inventory_id=body.get("inventory_id"), credential_id=body.get("credential_id"),
+        extra_vars=body.get("extra_vars") or {}, created_by=user)
+    db.log_audit("schedule_created", user, f"'{body.get('name') or sid}' {kind} {cadence}")
+    return db.get_schedule(sid)
+
+
+@app.patch("/schedules/{sid}")
+def schedules_update(sid: int, body: dict = Body(...), user: str = Depends(require_operator)):
+    if not db.get_schedule(sid):
+        raise HTTPException(status_code=404, detail="Schedule not found.")
+    if "cadence" in body and body["cadence"] not in _CADENCES:
+        raise HTTPException(status_code=400, detail=f"cadence must be one of: {', '.join(_CADENCES)}.")
+    db.update_schedule(sid, **body)
+    return db.get_schedule(sid)
+
+
+@app.delete("/schedules/{sid}")
+def schedules_delete(sid: int, user: str = Depends(require_operator)):
+    db.delete_schedule(sid)
+    db.log_audit("schedule_deleted", user, str(sid))
+    return {"status": "deleted"}
+
+
+# ------------------------------------------------------------------ health warnings
+@app.get("/health-warnings")
+def health_warnings(user: str = Depends(current_user)):
+    """Surface operational problems the operator should know about — a missing
+    engine binary, an unwritable data dir. Empty list = all clear."""
+    import shutil
+    warnings = []
+    for binary, engine in (("ansible-playbook", "Ansible"), ("terraform", "Terraform"),
+                           ("salt-ssh", "Salt")):
+        if not shutil.which(binary):
+            warnings.append({
+                "id": f"engine-{engine.lower()}",
+                "severity": "warning",
+                "title": f"{engine} is not installed",
+                "detail": f"`{binary}` isn't on PATH, so {engine} runs will fail.",
+                "hint": f"Install {engine} on the SLEP host (the container image bakes it in).",
+            })
+    if not os.access(db.DATA_DIR, os.W_OK):
+        warnings.append({
+            "id": "data-dir",
+            "severity": "critical",
+            "title": "Data directory is not writable",
+            "detail": f"{db.DATA_DIR} can't be written — runs and project files will fail.",
+            "hint": "Check the volume mount and its ownership.",
+        })
+    return {"warnings": warnings}
