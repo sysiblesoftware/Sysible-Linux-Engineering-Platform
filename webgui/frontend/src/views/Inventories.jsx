@@ -180,28 +180,35 @@ function TestConnection({ inv, hosts, onClose }) {
   return (
     <Modal title={`Test connection — ${inv.name}`} onClose={onClose} wide>
       <div className="muted">Checks whether SLEP can SSH to each host with the selected credential{inv.bastion ? ' (through the jump host)' : ''}. Nothing is changed on the hosts.</div>
-      <Field label="Authenticate with">
-        <select value={cid} onChange={(e) => setCid(e.target.value)}>
-          <option value="">SLEP managed key</option>
-          {creds.map((c) => <option key={c.id} value={c.id}>{c.name}{c.username ? ` (${c.username})` : ''}</option>)}
-        </select>
-      </Field>
-      <div className="faint" style={{ fontSize: 12, margin: '4px 2px' }}>{sel.size} of {hosts.length} host(s) selected</div>
-      <div style={{ maxHeight: '22vh', overflow: 'auto', border: '1px solid var(--line)', borderRadius: 8 }}>
-        {hosts.map((h) => (
-          <label key={h.id} className="row" style={{ gap: 10, padding: '5px 10px', borderBottom: '1px solid var(--line)', cursor: 'pointer' }}>
-            <input type="checkbox" checked={sel.has(h.name)} onChange={() => toggle(h.name)} style={{ width: 'auto' }} />
-            <b className="mono" style={{ fontSize: 12, minWidth: 130 }}>{h.name}</b>
-            <span className="muted mono" style={{ fontSize: 12 }}>{h.address}</span>
-          </label>
-        ))}
-      </div>
-      {node}
-      {log && <pre className="log" style={{ marginTop: 8, maxHeight: '26vh' }}>{log}</pre>}
-      <div className="row" style={{ marginTop: 8 }}>
-        <div className="spacer" />
-        <button className="ghost" onClick={onClose}>Close</button>
-        <button className="primary" disabled={running} onClick={start}>{running ? 'Testing…' : `Test ${sel.size} host(s)`}</button>
+      <div className="job-split">
+        <div className="job-col">
+          <Field label="Authenticate with">
+            <select value={cid} onChange={(e) => setCid(e.target.value)}>
+              <option value="">SLEP managed key</option>
+              {creds.map((c) => <option key={c.id} value={c.id}>{c.name}{c.username ? ` (${c.username})` : ''}</option>)}
+            </select>
+          </Field>
+          <div className="faint" style={{ fontSize: 12, margin: '4px 2px' }}>{sel.size} of {hosts.length} host(s) selected</div>
+          <div style={{ maxHeight: '38vh', overflow: 'auto', border: '1px solid var(--line)', borderRadius: 8 }}>
+            {hosts.map((h) => (
+              <label key={h.id} className="row" style={{ gap: 10, padding: '5px 10px', borderBottom: '1px solid var(--line)', cursor: 'pointer' }}>
+                <input type="checkbox" checked={sel.has(h.name)} onChange={() => toggle(h.name)} style={{ width: 'auto' }} />
+                <b className="mono" style={{ fontSize: 12, minWidth: 130 }}>{h.name}</b>
+                <span className="muted mono" style={{ fontSize: 12 }}>{h.address}</span>
+              </label>
+            ))}
+          </div>
+          {node}
+          <div className="row" style={{ marginTop: 8 }}>
+            <div className="spacer" />
+            <button className="ghost" onClick={onClose}>Close</button>
+            <button className="primary" disabled={running} onClick={start}>{running ? 'Testing…' : `Test ${sel.size} host(s)`}</button>
+          </div>
+        </div>
+        <div className="job-col">
+          <div className="pane-title">Result</div>
+          <pre className={'job-log' + (log ? '' : ' empty')}>{log || 'The per-host result appears here when you test.'}</pre>
+        </div>
       </div>
     </Modal>
   )
@@ -223,16 +230,23 @@ function PrepareBastion({ inv, onClose }) {
   })
 
   return (
-    <Modal title={`Prepare jump host — ${inv.name}`} onClose={onClose}>
+    <Modal title={`Prepare jump host — ${inv.name}`} onClose={onClose} wide>
       <div className="muted">Installs SLEP’s key on the jump host so runs and key distribution hop through it with the key — not a password. The password is used once and never saved.</div>
-      <Field label="Jump host (user@host)"><input value={bastion} onChange={(e) => setBastion(e.target.value)} placeholder="admin@192.168.8.212" autoFocus /></Field>
-      <Field label="Jump host password (used once)"><input type="password" value={password} autoComplete="off" onChange={(e) => setPassword(e.target.value)} /></Field>
-      {node}
-      {log && <pre className="log" style={{ marginTop: 8, maxHeight: '26vh' }}>{log}</pre>}
-      <div className="row" style={{ marginTop: 8 }}>
-        <div className="spacer" />
-        <button className="ghost" onClick={onClose}>Close</button>
-        <button className="primary" disabled={running} onClick={start}>{running ? 'Preparing…' : 'Prepare jump host'}</button>
+      <div className="job-split">
+        <div className="job-col">
+          <Field label="Jump host (user@host)"><input value={bastion} onChange={(e) => setBastion(e.target.value)} placeholder="admin@192.168.8.212" autoFocus /></Field>
+          <Field label="Jump host password (used once)"><input type="password" value={password} autoComplete="off" onChange={(e) => setPassword(e.target.value)} /></Field>
+          {node}
+          <div className="row" style={{ marginTop: 8 }}>
+            <div className="spacer" />
+            <button className="ghost" onClick={onClose}>Close</button>
+            <button className="primary" disabled={running} onClick={start}>{running ? 'Preparing…' : 'Prepare jump host'}</button>
+          </div>
+        </div>
+        <div className="job-col">
+          <div className="pane-title">Progress</div>
+          <pre className={'job-log' + (log ? '' : ' empty')}>{log || 'Progress appears here when you start.'}</pre>
+        </div>
       </div>
     </Modal>
   )
@@ -281,31 +295,35 @@ function DistributeKey({ inv, hosts, onClose }) {
   return (
     <Modal title={`Distribute SSH key — ${inv.name}`} onClose={onClose} wide>
       <div className="muted">SLEP installs its own key on the selected hosts, authenticating once with the password below (through the jump host if set). After that, runs use the key — no stored password. The password is used for this action only; it is never saved.</div>
-      {pubkey && <div className="mono faint" style={{ fontSize: 11, wordBreak: 'break-all', margin: '6px 0' }}>{pubkey}</div>}
-
-      <div className="row" style={{ gap: 10 }}>
-        <Field label="SSH username"><input value={username} autoComplete="off" onChange={(e) => setUsername(e.target.value)} placeholder="e.g. admin" autoFocus /></Field>
-        <Field label="Host password (used once)"><input type="password" value={password} autoComplete="off" onChange={(e) => setPassword(e.target.value)} /></Field>
-      </div>
-      <Field label="Jump host (optional)"><input value={bastion} onChange={(e) => setBastion(e.target.value)} placeholder="user@192.168.8.212" /></Field>
-
-      <div className="faint" style={{ fontSize: 12, margin: '4px 2px' }}>{sel.size} of {hosts.length} host(s) selected</div>
-      <div style={{ maxHeight: '22vh', overflow: 'auto', border: '1px solid var(--line)', borderRadius: 8 }}>
-        {hosts.map((h) => (
-          <label key={h.id} className="row" style={{ gap: 10, padding: '5px 10px', borderBottom: '1px solid var(--line)', cursor: 'pointer' }}>
-            <input type="checkbox" checked={sel.has(h.name)} onChange={() => toggle(h.name)} style={{ width: 'auto' }} />
-            <b className="mono" style={{ fontSize: 12, minWidth: 130 }}>{h.name}</b>
-            <span className="muted mono" style={{ fontSize: 12 }}>{h.address}</span>
-          </label>
-        ))}
-      </div>
-
-      {node}
-      {log && <pre className="log" style={{ marginTop: 8, maxHeight: '26vh' }}>{log}</pre>}
-      <div className="row" style={{ marginTop: 8 }}>
-        <div className="spacer" />
-        <button className="ghost" onClick={onClose}>{running ? 'Close (keeps running)' : 'Close'}</button>
-        <button className="primary" disabled={running} onClick={start}>{running ? 'Distributing…' : `Install key on ${sel.size} host(s)`}</button>
+      <div className="job-split">
+        <div className="job-col">
+          {pubkey && <div className="mono faint" style={{ fontSize: 11, wordBreak: 'break-all', marginBottom: 6 }}>{pubkey}</div>}
+          <div className="row" style={{ gap: 10 }}>
+            <Field label="SSH username"><input value={username} autoComplete="off" onChange={(e) => setUsername(e.target.value)} placeholder="e.g. admin" autoFocus /></Field>
+            <Field label="Host password (used once)"><input type="password" value={password} autoComplete="off" onChange={(e) => setPassword(e.target.value)} /></Field>
+          </div>
+          <Field label="Jump host (optional)"><input value={bastion} onChange={(e) => setBastion(e.target.value)} placeholder="user@192.168.8.212" /></Field>
+          <div className="faint" style={{ fontSize: 12, margin: '4px 2px' }}>{sel.size} of {hosts.length} host(s) selected</div>
+          <div style={{ maxHeight: '34vh', overflow: 'auto', border: '1px solid var(--line)', borderRadius: 8 }}>
+            {hosts.map((h) => (
+              <label key={h.id} className="row" style={{ gap: 10, padding: '5px 10px', borderBottom: '1px solid var(--line)', cursor: 'pointer' }}>
+                <input type="checkbox" checked={sel.has(h.name)} onChange={() => toggle(h.name)} style={{ width: 'auto' }} />
+                <b className="mono" style={{ fontSize: 12, minWidth: 130 }}>{h.name}</b>
+                <span className="muted mono" style={{ fontSize: 12 }}>{h.address}</span>
+              </label>
+            ))}
+          </div>
+          {node}
+          <div className="row" style={{ marginTop: 8 }}>
+            <div className="spacer" />
+            <button className="ghost" onClick={onClose}>{running ? 'Close (keeps running)' : 'Close'}</button>
+            <button className="primary" disabled={running} onClick={start}>{running ? 'Distributing…' : `Install key on ${sel.size} host(s)`}</button>
+          </div>
+        </div>
+        <div className="job-col">
+          <div className="pane-title">Progress</div>
+          <pre className={'job-log' + (log ? '' : ' empty')}>{log || 'The per-host log appears here when you start.'}</pre>
+        </div>
       </div>
     </Modal>
   )
