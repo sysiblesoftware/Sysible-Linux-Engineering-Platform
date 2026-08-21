@@ -1195,6 +1195,41 @@ def infra_providers(user: str = Depends(current_user)):
     return {"providers": infra.provider_schema()}
 
 
+@app.post("/infra/test-hypervisor")
+def infra_test_hypervisor(body: dict = Body(...), user: str = Depends(current_user)):
+    """Probe a libvirt (KVM/QEMU) hypervisor connection before applying — runs a
+    read-only `virsh -c <uri> version` so the operator can confirm reachability
+    (local qemu:///system, or a remote qemu+ssh://host). Never mutates anything."""
+    import shutil
+    uri = str(body.get("uri") or "").strip()
+    if not uri:
+        raise HTTPException(status_code=400, detail="uri is required.")
+    if not shutil.which("virsh"):
+        return {"ok": False, "output":
+                "`virsh` (libvirt-clients) isn't installed on the SLEP host, so the connection can't be "
+                "probed here — Terraform apply will still use the URI. Install libvirt-clients to enable this test."}
+    env = dict(os.environ)
+    # For qemu+ssh:// don't wedge on an unknown host key or a passphrase prompt;
+    # BatchMode makes ssh fail fast instead of hanging for input.
+    env["GIT_SSH_COMMAND"] = env.get("GIT_SSH_COMMAND", "")  # no-op guard
+    try:
+        p = subprocess.run(
+            ["virsh", "-c", uri, "--readonly", "version"],
+            capture_output=True, text=True, timeout=25, env=env,
+        )
+        ok = p.returncode == 0
+        out = (p.stdout + p.stderr).strip()
+        if ok and not out:
+            out = "connected."
+        return {"ok": ok, "output": out or "no output"}
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "output":
+                "timed out after 25s — the hypervisor didn't respond. For qemu+ssh:// check SSH reachability "
+                "and that the host key is already trusted on the SLEP host (a new key can't be accepted here)."}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "output": str(e)}
+
+
 @app.get("/infra")
 def infra_list(user: str = Depends(current_user)):
     return {"infra": db.list_infra()}

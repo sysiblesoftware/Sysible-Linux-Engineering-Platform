@@ -107,3 +107,18 @@ def test_libvirt_hypervisor_uri_local_and_remote():
     # Default stays the local hypervisor when unset.
     local = infra.generate("libvirt", {"count": 1, "base_image": "x"}, "")
     assert "qemu:///system" in local["variables.tf"]
+
+
+def test_test_hypervisor_requires_uri(client):
+    assert client.post("/infra/test-hypervisor", json={}).status_code == 400
+
+
+def test_test_hypervisor_without_virsh_is_graceful(client, monkeypatch):
+    # No virsh on the host → a clear, non-fatal message (not a 500). The endpoint
+    # imports shutil locally, so patch the shutil module itself.
+    import shutil
+    monkeypatch.setattr(shutil, "which", lambda b: None)
+    r = client.post("/infra/test-hypervisor", json={"uri": "qemu:///system"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is False and "libvirt-clients" in body["output"]

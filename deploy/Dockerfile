@@ -19,9 +19,10 @@ FROM python:3.12-slim
 
 # Engines + tooling: ssh client (Ansible/salt-ssh transport), sshpass (password
 # SSH auth for Ansible), git (SCM projects), curl/unzip (fetch terraform),
-# ca-certificates, bash (entrypoint).
+# libvirt-clients (`virsh` — the "Test hypervisor connection" probe for the
+# libvirt/KVM VM builder), ca-certificates, bash (entrypoint).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      bash git openssh-client sshpass curl unzip ca-certificates \
+      bash git openssh-client sshpass curl unzip ca-certificates libvirt-clients \
     && rm -rf /var/lib/apt/lists/*
 
 # Terraform (arch-aware via buildx's TARGETARCH: amd64 / arm64).
