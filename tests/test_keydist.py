@@ -50,8 +50,9 @@ def test_distribute_installs_and_creates_credential(client, monkeypatch):
     monkeypatch.setattr(keydist.subprocess, "run", fake_run)
     keydist._run_distribute(iid, {"web1", "web2"}, "admin", "pw", "user@bastion")
 
-    # Both hosts got an SSH session, via the jump host.
-    ssh_cmds = [c for c in seen if any("ProxyJump=user@bastion" in str(x) for x in c)]
+    # Both hosts got an SSH session, tunneled through the jump host (a ProxyCommand
+    # that logs into the bastion — its own sshpass answers the jump password).
+    ssh_cmds = [c for c in seen if any("ProxyCommand=" in str(x) and "user@bastion" in str(x) for x in c)]
     assert len(ssh_cmds) == 2
     # A reusable key credential now exists.
     creds = db.list_credentials()
@@ -83,9 +84,10 @@ def test_prepare_bastion_requires_user_at_host(client):
 
 def test_connection_test_reports_reachable(client, monkeypatch):
     iid = _seed_inventory()
-    monkeypatch.setattr(keydist, "_auth_for", lambda cred: ([], ["-o", "BatchMode=yes"], {}, lambda: None))
+    monkeypatch.setattr(keydist, "_auth_for", lambda cred: ("key", "/tmp/fake-key", {}, lambda: None))
+    monkeypatch.setattr(keydist.shutil, "which", lambda n: "/usr/bin/" + n)
     monkeypatch.setattr(keydist.subprocess, "run", lambda cmd, **k: Done(0, "SLEP_CONN_OK\n"))
-    keydist._run_test(f"{iid}-test", iid, {"web1", "web2"}, None, "")
+    keydist._run_test(f"{iid}-test", iid, {"web1", "web2"}, None, "user@bastion")
     text, _ = keydist.job_log(f"{iid}-test")
     assert "2 reachable, 0 unreachable" in text
 

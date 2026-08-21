@@ -118,14 +118,45 @@ def start_distribute(inventory_id: int, host_names, username: str, password: str
                      daemon=True).start()
 
 
-def _ssh_base(bastion: str) -> list[str]:
-    args = ["ssh", "-o", "StrictHostKeyChecking=accept-new",
-            "-o", "PasswordAuthentication=yes",
-            "-o", "PubkeyAuthentication=no",             # force the password leg
-            "-o", "ConnectTimeout=15"]
+# Operator-directed connections (the operator typed the address + password), so
+# host-key checking is disabled on BOTH hops — mirroring the runner's own policy.
+# Storing keys would fail anyway (throwaway container, ProxyJump's two unknown
+# hosts) and surface as "Host key verification failed".
+_HOSTKEY = ["-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null"]
+
+
+def _pw_proxy(bastion: str) -> str:
+    """A ProxyCommand that logs into the jump host with the SAME password: its own
+    `sshpass -e` reads SSHPASS from the inherited env, so the bastion password
+    prompt is answered too. This is what makes a two-password-hop path work — one
+    sshpass per hop, not one sshpass for both."""
+    return ("sshpass -e ssh " + " ".join(_HOSTKEY)
+            + f" -o PubkeyAuthentication=no -o ConnectTimeout=15 -W %h:%p {bastion}")
+
+
+def _pw_cmd(sshpass: str, bastion: str, target: str, remote: str) -> list[str]:
+    """Password SSH to `target` (through `bastion` if set), forcing the password
+    leg. SSHPASS must be in the env for both the outer call and the proxy."""
+    opts = [*_HOSTKEY, "-o", "PubkeyAuthentication=no", "-o", "ConnectTimeout=15"]
     if bastion:
-        args += ["-o", f"ProxyJump={bastion}"]
-    return args
+        opts += ["-o", f"ProxyCommand={_pw_proxy(bastion)}"]
+    return [sshpass, "-e", "ssh", *opts, target, remote]
+
+
+def _key_cmd(bastion: str, keyfile: str, target: str, remote: str) -> list[str]:
+    """Key SSH to `target` (through `bastion` if set). ProxyJump reuses the same
+    identity for the jump hop. BatchMode so a wrong key fails fast."""
+    opts = [*_HOSTKEY, "-o", "ConnectTimeout=15", "-i", keyfile, "-o", "BatchMode=yes"]
+    if bastion:
+        opts += ["-o", f"ProxyJump={bastion}"]
+    return ["ssh", *opts, target, remote]
+
+
+def _err_line(r) -> str:
+    """The most informative one-line reason from a failed SSH — last non-empty
+    stderr/stdout line, or the exit code when the process said nothing."""
+    lines = [ln for ln in (r.stderr or r.stdout or "").splitlines() if ln.strip()]
+    return lines[-1].strip() if lines else f"ssh exited {r.returncode}"
 
 
 def _install_cmd(pubkey: str) -> str:
@@ -161,7 +192,7 @@ def _run_distribute(inventory_id: int, only: set, username: str, password: str, 
             for h in hosts:
                 target = f"{username}@{h['address']}"
                 emit(f"→ {h['name']} ({target}) …")
-                cmd = [sshpass, "-e", *_ssh_base(bastion), target, remote]
+                cmd = _pw_cmd(sshpass, bastion, target, remote)
                 try:
                     r = subprocess.run(cmd, capture_output=True, text=True, timeout=60, env=env)
                 except subprocess.TimeoutExpired:
@@ -169,8 +200,7 @@ def _run_distribute(inventory_id: int, only: set, username: str, password: str, 
                 if r.returncode == 0 and "SLEP_KEY_OK" in r.stdout:
                     emit(f"   ✓ key installed on {h['name']}"); ok_hosts.append(h["name"])
                 else:
-                    detail = (r.stderr or r.stdout or "").strip().splitlines()
-                    emit(f"   ✗ {h['name']}: {(detail[-1] if detail else 'unknown error')}")
+                    emit(f"   ✗ {h['name']}: {_err_line(r)}")
                     fail_hosts.append(h["name"])
             emit("")
             if ok_hosts:
@@ -222,7 +252,7 @@ def _run_prepare_bastion(key: str, bastion: str, password: str):
             emit("")
             emit(f"→ {bastion} …")
             # Direct connection to the bastion (no ProxyJump), password → sshpass.
-            cmd = [sshpass, "-e", *_ssh_base(""), bastion, _install_cmd(pubkey)]
+            cmd = _pw_cmd(sshpass, "", bastion, _install_cmd(pubkey))
             r = subprocess.run(cmd, capture_output=True, text=True, timeout=60,
                                env=dict(os.environ, SSHPASS=password))
             if r.returncode == 0 and "SLEP_KEY_OK" in r.stdout:
@@ -231,8 +261,7 @@ def _run_prepare_bastion(key: str, bastion: str, password: str):
                 emit("")
                 emit("== Jump host ready — runs and key distribution now hop through it with the key ==")
             else:
-                detail = (r.stderr or r.stdout or "").strip().splitlines()
-                emit(f"   ✗ {bastion}: {(detail[-1] if detail else 'unknown error')}")
+                emit(f"   ✗ {bastion}: {_err_line(r)}")
         except subprocess.TimeoutExpired:
             emit(f"   ✗ timed out connecting to {bastion}")
         except Exception as e:  # noqa: BLE001
@@ -244,29 +273,25 @@ def _run_prepare_bastion(key: str, bastion: str, password: str):
 
 # ------------------------------------------------------------------ connection test
 def _auth_for(credential):
-    """Build the SSH auth bits for a credential. Returns (prefix_argv, ssh_args,
-    env, cleanup). A password credential uses sshpass; a key credential (or the
-    SLEP managed key when credential is None) writes a temp identity and uses
-    BatchMode so a wrong key fails fast instead of prompting."""
+    """Resolve a credential to an SSH auth method. Returns (kind, keyfile, env,
+    cleanup): kind is 'password' or 'key'. A password credential feeds SSHPASS; a
+    key credential (or the SLEP managed key when credential is None) yields an
+    identity file to use with -i."""
     import tempfile
     if credential and credential.get("kind") == "ssh_password" and credential.get("secret"):
-        sshpass = shutil.which("sshpass")
-        if not sshpass:
+        if not shutil.which("sshpass"):
             raise RuntimeError("sshpass is not available for password auth.")
-        return ([sshpass, "-e"], ["-o", "PubkeyAuthentication=no"], {"SSHPASS": credential["secret"]}, lambda: None)
-    # key path: credential's private key, else the SLEP managed key
+        return ("password", None, {"SSHPASS": credential["secret"]}, lambda: None)
     secret = (credential or {}).get("secret") if credential else None
-    if not secret:
-        priv, _ = _key_paths()
-        if not priv.exists():
+    if not secret:                                   # SLEP managed key
+        if not _key_paths()[0].exists():
             ensure_key()
-        keyfile = str(_key_paths()[0])
-        return ([], ["-i", keyfile, "-o", "BatchMode=yes"], {}, lambda: None)
+        return ("key", str(_key_paths()[0]), {}, lambda: None)
     fd, keyfile = tempfile.mkstemp(prefix="slep-probe-")
     with os.fdopen(fd, "w") as kf:
         kf.write(secret if secret.endswith("\n") else secret + "\n")
     os.chmod(keyfile, 0o600)
-    return ([], ["-i", keyfile, "-o", "BatchMode=yes"], {}, lambda: os.unlink(keyfile))
+    return ("key", keyfile, {}, lambda: os.unlink(keyfile))
 
 
 def start_test(inventory_id: int, host_names, credential_id):
@@ -292,7 +317,7 @@ def _run_test(key: str, inventory_id: int, only: set, credential_id, bastion: st
         try:
             credential = db.get_credential(int(credential_id), include_secret=True) if credential_id else None
             conn_user = (credential or {}).get("username") or ""
-            prefix, ssh_args, env_extra, cleanup = _auth_for(credential)
+            kind, keyfile, env_extra, cleanup = _auth_for(credential)
             hosts = db.list_hosts(inventory_id)
             if only:
                 hosts = [h for h in hosts if h["name"] in only]
@@ -303,14 +328,14 @@ def _run_test(key: str, inventory_id: int, only: set, credential_id, bastion: st
                  + (f" via jump host {bastion}" if bastion else "") + " ==")
             emit("")
             env = dict(os.environ, **env_extra)
+            sshpass = shutil.which("sshpass")
             for h in hosts:
                 user = conn_user or (h.get("variables") or {}).get("ansible_user") or ""
                 target = (f"{user}@" if user else "") + h["address"]
-                base = ["ssh", "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=15"]
-                if bastion:
-                    base += ["-o", f"ProxyJump={bastion}"]
-                # prefix+ssh_args carry the auth method (sshpass+password, or -i key+BatchMode).
-                cmd = [*prefix, *base, *ssh_args, target, "echo SLEP_CONN_OK"]
+                if kind == "password":
+                    cmd = _pw_cmd(sshpass, bastion, target, "echo SLEP_CONN_OK")
+                else:
+                    cmd = _key_cmd(bastion, keyfile, target, "echo SLEP_CONN_OK")
                 try:
                     r = subprocess.run(cmd, capture_output=True, text=True, timeout=30, env=env)
                 except subprocess.TimeoutExpired:
@@ -318,8 +343,7 @@ def _run_test(key: str, inventory_id: int, only: set, credential_id, bastion: st
                 if r.returncode == 0 and "SLEP_CONN_OK" in r.stdout:
                     emit(f"   ✓ {h['name']} ({target}) — reachable"); reachable.append(h["name"])
                 else:
-                    detail = (r.stderr or r.stdout or "").strip().splitlines()
-                    emit(f"   ✗ {h['name']} ({target}) — {(detail[-1] if detail else 'unreachable')}")
+                    emit(f"   ✗ {h['name']} ({target}) — {_err_line(r)}")
                     unreachable.append(h["name"])
             emit("")
             emit(f"== {len(reachable)} reachable, {len(unreachable)} unreachable ==")
