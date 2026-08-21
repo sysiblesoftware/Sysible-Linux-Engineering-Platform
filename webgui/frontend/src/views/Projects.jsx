@@ -40,13 +40,37 @@ export default function Projects({ onOpen }) {
 function NewProject({ onClose, onCreated }) {
   const [name, setName] = useState('')
   const [desc, setDesc] = useState('')
+  const [mode, setMode] = useState('blank')   // 'blank' | 'clone'
+  const [url, setUrl] = useState('')
+  const [token, setToken] = useState('')
+  const [busy, setBusy] = useState(false)
   const { wrap, node } = useErr()
+  const create = () => wrap(async () => {
+    setBusy(true)
+    try {
+      const json = { name: name.trim() || (mode === 'clone' ? repoName(url) : ''), description: desc }
+      if (mode === 'clone') { json.clone_url = url.trim(); if (token) json.git_token = token }
+      onCreated(await api('projects', { method: 'POST', json }))
+    } finally { setBusy(false) }
+  })
   return (
     <Modal title="New project" onClose={onClose}>
-      <Field label="Name"><input value={name} onChange={(e) => setName(e.target.value)} autoFocus /></Field>
+      <div className="row" style={{ gap: 6, marginBottom: 4 }}>
+        <button className={'ghost sm' + (mode === 'blank' ? ' active' : '')} onClick={() => setMode('blank')}>Blank</button>
+        <button className={'ghost sm' + (mode === 'clone' ? ' active' : '')} onClick={() => setMode('clone')}>Clone a git repo</button>
+      </div>
+      {mode === 'clone' && (
+        <>
+          <Field label="Repository URL"><input value={url} autoFocus onChange={(e) => setUrl(e.target.value)} placeholder="https://github.com/org/repo.git" /></Field>
+          <Field label="Access token (for private repos — optional)"><input type="password" value={token} autoComplete="off" onChange={(e) => setToken(e.target.value)} placeholder="ghp_… / PAT" /></Field>
+        </>
+      )}
+      <Field label={mode === 'clone' ? 'Name (defaults to the repo name)' : 'Name'}><input value={name} autoFocus={mode === 'blank'} onChange={(e) => setName(e.target.value)} placeholder={mode === 'clone' ? repoName(url) : ''} /></Field>
       <Field label="Description"><input value={desc} onChange={(e) => setDesc(e.target.value)} /></Field>
       {node}
-      <button className="primary" onClick={() => wrap(async () => onCreated(await api('projects', { method: 'POST', json: { name, description: desc } })))}>Create</button>
+      <button className="primary" disabled={busy || (mode === 'clone' && !url.trim())} onClick={create}>{busy ? (mode === 'clone' ? 'Cloning…' : 'Creating…') : (mode === 'clone' ? 'Clone' : 'Create')}</button>
     </Modal>
   )
 }
+
+const repoName = (url) => (url || '').trim().replace(/\.git$/, '').replace(/\/$/, '').split('/').pop() || ''

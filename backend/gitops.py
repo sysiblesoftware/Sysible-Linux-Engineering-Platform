@@ -184,6 +184,30 @@ def _remote_op(pid: int, op: str):
     return {"ok": True, "output": out}
 
 
+def clone(pid: int, url: str, token: str = ""):
+    """Clone `url` into the project's (empty) working dir. Stores the remote and,
+    if given, the encrypted token for later push/pull."""
+    url = (url or "").strip()
+    if not url:
+        raise GitError("A repository URL is required.")
+    dest = db.project_dir(pid)
+    if any(dest.iterdir()):
+        raise GitError("The project directory is not empty — clone needs a fresh project.")
+    cfg, cleanup = _token_cfg(url, token)
+    try:
+        r = _run(pid, ["clone", url, "."], extra_cfg=cfg, timeout=300)
+    finally:
+        cleanup()
+    if r.returncode != 0:
+        out = (r.stderr or r.stdout).strip()
+        if token:
+            out = out.replace(token, "***")
+        raise GitError(out or "clone failed")
+    db.set_project_scm(pid, scm_url=_clean_host_url(url) if url.startswith("https://") else url,
+                       git_token=(vault.encrypt(token) if token else None))
+    return status(pid)
+
+
 def push(pid: int):
     return _remote_op(pid, "push")
 

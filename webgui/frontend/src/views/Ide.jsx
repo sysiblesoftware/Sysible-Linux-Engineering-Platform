@@ -409,27 +409,9 @@ export default function Ide({ project, onBack, onRun }) {
         <h2 style={{ margin: 0 }}>{project.name}</h2><span className="muted">{project.slug}</span>
       </div>
       <div className="ide ide-3col">
-        <div className="tree">
-          {tree.length === 0 && <div className="muted" style={{ padding: 6 }}>Empty project — “+ File”.</div>}
-          {tree.map((f) => (
-            <div key={f.path} className={'f ' + (f.type === 'dir' ? 'dir' : '') + (f.path === path ? ' active' : '')}>
-              <span className="f-name" onClick={() => f.type === 'file' && open(f.path)}>{f.type === 'dir' ? '📁 ' : '📄 '}{f.path}</span>
-              <button className="f-del" title={'Rename ' + f.path} onClick={(e) => { e.stopPropagation(); setRenPath(f.path) }}>✎</button>
-              <button className="f-del" title={'Delete ' + f.path} onClick={(e) => { e.stopPropagation(); setDelPath(f.path) }}>✕</button>
-            </div>
-          ))}
-        </div>
-        <div className="edwrap" onContextMenu={(e) => { if (path != null) { e.preventDefault(); setMenu({ x: e.clientX, y: e.clientY }) } }}>
-          <div className="edtool"><span className="muted">{path || 'No file open'}{!saved && ' •'}</span></div>
-          <Editor height="100%" theme={getTheme() === 'light' ? 'sysible-light' : 'sysible-dark'} path={path || 'untitled'} language={langFor(path || '')}
-            value={content} onChange={(v) => { setContent(v ?? ''); setSaved(false); validate() }}
-            beforeMount={beforeMount}
-            onMount={(ed, monaco) => { editorRef.current = ed; monacoRef.current = monaco; validate() }}
-            options={{ minimap: { enabled: false }, fontSize: 13, automaticLayout: true, contextmenu: false }} />
-        </div>
         <div className="ide-actions">
-          <div className="faint ide-actions-h">Actions</div>
-          <button className="ghost sm" onClick={() => setNewOpen(true)}>Add File</button>
+          <div className="ide-actions-h">Actions</div>
+          <button className="ghost sm" onClick={() => setNewOpen(true)}>＋ New file</button>
           {snip.engine === 'ansible' && (
             <button className="ghost sm" onClick={() => setPlayOpen(true)} disabled={path == null}
               title="Wrap this file in a play, or insert a play header (hosts, become, tasks)">Add Play</button>
@@ -444,6 +426,29 @@ export default function Ide({ project, onBack, onRun }) {
           <button className="ghost sm" title="Version control — commit, push, pull, branches" onClick={() => setGitOpen(true)}>⎇ Git</button>
           <div className="spacer" />
           <button className="primary sm" onClick={() => setRunOpen(true)}>▶ Run</button>
+        </div>
+        <div className="tree">
+          <div className="tree-h"><span>Explorer</span><button className="tree-h-btn" title="New file" onClick={() => setNewOpen(true)}>＋</button></div>
+          {tree.length === 0 && <div className="muted" style={{ padding: 6 }}>Empty project — “＋ New file”.</div>}
+          {tree.map((f) => {
+            const depth = f.path.split('/').length - 1
+            const base = f.path.split('/').pop()
+            return (
+              <div key={f.path} className={'f ' + (f.type === 'dir' ? 'dir' : '') + (f.path === path ? ' active' : '')} style={{ paddingLeft: 8 + depth * 13 }}>
+                <span className="f-name" onClick={() => f.type === 'file' && open(f.path)}>{f.type === 'dir' ? '📁 ' : '📄 '}{base}</span>
+                {f.type === 'file' && <button className="f-del" title={'Rename ' + f.path} onClick={(e) => { e.stopPropagation(); setRenPath(f.path) }}>✎</button>}
+                <button className="f-del" title={'Delete ' + f.path} onClick={(e) => { e.stopPropagation(); setDelPath(f.path) }}>✕</button>
+              </div>
+            )
+          })}
+        </div>
+        <div className="edwrap" onContextMenu={(e) => { if (path != null) { e.preventDefault(); setMenu({ x: e.clientX, y: e.clientY }) } }}>
+          <div className="edtool"><span className="muted">{path || 'No file open'}{!saved && ' •'}</span></div>
+          <Editor height="100%" theme={getTheme() === 'light' ? 'sysible-light' : 'sysible-dark'} path={path || 'untitled'} language={langFor(path || '')}
+            value={content} onChange={(v) => { setContent(v ?? ''); setSaved(false); validate() }}
+            beforeMount={beforeMount}
+            onMount={(ed, monaco) => { editorRef.current = ed; monacoRef.current = monaco; validate() }}
+            options={{ minimap: { enabled: false }, fontSize: 13, automaticLayout: true, contextmenu: false }} />
         </div>
       </div>
       {newOpen && <NewFile project={project} onClose={() => setNewOpen(false)} onCreated={(p) => { setNewOpen(false); loadTree(); open(p) }} />}

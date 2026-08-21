@@ -338,6 +338,17 @@ def create_project(body: dict = Body(...), user: str = Depends(current_user)):
         slug = f"{base}-{n}"
     pid = db.create_project(name, slug, str(body.get("description") or ""),
                             str(body.get("scm_url") or ""), str(body.get("scm_branch") or ""))
+    # Optionally seed the project by cloning a git repo into its (empty) workdir.
+    clone_url = str(body.get("clone_url") or "").strip()
+    if clone_url:
+        try:
+            gitops.clone(pid, clone_url, str(body.get("git_token") or ""))
+        except gitops.GitError as e:
+            db.delete_project(pid)
+            import shutil
+            shutil.rmtree(db.project_dir(pid), ignore_errors=True)
+            raise HTTPException(status_code=400, detail=f"Clone failed: {e}")
+        db.log_audit("project_cloned", user, f"{name} ← {clone_url}")
     return db.get_project(pid)
 
 

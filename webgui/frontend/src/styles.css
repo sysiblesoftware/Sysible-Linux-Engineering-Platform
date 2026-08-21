@@ -96,9 +96,13 @@ table{width:100%;border-collapse:collapse}
 th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line)}
 th{color:var(--muted);font-weight:600;font-size:12px}
 .ide{display:grid;grid-template-columns:230px 1fr;height:calc(100% - 46px);border:1px solid var(--line);border-radius:10px;overflow:hidden}
-.ide-3col{grid-template-columns:230px 1fr 176px}
-.ide-actions{display:flex;flex-direction:column;gap:8px;padding:10px;border-left:1px solid var(--line);background:var(--panel);overflow:auto}
-.ide-actions-h{font-size:11px;letter-spacing:.05em;text-transform:uppercase;padding:2px 2px 4px}
+.ide-3col{grid-template-columns:150px 224px 1fr}
+.ide-actions{display:flex;flex-direction:column;gap:8px;padding:10px;border-right:1px solid var(--line);background:var(--panel);overflow:auto}
+.ide-actions-h,.tree-h{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);
+  padding:2px 4px 6px;border-bottom:1px solid var(--line);margin-bottom:6px;font-weight:600}
+.tree-h{display:flex;align-items:center;justify-content:space-between}
+.tree-h-btn{border:none;background:transparent;color:var(--muted);cursor:pointer;font-size:15px;line-height:1;padding:0 4px}
+.tree-h-btn:hover{color:var(--accent)}
 .ide-actions button{width:100%;justify-content:center}
 .ide-actions .spacer{flex:1;min-height:8px}
 .tree{background:var(--panel);border-right:1px solid var(--line);overflow:auto;padding:8px}

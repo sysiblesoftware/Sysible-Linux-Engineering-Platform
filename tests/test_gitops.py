@@ -49,3 +49,23 @@ def test_push_without_remote_400(client, project):
     pid = project["id"]
     client.post(f"/projects/{pid}/git/init")
     assert client.post(f"/projects/{pid}/git/push").status_code == 400
+
+
+def test_create_project_from_clone(client, monkeypatch):
+    import backend.gitops as g
+    called = {}
+    monkeypatch.setattr(g, "clone", lambda pid, url, token="": called.update(pid=pid, url=url, token=token) or {"repo": True})
+    r = client.post("/projects", json={"name": "cloned", "clone_url": "https://example.com/a/b.git", "git_token": "tok"})
+    assert r.status_code == 200
+    assert called["url"] == "https://example.com/a/b.git" and called["token"] == "tok"
+
+
+def test_create_project_from_clone_failure_rolls_back(client, monkeypatch):
+    import backend.gitops as g, backend.db as db
+    def boom(pid, url, token=""):
+        raise g.GitError("auth failed")
+    monkeypatch.setattr(g, "clone", boom)
+    before = len(db.list_projects())
+    r = client.post("/projects", json={"name": "willfail", "clone_url": "https://x/y.git"})
+    assert r.status_code == 400 and "Clone failed" in r.json()["detail"]
+    assert len(db.list_projects()) == before   # project rolled back
