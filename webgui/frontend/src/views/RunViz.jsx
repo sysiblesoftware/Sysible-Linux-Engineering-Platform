@@ -9,6 +9,7 @@ import React from 'react'
 const STATUS_COLOR = {
   ok: 'var(--ok, #63c869)', changed: 'var(--warn, #e0a83b)', failed: 'var(--err, #e5534b)',
   unreachable: '#c678dd', skipped: '#7d8ca3', pending: '#7d8ca3',
+  notrun: '#8b7fd0',   // task never ran — host failed/aborted earlier, or the run ended
 }
 
 export default function RunViz({ engine, model, seedHosts }) {
@@ -38,7 +39,14 @@ function AnsibleViz({ model, seedHosts }) {
           <div className="spacer" />
           <span className="faint" style={{ fontSize: 12 }}>{hosts.length} host(s) · {model.tasks} task(s)</span>
         </div>
-        <HostReachFlow hosts={hosts} tasks={model.tasks} hostTasks={model.hostTasks || {}} taskList={model.taskList || []} />
+        <div className="flow-legend faint">
+          <span><i style={{ background: STATUS_COLOR.ok }} />ok</span>
+          <span><i style={{ background: STATUS_COLOR.changed }} />changed</span>
+          <span><i style={{ background: STATUS_COLOR.failed }} />failed</span>
+          <span><i style={{ background: STATUS_COLOR.unreachable }} />unreachable</span>
+          <span><i style={{ background: 'transparent', border: `2px solid ${STATUS_COLOR.notrun}` }} />didn’t run</span>
+        </div>
+        <HostReachFlow hosts={hosts} tasks={model.tasks} hostTasks={model.hostTasks || {}} taskList={model.taskList || []} done={!!recap} />
       </div>
 
       <div className="viz-grid">
@@ -65,36 +73,73 @@ function AnsibleViz({ model, seedHosts }) {
 // per task in the play) so you can see which task failed on which host, then the
 // full hostname. Green ok · amber changed · red failed · purple unreachable ·
 // dim pending. Hover a dot for "task: status".
-function HostReachFlow({ hosts, tasks, hostTasks, taskList }) {
+function HostReachFlow({ hosts, tasks, hostTasks, taskList, done }) {
   const n = hosts.length
   const nTasks = Math.max(1, tasks || 0)
-  const rowH = 26
-  const H = Math.max(96, n * rowH + 26)
-  const cx = 46, cy = H / 2, ex = 190          // ex = where the fan lines end
-  const dotR = 4, dotGap = 13
-  const dotsX = ex + 16
-  const nameX = dotsX + nTasks * dotGap + 6
+  // Scale down for big playbooks: tighter dots/rows, and drop the angled column
+  // headers once they'd overlap (tooltips still name each dot). Everything stays
+  // inside the pane's scroll, so hundreds of tasks/hosts just scroll.
+  const dense = nTasks > 18
+  const dotGap = nTasks > 60 ? 8 : nTasks > 30 ? 11 : dense ? 15 : 22
+  const dotR = nTasks > 60 ? 2.6 : nTasks > 30 ? 3.2 : 4.5
+  const rowH = n > 40 ? 15 : n > 20 ? 20 : 26
+  const headerH = (tasks > 0 && !dense) ? 66 : 10   // room for angled task-name headers
+  const bodyH = Math.max(84, n * rowH + 18)
+  const H = headerH + bodyH
+  const cx = 46, cy = headerH + bodyH / 2, ex = 150   // ex = where the fan lines end
+  const dotsX = ex + 20
+  const lastDotX = dotsX + (nTasks - 1) * dotGap
+  const nameX = lastDotX + 16
   const W = nameX + 150
-  const step = n > 1 ? (H - 30) / (n - 1) : 0
+  const step = n > 1 ? (bodyH - 26) / (n - 1) : 0
+  const rowY = (i) => n > 1 ? headerH + 13 + i * step : cy
+  const trunc = (s) => (s.length > 22 ? s.slice(0, 21) + '…' : s)
   return (
     <div style={{ overflowX: 'auto' }}>
       <svg className="viz-flow" width={W} height={H} viewBox={`0 0 ${W} ${H}`}>
+        {/* Task column headers (angled) + faint guide line down each column.
+            Hidden when there are too many tasks to label without overlap. */}
+        {tasks > 0 && !dense && Array.from({ length: nTasks }).map((_, ti) => {
+          const x = dotsX + ti * dotGap
+          return (
+            <g key={'h' + ti}>
+              <line x1={x} y1={headerH - 6} x2={x} y2={H - 8} stroke="var(--line)" strokeOpacity="0.5" strokeWidth="1" />
+              <text x={x} y={headerH - 10} fontSize="10.5" fill="var(--muted)" textAnchor="start"
+                transform={`rotate(-40 ${x} ${headerH - 10})`}>{trunc(taskList[ti]?.name || 'task ' + (ti + 1))}</text>
+            </g>
+          )
+        })}
+        {dense && <text x={dotsX} y={8} fontSize="10.5" fill="var(--faint)">{nTasks} tasks — hover a dot for its name</text>}
         {hosts.map((h, i) => {
-          const y = n > 1 ? 15 + i * step : cy
+          const y = rowY(i)
           const col = STATUS_COLOR[h.last] || STATUS_COLOR.pending
           const reached = h.last !== 'pending'
           const statuses = hostTasks[h.name] || []
+          // Effective status per task: after a host fails/becomes unreachable
+          // (or once the run has ended), tasks it never reached are 'notrun'.
+          let stopped = false
+          const eff = Array.from({ length: nTasks }).map((_, ti) => {
+            const st = statuses[ti]
+            if (st) { if (st === 'failed' || st === 'unreachable') stopped = true; return st }
+            return (stopped || done) ? 'notrun' : 'pending'
+          })
           return (
             <g key={h.name}>
+              {/* server → host fan line */}
               <path d={`M ${cx + 15} ${cy} C ${(cx + ex) / 2} ${cy}, ${(cx + ex) / 2} ${y}, ${ex - 6} ${y}`}
                 fill="none" stroke={col} strokeWidth={reached ? 1.8 : 1} strokeOpacity={reached ? 0.8 : 0.22} />
               <circle cx={ex} cy={y} r={4} fill={col} fillOpacity={reached ? 1 : 0.3} />
-              {Array.from({ length: nTasks }).map((_, ti) => {
-                const st = statuses[ti]
+              {/* connecting track through this host's task dots */}
+              <line x1={ex} y1={y} x2={lastDotX} y2={y} stroke="var(--line-strong)" strokeWidth="1.6" strokeOpacity="0.7" />
+              {eff.map((st, ti) => {
+                const ran = st !== 'pending' && st !== 'notrun'
                 const c = STATUS_COLOR[st] || STATUS_COLOR.pending
+                // 'notrun' shows as a hollow purple ring; ran = solid; pending = dim.
                 return (
-                  <circle key={ti} cx={dotsX + ti * dotGap} cy={y} r={dotR} fill={c} fillOpacity={st ? 1 : 0.28}>
-                    <title>{`${taskList[ti]?.name || 'task ' + (ti + 1)}: ${st || 'pending'}`}</title>
+                  <circle key={ti} cx={dotsX + ti * dotGap} cy={y} r={dotR}
+                    fill={st === 'notrun' ? 'none' : c} fillOpacity={ran ? 1 : (st === 'pending' ? 0.3 : 1)}
+                    stroke={st === 'notrun' ? STATUS_COLOR.notrun : 'var(--bg)'} strokeWidth={st === 'notrun' ? 1.8 : 1.5}>
+                    <title>{`${taskList[ti]?.name || 'task ' + (ti + 1)}: ${st}`}</title>
                   </circle>
                 )
               })}

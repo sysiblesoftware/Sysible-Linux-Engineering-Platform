@@ -160,6 +160,9 @@ th{color:var(--muted);font-weight:600;font-size:12px}
 .flow-title .faint{font-size:11px}
 .flow-title b{font-size:13.5px}
 .viz-flow-box .viz-flow{background:transparent;border:none;padding:0}
+.flow-legend{display:flex;flex-wrap:wrap;gap:12px;font-size:11px;margin:2px 0 8px}
+.flow-legend span{display:inline-flex;align-items:center;gap:5px}
+.flow-legend i{width:9px;height:9px;border-radius:50%;display:inline-block}
 /* Task-progress rail: one dot per task the play has run. */
 .task-rail{display:flex;flex-wrap:wrap;align-items:center;gap:7px}
 .task-dot{width:9px;height:9px;border-radius:50%;display:inline-block;background:var(--line-strong);cursor:default}
