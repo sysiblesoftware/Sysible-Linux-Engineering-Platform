@@ -27,17 +27,20 @@ function AnsibleViz({ model, seedHosts }) {
 
   return (
     <div className="viz">
-      <div className="viz-head">
-        <div>
-          <div className="faint" style={{ fontSize: 12 }}>{model.currentPlay ? `PLAY · ${model.currentPlay}` : 'Ansible'}</div>
-          <div style={{ fontWeight: 600 }}>{model.currentTask ? `TASK · ${model.currentTask}` : recap ? 'Play recap' : 'Starting…'}</div>
+      {/* The flow "panel": a header with the task-progress dots + play/task
+          heading, over the server-reaches-hosts diagram. */}
+      <div className="viz-flow-box">
+        <div className="flow-head">
+          <TaskRail tasks={model.taskList || []} done={!!recap} current={model.currentTask} />
+          <div className="flow-title">
+            <span className="faint">{model.currentPlay ? `PLAY · ${model.currentPlay}` : 'Ansible'}</span>
+            <b>{model.currentTask ? model.currentTask : recap ? 'Play recap' : 'Starting…'}</b>
+          </div>
+          <div className="spacer" />
+          <span className="faint" style={{ fontSize: 12 }}>{hosts.length} host(s) · {model.tasks} task(s)</span>
         </div>
-        <div className="faint" style={{ fontSize: 12 }}>{hosts.length} host(s) · {model.tasks} task(s)</div>
+        <HostReachFlow hosts={hosts} />
       </div>
-
-      <TaskRail tasks={model.taskList || []} done={!!recap} current={model.currentTask} />
-
-      <HostReachFlow hosts={hosts} />
 
       <div className="viz-grid">
         {hosts.map((h) => (
@@ -78,7 +81,6 @@ function TaskRail({ tasks, done, current }) {
           </React.Fragment>
         )
       })}
-      <span className="faint task-rail-label">{done ? `${tasks.length} tasks` : (current || '')}</span>
     </div>
   )
 }
@@ -106,10 +108,32 @@ function HostReachFlow({ hosts }) {
             </g>
           )
         })}
-        <circle cx={cx} cy={cy} r={14} fill="var(--panel2, #1b2230)" stroke="var(--accent)" strokeWidth="1.6" />
-        <path d="M -6 -5 L 6 0 L -6 5 Z" transform={`translate(${cx} ${cy})`} fill="var(--accent)" />
+        <ServerIcon cx={cx} cy={cy} />
       </svg>
     </div>
+  )
+}
+
+// The source node: a SLEP server (a small rack with unit slots + status LEDs)
+// instead of a generic play triangle — this is the SLEP box reaching the fleet.
+function ServerIcon({ cx, cy }) {
+  const w = 26, h = 30, x = cx - w / 2, y = cy - h / 2
+  const green = 'var(--green-bright, #63c869)'
+  return (
+    <g>
+      <rect x={x} y={y} width={w} height={h} rx={4}
+        fill="var(--panel2, #1b2230)" stroke="var(--accent)" strokeWidth="1.6" />
+      {[0, 1, 2].map((i) => {
+        const uy = y + 5 + i * 7.5
+        return (
+          <g key={i}>
+            <rect x={x + 3} y={uy} width={w - 6} height={5} rx={1.4} fill="none" stroke="var(--accent)" strokeOpacity="0.5" strokeWidth="1" />
+            <circle cx={x + 6} cy={uy + 2.5} r={1.3} fill={green} />
+            <line x1={x + 10} y1={uy + 2.5} x2={x + w - 5} y2={uy + 2.5} stroke="var(--accent)" strokeOpacity="0.35" strokeWidth="1" />
+          </g>
+        )
+      })}
+    </g>
   )
 }
 
