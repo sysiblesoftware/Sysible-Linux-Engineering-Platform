@@ -53,10 +53,22 @@ export default function Ide({ project, onBack, onRun }) {
   }
 
   // Insert a task snippet at the editor cursor (fires onChange → marks unsaved).
+  // Space it out: drop a blank line before the task when it follows other content
+  // (so successive inserts read as separate tasks, not one wall of YAML), and end
+  // on a fresh line. Idempotent about existing blank lines — never stacks them up.
   const insertTask = (yaml) => {
     const ed = editorRef.current
     if (!ed) return
-    ed.executeEdits('insert-task', [{ range: ed.getSelection(), text: yaml, forceMoveMarkers: true }])
+    const model = ed.getModel()
+    const sel = ed.getSelection()
+    const pos = sel.getStartPosition()
+    const before = model.getValueInRange({ startLineNumber: 1, startColumn: 1, endLineNumber: pos.lineNumber, endColumn: pos.column })
+    let text = yaml.replace(/\s+$/, '') + '\n'          // exactly one trailing newline
+    if (before.trim() !== '') {                          // there's prior content above
+      const trailing = (before.match(/\n*$/) || [''])[0].length
+      if (trailing < 2) text = '\n'.repeat(2 - trailing) + text   // ensure a blank line separates
+    }
+    ed.executeEdits('insert-task', [{ range: sel, text, forceMoveMarkers: true }])
     ed.focus()
     setTaskOpen(false)
   }
