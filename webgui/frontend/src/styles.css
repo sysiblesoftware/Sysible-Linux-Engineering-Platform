@@ -11,6 +11,9 @@
   --danger:#e5534b; --ok:#63c869; --green:#43a047; --green-bright:#63c869; --warn:#e0a83b;
   --rail-bg:#0a0d13;
   --input-bg:#0c0e12; --log-bg:#0a0c10; --log-fg:#d7dde7;
+  /* Topographic ground — a real contour map (brand-green minor lines with white
+     index contours) painted behind the console, prominent but panel-friendly. */
+  --topo-img:url("/brand-topo-dark.png"); --topo-op:0.5;
 }
 /* Light mode: same brand accents on a bright ground (logs go light too). */
 :root[data-theme="light"]{
@@ -21,8 +24,10 @@
   --danger:#c62f2f; --ok:#2e9e4e; --green:#2e7d32; --green-bright:#2e9e4e; --warn:#b3781a;
   --rail-bg:#e9edf4;
   --input-bg:#ffffff; --log-bg:#f6f8fb; --log-fg:#1c2430;
+  /* On the bright ground white index lines vanish — swap to the light overlay
+     (green minor lines with blue index contours) and dial it back to a watermark. */
+  --topo-img:url("/brand-topo-light.png"); --topo-op:0.34;
 }
-:root[data-theme="light"] body::before{opacity:0.14}
 :root[data-theme="light"] body::after{opacity:0.5}
 :root[data-theme="light"] button.primary{color:#fff}
 :root[data-theme="light"] .avatar{color:#fff}
@@ -39,17 +44,16 @@
 *{box-sizing:border-box}
 html,body,#root{margin:0;height:100%}
 body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:14px;-webkit-font-smoothing:antialiased}
-/* Sysible topographic ground: the contour overlay recoloured to brand green via a
-   CSS mask, plus soft green/teal glows — painted behind the console (matches Controller). */
+/* Sysible topographic ground: a brand-coloured contour map painted behind the
+   console, with soft green/teal glows over it (matches Controller). The overlay
+   image and its strength are theme-driven via the --topo-* vars above. */
 body::before{content:"";position:fixed;inset:0;z-index:-2;pointer-events:none;
-  background-color:rgba(70,177,100,0.55);
-  -webkit-mask:url("/brand-topo-overlay.png") center / cover no-repeat;
-          mask:url("/brand-topo-overlay.png") center / cover no-repeat;
-  opacity:0.5;}
+  background:var(--topo-img) center / cover no-repeat;
+  opacity:var(--topo-op);}
 body::after{content:"";position:fixed;inset:0;z-index:-1;pointer-events:none;
   background:
-    radial-gradient(85% 60% at 12% -8%, rgba(70,177,100,0.13), transparent 55%),
-    radial-gradient(80% 70% at 100% 112%, rgba(45,138,118,0.10), transparent 55%);}
+    radial-gradient(85% 60% at 12% -8%, rgba(70,177,100,0.16), transparent 55%),
+    radial-gradient(80% 70% at 100% 112%, rgba(45,138,118,0.13), transparent 55%);}
 button{font:inherit;cursor:pointer;border:1px solid var(--line);background:var(--panel2);
   color:var(--text);padding:6px 12px;border-radius:7px}
 button:hover{border-color:var(--accent)}
