@@ -126,8 +126,21 @@ def _ensure_venv(emit) -> Path:
 def _install_pip(engine: str, emit) -> None:
     pkg = "ansible" if engine == "ansible" else "salt"
     py = _ensure_venv(emit)
-    _stream([str(py), "-m", "pip", "install", "--upgrade", "pip"], emit)
-    _stream([str(py), "-m", "pip", "install", pkg], emit)
+    _stream([str(py), "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel"], emit)
+    # --prefer-binary avoids source builds where a wheel exists. Salt still pulls a
+    # C-extension dep (timelib) that has no universal wheel; if there's no compiler
+    # the build fails, so translate that into an actionable message.
+    try:
+        _stream([str(py), "-m", "pip", "install", "--prefer-binary", pkg], emit)
+    except RuntimeError:
+        if engine == "salt" and not (shutil.which("gcc") or shutil.which("cc")):
+            emit("")
+            emit("!! Salt needs a C toolchain to build a dependency (timelib), and none was found.")
+            emit("   Fix ONE of these, then retry:")
+            emit("     • Debian/Ubuntu:  sudo apt-get install -y gcc python3-dev libffi-dev")
+            emit("     • RHEL/Rocky:     sudo dnf install -y gcc python3-devel libffi-devel")
+            emit("     • Or run the container image, which bakes salt-ssh in already.")
+        raise
 
 
 def _install_terraform(emit) -> None:

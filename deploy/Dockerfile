@@ -1,9 +1,10 @@
 # Sysible Linux Engineering Platform — Community Edition, single container.
 #
-# One image runs both services (backend :9100 + web console :8810) with the
-# engines baked in (Ansible + Terraform; Salt is optional, see below). SQLite +
-# project workdirs + run logs live on the /data volume. This is the "less of a
-# hassle than AAP" promise: docker compose up, open :8810, done.
+# One image runs both services (backend :9100 + web console :8810) with all three
+# engines baked in (Ansible + Terraform + Salt; Salt is toggleable via the
+# INSTALL_SALT build arg). SQLite + project workdirs + run logs live on the /data
+# volume. This is the "less of a hassle than AAP" promise: docker compose up,
+# open :8810, done.
 
 # ---- stage 1: build the React console -------------------------------------
 FROM node:22-slim AS web
@@ -37,10 +38,21 @@ COPY backend/requirements.txt backend/requirements.txt
 # Ansible is first-class. Install the full `ansible` package (not just
 # ansible-core) so the community.general / ansible.posix collections the task
 # palette uses (LVM, mount, firewalld, selinux, authorized_key, …) are present.
-# sshpass (installed above) covers password SSH. (Salt is optional — uncomment
-# to bake salt-ssh; it's large, hence off by default for a lean image.)
+# sshpass (installed above) covers password SSH.
 RUN pip install --no-cache-dir -r backend/requirements.txt ansible
-#   && pip install --no-cache-dir salt
+
+# Salt (salt-ssh) is the third engine. It pulls C-extension deps (timelib) that
+# must be compiled, so we add a toolchain, build the wheels, then purge it in the
+# SAME layer — salt stays, the ~200 MB of build tools don't. Set INSTALL_SALT=0
+# (--build-arg) for a leaner image without Salt; the in-app installer can add it
+# later on a host that has a compiler.
+ARG INSTALL_SALT=1
+RUN if [ "$INSTALL_SALT" = "1" ]; then \
+      apt-get update && apt-get install -y --no-install-recommends gcc python3-dev libffi-dev \
+      && pip install --no-cache-dir --prefer-binary salt \
+      && apt-get purge -y gcc python3-dev libffi-dev && apt-get autoremove -y \
+      && rm -rf /var/lib/apt/lists/* ; \
+    fi
 
 COPY backend/ backend/
 COPY webgui/ webgui/
