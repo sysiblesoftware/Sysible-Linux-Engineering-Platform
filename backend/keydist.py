@@ -72,6 +72,14 @@ def public_key() -> str:
     return pub.read_text().strip() if pub.exists() else ""
 
 
+def managed_key_path() -> str:
+    """Filesystem path of SLEP's managed PRIVATE key if it exists, else ''. The
+    runner uses it to authenticate the jump-host hop (which 'Prepare jump host' /
+    'Distribute SSH key' set up with this key)."""
+    priv = _key_paths()[0]
+    return str(priv) if priv.exists() else ""
+
+
 def _log_path(key) -> Path:
     d = db.DATA_DIR / "keydist"
     d.mkdir(parents=True, exist_ok=True)

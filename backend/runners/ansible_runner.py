@@ -24,7 +24,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from .. import db, vault
+from .. import db, keydist, vault
 
 
 def _ansible_group(name: str) -> str:
@@ -38,7 +38,7 @@ def _ansible_group(name: str) -> str:
     return g or "ungrouped"
 
 
-def _render_inventory(hosts, credential, dest: Path, bastion: str = "") -> None:
+def _render_inventory(hosts, credential, dest: Path, bastion: str = "", bastion_key: str = "") -> None:
     """Write an Ansible INI inventory from SLEP hosts. Hosts are grouped by their
     comma-separated `groups`; every host also lands in the implicit `all`. SSH
     connection vars come from the attached credential."""
@@ -73,12 +73,20 @@ def _render_inventory(hosts, credential, dest: Path, bastion: str = "") -> None:
             f.write(f"\n[{g}]\n")
             for line in lines:
                 f.write(line + "\n")
-        # Optional SSH jump host (bastion): reach every host through it. The same
-        # --private-key identity is used for the jump (ssh applies it to all hops).
+        # Optional SSH jump host (bastion): reach every host through it. Native
+        # ProxyJump doesn't reliably pass StrictHostKeyChecking=no down to the jump
+        # sub-connection ("Connection closed by UNKNOWN"/"Host key verification
+        # failed"), so spell the jump out as an explicit ProxyCommand that carries
+        # the host-key options and keys into the bastion with SLEP's managed key
+        # (which 'Prepare jump host' / 'Distribute SSH key' installed there).
         if bastion:
+            common = "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
             f.write("\n[all:vars]\n")
-            f.write(f"ansible_ssh_common_args=-o ProxyJump={bastion} "
-                    "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null\n")
+            if bastion_key:
+                proxy = f"ssh {common} -o BatchMode=yes -i {bastion_key} -W %h:%p {bastion}"
+                f.write(f'ansible_ssh_common_args=-o ProxyCommand="{proxy}" {common}\n')
+            else:
+                f.write(f"ansible_ssh_common_args=-o ProxyJump={bastion} {common}\n")
 
 
 def _emit_unreachable_help(emit, has_bastion: bool, proxy_hop_closed: bool,
@@ -167,7 +175,10 @@ def launch(run_id: int) -> None:
                 emit(f"!! Playbook not found: {run['target']}")
                 raise RuntimeError("playbook missing")
 
-            _render_inventory(hosts, credential, inv_file, bastion=bastion)
+            # The jump hop authenticates with SLEP's managed key (installed on the
+            # bastion by 'Prepare jump host' / 'Distribute SSH key').
+            _render_inventory(hosts, credential, inv_file, bastion=bastion,
+                              bastion_key=keydist.managed_key_path())
 
             cmd = ["ansible-playbook", "-i", str(inv_file), str(playbook)]
             if credential and credential.get("kind") == "ssh" and credential.get("secret"):

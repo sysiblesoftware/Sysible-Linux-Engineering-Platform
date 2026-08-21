@@ -33,13 +33,27 @@ def test_rendered_inventory_has_valid_sections(tmp_path):
     assert "arch-01" in body and "ubuntu-01" in body
 
 
-def test_bastion_injects_proxyjump(tmp_path):
+def test_bastion_without_key_falls_back_to_proxyjump(tmp_path):
     hosts = [{"name": "web1", "address": "10.0.0.11", "groups": "", "variables": {}}]
     dest = tmp_path / "inv.ini"
     _render_inventory(hosts, {"username": "admin"}, dest, bastion="ops@192.168.8.212")
     text = dest.read_text()
     assert "[all:vars]" in text
     assert "ansible_ssh_common_args=-o ProxyJump=ops@192.168.8.212" in text
+
+
+def test_bastion_with_key_uses_explicit_proxycommand(tmp_path):
+    """With SLEP's managed key, the jump hop is an explicit ProxyCommand that keys
+    into the bastion and disables host-key checks on that hop — native ProxyJump
+    doesn't reliably inherit those, causing 'Connection closed by UNKNOWN'."""
+    hosts = [{"name": "web1", "address": "10.0.0.11", "groups": "", "variables": {}}]
+    dest = tmp_path / "inv.ini"
+    _render_inventory(hosts, {"username": "admin"}, dest,
+                      bastion="ops@192.168.8.212", bastion_key="/data/ssh/slep_ed25519")
+    text = dest.read_text()
+    assert 'ProxyCommand="ssh ' in text and "-i /data/ssh/slep_ed25519" in text
+    assert "-W %h:%p ops@192.168.8.212" in text
+    assert "StrictHostKeyChecking=no" in text
 
 
 def test_no_bastion_section_when_unset(tmp_path):
