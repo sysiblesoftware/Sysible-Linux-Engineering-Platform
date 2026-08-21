@@ -17,7 +17,7 @@ class Resp:
 
 def test_provider_schema_lists_all_providers(client):
     d = client.get("/infra/providers").json()["providers"]
-    assert set(d) == {"aws", "digitalocean", "libvirt", "proxmox"}
+    assert set(d) == {"aws", "digitalocean", "libvirt", "proxmox", "gcp", "azure"}
     for p in d.values():
         assert p["options"] and all("key" in o and "label" in o for o in p["options"])
 
@@ -52,7 +52,7 @@ def test_create_infra_writes_project_files(client):
 
 
 def test_create_infra_unknown_provider_400(client):
-    assert client.post("/infra", json={"name": "x", "provider": "azure", "options": {}}).status_code == 400
+    assert client.post("/infra", json={"name": "x", "provider": "oracle-cloud", "options": {}}).status_code == 400
 
 
 def test_enroll_registers_hosts_in_controller(client, monkeypatch):

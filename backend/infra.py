@@ -84,6 +84,37 @@ PROVIDERS = {
             _SSH_USER, _SSH_KEY, _ENV,
         ],
     },
+    "gcp": {
+        "label": "Google Cloud (GCE)",
+        "blurb": "Compute Engine instances. Needs a GCP service-account key (attach a cloud credential: GOOGLE_CREDENTIALS / GOOGLE_APPLICATION_CREDENTIALS) and your project id.",
+        "options": [
+            _COUNT, _PREFIX,
+            {"key": "project", "label": "GCP project id", "type": "text", "default": "my-project"},
+            {"key": "region", "label": "Region", "type": "select", "default": "us-central1",
+             "choices": ["us-central1", "us-east1", "us-west1", "europe-west1", "europe-west4", "asia-east1", "asia-southeast1"]},
+            {"key": "zone", "label": "Zone", "type": "text", "default": "us-central1-a"},
+            {"key": "machine_type", "label": "Machine type", "type": "select", "default": "e2-small",
+             "choices": ["e2-micro", "e2-small", "e2-medium", "e2-standard-2", "e2-standard-4", "n2-standard-2"]},
+            {"key": "image", "label": "Image", "type": "text", "default": "ubuntu-os-cloud/ubuntu-2204-lts"},
+            {"key": "disk_size", "label": "Boot disk (GB)", "type": "number", "default": 20},
+            _SSH_USER, _SSH_KEY, _ENV,
+        ],
+    },
+    "azure": {
+        "label": "Microsoft Azure",
+        "blurb": "Linux VMs (with a resource group + network). Needs Azure credentials (attach a cloud credential: ARM_CLIENT_ID/ARM_CLIENT_SECRET/ARM_TENANT_ID/ARM_SUBSCRIPTION_ID). SSH key must be RSA.",
+        "options": [
+            _COUNT, _PREFIX,
+            {"key": "location", "label": "Region", "type": "select", "default": "eastus",
+             "choices": ["eastus", "eastus2", "westus2", "westeurope", "northeurope", "uksouth", "southeastasia", "australiaeast"]},
+            {"key": "vm_size", "label": "VM size", "type": "select", "default": "Standard_B1s",
+             "choices": ["Standard_B1s", "Standard_B2s", "Standard_D2s_v5", "Standard_D4s_v5", "Standard_F2s_v2"]},
+            {"key": "ssh_user", "label": "Admin user", "type": "text", "default": "azureuser"},
+            {"key": "ssh_public_key", "label": "Deploy SSH public key (RSA — Azure requires it)",
+             "type": "textarea", "default": "", "help": "Azure's admin_ssh_key needs an RSA key (ssh-rsa …)."},
+            _ENV,
+        ],
+    },
 }
 
 
@@ -325,8 +356,174 @@ resource "proxmox_virtual_environment_vm" "vm" {{
     return {"main.tf": main, "variables.tf": variables, "outputs.tf": outputs}
 
 
+def _render_gcp(spec, keys):
+    ssh_user = _opt(spec, "ssh_user", "ubuntu")
+    # GCE injects SSH keys via instance metadata `ssh-keys` (newline-separated
+    # "user:key" lines) — no cloud-init file needed.
+    ssh_keys = "\\n".join(f"{ssh_user}:{k.strip()}" for k in keys if k and k.strip())
+    main = f'''terraform {{
+  required_providers {{
+    google = {{ source = "hashicorp/google", version = "~> 5.0" }}
+  }}
+}}
+
+provider "google" {{
+  project = var.project
+  region  = var.region
+}}
+
+resource "google_compute_instance" "vm" {{
+  count        = var.vm_count
+  name         = "${{var.name_prefix}}-${{count.index + 1}}"
+  machine_type = var.machine_type
+  zone         = var.zone
+
+  boot_disk {{
+    initialize_params {{
+      image = var.image
+      size  = var.disk_size
+    }}
+  }}
+  network_interface {{
+    network = "default"
+    access_config {{}}   # ephemeral public IP
+  }}
+  metadata = {{
+    ssh-keys = "{ssh_keys}"
+  }}
+  labels = {{
+    environment = var.environment
+    managed_by  = "slep"
+  }}
+}}
+'''
+    variables = _vars({
+        "project": ("string", spec.get("project", "my-project")),
+        "region": ("string", spec.get("region", "us-central1")),
+        "zone": ("string", spec.get("zone", "us-central1-a")),
+        "machine_type": ("string", spec.get("machine_type", "e2-small")),
+        "image": ("string", spec.get("image", "ubuntu-os-cloud/ubuntu-2204-lts")),
+        "disk_size": ("number", spec.get("disk_size", 20)),
+        "vm_count": ("number", spec.get("count", 2)),
+        "name_prefix": ("string", spec.get("name_prefix", "app")),
+        "environment": ("string", spec.get("environment", "production")),
+    })
+    outputs = f'''output "sysible_hosts" {{
+  value = [ for i, v in google_compute_instance.vm : {{
+    name = "${{var.name_prefix}}-${{i + 1}}"
+    ip   = try(v.network_interface[0].access_config[0].nat_ip, "")
+    user = "{ssh_user}"
+  }} ]
+}}
+'''
+    return {"main.tf": main, "variables.tf": variables, "outputs.tf": outputs}
+
+
+def _render_azure(spec, keys):
+    ssh_user = _opt(spec, "ssh_user", "azureuser")
+    # admin_ssh_key takes the deploy key; the Controller key (if any) goes in via
+    # cloud-init custom_data so it also lands in authorized_keys.
+    ctrl_keys = [k for k in keys[1:] if k and k.strip()]
+    main = f'''terraform {{
+  required_providers {{
+    azurerm = {{ source = "hashicorp/azurerm", version = "~> 3.0" }}
+  }}
+}}
+
+provider "azurerm" {{
+  features {{}}
+}}
+
+resource "azurerm_resource_group" "rg" {{
+  name     = "${{var.name_prefix}}-rg"
+  location = var.location
+}}
+
+resource "azurerm_virtual_network" "vnet" {{
+  name                = "${{var.name_prefix}}-vnet"
+  address_space       = ["10.0.0.0/16"]
+  location            = azurerm_resource_group.rg.location
+  resource_group_name = azurerm_resource_group.rg.name
+}}
+
+resource "azurerm_subnet" "subnet" {{
+  name                 = "${{var.name_prefix}}-subnet"
+  resource_group_name  = azurerm_resource_group.rg.name
+  virtual_network_name = azurerm_virtual_network.vnet.name
+  address_prefixes     = ["10.0.1.0/24"]
+}}
+
+resource "azurerm_public_ip" "pip" {{
+  count               = var.vm_count
+  name                = "${{var.name_prefix}}-${{count.index + 1}}-pip"
+  location            = azurerm_resource_group.rg.location
+  resource_group_name = azurerm_resource_group.rg.name
+  allocation_method   = "Static"
+}}
+
+resource "azurerm_network_interface" "nic" {{
+  count               = var.vm_count
+  name                = "${{var.name_prefix}}-${{count.index + 1}}-nic"
+  location            = azurerm_resource_group.rg.location
+  resource_group_name = azurerm_resource_group.rg.name
+  ip_configuration {{
+    name                          = "internal"
+    subnet_id                     = azurerm_subnet.subnet.id
+    private_ip_address_allocation = "Dynamic"
+    public_ip_address_id          = azurerm_public_ip.pip[count.index].id
+  }}
+}}
+
+resource "azurerm_linux_virtual_machine" "vm" {{
+  count                 = var.vm_count
+  name                  = "${{var.name_prefix}}-${{count.index + 1}}"
+  resource_group_name   = azurerm_resource_group.rg.name
+  location              = azurerm_resource_group.rg.location
+  size                  = var.vm_size
+  admin_username        = var.admin_user
+  network_interface_ids = [azurerm_network_interface.nic[count.index].id]
+  custom_data           = base64encode(file("${{path.module}}/cloudinit.cfg"))
+
+  admin_ssh_key {{
+    username   = var.admin_user
+    public_key = var.ssh_public_key
+  }}
+  os_disk {{
+    caching              = "ReadWrite"
+    storage_account_type = "Standard_LRS"
+  }}
+  source_image_reference {{
+    publisher = "Canonical"
+    offer     = "0001-com-ubuntu-server-jammy"
+    sku       = "22_04-lts"
+    version   = "latest"
+  }}
+}}
+'''
+    variables = _vars({
+        "location": ("string", spec.get("location", "eastus")),
+        "vm_size": ("string", spec.get("vm_size", "Standard_B1s")),
+        "admin_user": ("string", ssh_user),
+        "ssh_public_key": ("string", spec.get("ssh_public_key", "")),
+        "vm_count": ("number", spec.get("count", 2)),
+        "name_prefix": ("string", spec.get("name_prefix", "app")),
+        "environment": ("string", spec.get("environment", "production")),
+    })
+    outputs = f'''output "sysible_hosts" {{
+  value = [ for i, v in azurerm_linux_virtual_machine.vm : {{
+    name = "${{var.name_prefix}}-${{i + 1}}"
+    ip   = try(v.public_ip_address, azurerm_public_ip.pip[i].ip_address, "")
+    user = "{ssh_user}"
+  }} ]
+}}
+'''
+    return {"main.tf": main, "variables.tf": variables, "outputs.tf": outputs,
+            "cloudinit.cfg": _cloudinit(ssh_user, ctrl_keys)}
+
+
 _RENDERERS = {"aws": _render_aws, "digitalocean": _render_digitalocean,
-              "libvirt": _render_libvirt, "proxmox": _render_proxmox}
+              "libvirt": _render_libvirt, "proxmox": _render_proxmox,
+              "gcp": _render_gcp, "azure": _render_azure}
 
 
 def _vars(defs: dict) -> str:
