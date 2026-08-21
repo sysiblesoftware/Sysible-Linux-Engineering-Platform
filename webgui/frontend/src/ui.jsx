@@ -4,11 +4,12 @@ export function Field({ label, children }) {
   return (<label className="fld">{label}{children}</label>)
 }
 
-// A simple modal with its own error line. `render` gets ({ close, setErr }).
-export function Modal({ title, onClose, children }) {
+// A simple modal with its own error line. Pass `wide` for a roomier dialog
+// (e.g. the two-pane task palette).
+export function Modal({ title, onClose, children, wide }) {
   return (
     <div className="modal-bg" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose() }}>
-      <div className="card modal col">
+      <div className={'card modal col' + (wide ? ' wide' : '')}>
         <h2 style={{ margin: 0 }}>{title}</h2>
         {children}
       </div>

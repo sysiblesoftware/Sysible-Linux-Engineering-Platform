@@ -117,33 +117,59 @@ function NewFile({ project, onClose, onCreated }) {
   )
 }
 
-// Insert-task palette: searchable, grouped Ansible task snippets. Clicking a task
-// drops its YAML at the editor cursor.
+// Insert-task palette. To keep ~13 categories from crowding the dialog, it's
+// category-first: a left rail of groups, and only the selected group's tasks on
+// the right. Typing in the search box switches to a flat, cross-category result
+// list (grouped by category) so nothing is buried behind a click.
 function TaskPalette({ onClose, onInsert }) {
   const [q, setQ] = useState('')
+  const [cat, setCat] = useState(SNIPPET_GROUPS[0].group)
   const needle = q.trim().toLowerCase()
-  const groups = SNIPPET_GROUPS.map((g) => ({
+  const searching = needle.length > 0
+
+  // Search mode: flatten matches across every group, keep group labels.
+  const matches = SNIPPET_GROUPS.map((g) => ({
     ...g,
-    items: g.items.filter((it) => !needle
-      || it.name.toLowerCase().includes(needle) || (it.search || '').includes(needle)),
+    items: g.items.filter((it) => it.name.toLowerCase().includes(needle) || (it.search || '').includes(needle)),
   })).filter((g) => g.items.length)
+
+  const active = SNIPPET_GROUPS.find((g) => g.group === cat) || SNIPPET_GROUPS[0]
+  const Task = (it) => (
+    <button key={it.name} className="ghost" style={{ display: 'block', width: '100%', textAlign: 'left', marginBottom: 4 }}
+      onClick={() => onInsert(it.yaml)}>{it.name}</button>
+  )
+
   return (
-    <Modal title="Insert task" onClose={onClose}>
+    <Modal title="Insert task" onClose={onClose} wide>
       <input autoFocus placeholder="Search tasks — shell, package, service, lvm, mount, git…"
         value={q} onChange={(e) => setQ(e.target.value)} />
-      <div style={{ maxHeight: '56vh', overflow: 'auto', marginTop: 4 }}>
-        {groups.length === 0 && <div className="muted" style={{ padding: 8 }}>No matching tasks.</div>}
-        {groups.map((g) => (
-          <div key={g.group} style={{ marginBottom: 8 }}>
-            <div className="faint" style={{ fontSize: 12, margin: '8px 2px 4px' }}>{g.group}</div>
-            {g.items.map((it) => (
-              <button key={it.name} className="ghost" style={{ display: 'block', width: '100%', textAlign: 'left', marginBottom: 4 }}
-                onClick={() => onInsert(it.yaml)}>{it.name}</button>
+      {searching ? (
+        <div style={{ maxHeight: '56vh', overflow: 'auto', marginTop: 8 }}>
+          {matches.length === 0 && <div className="muted" style={{ padding: 8 }}>No matching tasks.</div>}
+          {matches.map((g) => (
+            <div key={g.group} style={{ marginBottom: 8 }}>
+              <div className="faint" style={{ fontSize: 12, margin: '8px 2px 4px' }}>{g.group}</div>
+              {g.items.map(Task)}
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="task-palette" style={{ marginTop: 8 }}>
+          <div className="tp-cats">
+            {SNIPPET_GROUPS.map((g) => (
+              <button key={g.group} className={'tp-cat' + (g.group === cat ? ' active' : '')}
+                onClick={() => setCat(g.group)}>
+                {g.group}<span className="faint" style={{ fontSize: 11 }}> {g.items.length}</span>
+              </button>
             ))}
           </div>
-        ))}
-      </div>
-      <div className="faint" style={{ fontSize: 12 }}>Inserts a task at the cursor — indented for a play’s <span className="mono">tasks:</span> list. Adjust indentation to match your file.</div>
+          <div className="tp-items">
+            <div className="faint" style={{ fontSize: 12, margin: '2px 2px 6px' }}>{active.group}</div>
+            {active.items.map(Task)}
+          </div>
+        </div>
+      )}
+      <div className="faint" style={{ fontSize: 12, marginTop: 6 }}>Inserts a task at the cursor — indented for a play’s <span className="mono">tasks:</span> list. Adjust indentation to match your file.</div>
     </Modal>
   )
 }
