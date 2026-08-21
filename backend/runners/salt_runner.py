@@ -13,6 +13,7 @@ that's removed when the run ends.
 """
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import tempfile
@@ -68,6 +69,10 @@ def launch(run_id: int) -> None:
         if run.get("credential_id") else None
     )
     state = (run["target"] or "").strip()
+    try:
+        extra_vars = json.loads(run.get("extra_vars") or "{}")
+    except (TypeError, ValueError):
+        extra_vars = {}
 
     tmp = Path(tempfile.mkdtemp(prefix=f"slep-salt-{run_id}-"))
     roster = tmp / "roster"
@@ -105,9 +110,15 @@ def launch(run_id: int) -> None:
             cmd = ["salt-ssh", "-c", str(conf_dir), "-i", "--no-color", "'*'", func]
             if func == "state.apply":
                 cmd.append(state)
+            # extra_vars become salt kwargs (e.g. test=True for a dry run, or
+            # pillar overrides key=value). Salt parses `k=v` trailing args itself.
+            for k, v in extra_vars.items():
+                cmd.append(f"{k}={v}")
 
+            dry = str(extra_vars.get("test", "")).lower() in ("true", "1", "yes")
             emit(f"-- roster: {len(hosts)} host(s); credential: "
-                 f"{credential['name'] if credential else 'none'} --")
+                 f"{credential['name'] if credential else 'none'}"
+                 f"{'; test mode (dry-run)' if dry else ''} --")
             rc = _common.stream(cmd, workdir, dict(os.environ), log)
             emit(f"\n== finished: exit code {rc} ==")
             db.set_run_status(run_id, "success" if rc == 0 else "failed",

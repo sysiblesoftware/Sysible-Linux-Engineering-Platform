@@ -1,5 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { api, tail } from '../api.js'
+import { parseRun } from '../runParse.js'
+import RunViz from './RunViz.jsx'
 
 // Render ANSI-coloured tool output (ansible-playbook et al. emit SGR codes) as
 // coloured spans, so the run log reads like a real terminal instead of showing
@@ -63,14 +65,38 @@ export default function Runs({ onOpen }) {
 export function RunLog({ runId, onBack }) {
   const [text, setText] = useState('')
   const [status, setStatus] = useState('pending')
+  const [tab, setTab] = useState('viz')          // 'viz' | 'log'
+  const [engine, setEngine] = useState('ansible')
+  const [seedHosts, setSeedHosts] = useState([])
   const boxRef = useRef(null)
+
+  // Run metadata drives the viz: which engine, and (for Ansible) the inventory's
+  // hosts so the "reaching hosts" grid shows every target before it reports in.
+  useEffect(() => {
+    let alive = true
+    ;(async () => {
+      try {
+        const r = await api(`runs/${runId}`)
+        if (!alive) return
+        setEngine(r.kind || 'ansible')
+        if (r.inventory_id) {
+          try {
+            const h = await api(`inventories/${r.inventory_id}/hosts`)
+            if (alive) setSeedHosts((h.hosts || []).map((x) => x.name))
+          } catch { /* inventory may be gone */ }
+        }
+      } catch { /* run detail optional */ }
+    })()
+    return () => { alive = false }
+  }, [runId])
+
   useEffect(() => {
     let alive = true, offset = 0, acc = ''
     ;(async () => {
       while (alive) {
         const r = await tail(`runs/${runId}/log?offset=${offset}`)
         if (!alive) break
-        if (r.text) { acc += r.text; setText(acc); const b = boxRef.current; if (b) b.scrollTop = b.scrollHeight }
+        if (r.text) { acc += r.text; setText(acc); const b = boxRef.current; if (b && tab === 'log') b.scrollTop = b.scrollHeight }
         offset = r.next; setStatus(r.status)
         if (['success', 'failed', 'canceled'].includes(r.status)) break
         await new Promise((res) => setTimeout(res, 1000))
@@ -78,14 +104,25 @@ export function RunLog({ runId, onBack }) {
     })()
     return () => { alive = false }
   }, [runId])
+
+  const model = parseRun(engine, text)
   return (
     <>
       <div className="row" style={{ marginBottom: 10 }}>
         <button className="ghost sm" onClick={onBack}>← Runs</button>
         <h2 style={{ margin: 0 }}>Run #{runId}</h2>
+        <span className="muted">{engine}</span>
         <span className={'pill ' + status}>{status}</span>
+        <div className="spacer" />
+        <div className="seg">
+          <button className={'seg-btn' + (tab === 'viz' ? ' active' : '')} onClick={() => setTab('viz')}>Visualize</button>
+          <button className={'seg-btn' + (tab === 'log' ? ' active' : '')} onClick={() => setTab('log')}>Log</button>
+        </div>
       </div>
-      <div className="log" ref={boxRef}>{text ? ansiToSpans(text) : 'connecting…'}</div>
+      {tab === 'viz'
+        ? (text ? <RunViz engine={engine} model={model} seedHosts={seedHosts} />
+          : <div className="muted" style={{ padding: 8 }}>connecting…</div>)
+        : <div className="log" ref={boxRef}>{text ? ansiToSpans(text) : 'connecting…'}</div>}
     </>
   )
 }

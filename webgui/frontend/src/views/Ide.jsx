@@ -2,7 +2,9 @@ import React, { useEffect, useState, useCallback, useRef } from 'react'
 import Editor from '@monaco-editor/react'
 import { api } from '../api.js'
 import { Field, Modal, useErr } from '../ui.jsx'
-import { SNIPPET_GROUPS } from '../ansibleSnippets.js'
+import { SNIPPET_GROUPS as ANSIBLE_SNIPPETS } from '../ansibleSnippets.js'
+import { SNIPPET_GROUPS as TERRAFORM_SNIPPETS } from '../terraformSnippets.js'
+import { SNIPPET_GROUPS as SALT_SNIPPETS } from '../saltSnippets.js'
 
 const langFor = (path) => {
   if (path.endsWith('.tf') || path.endsWith('.hcl')) return 'hcl'
@@ -11,6 +13,16 @@ const langFor = (path) => {
   if (path.endsWith('.sh')) return 'shell'
   if (path.endsWith('.py')) return 'python'
   return 'plaintext'
+}
+
+// Pick the snippet library + wording for the open file's engine, so "+ Task"
+// becomes "+ Resource" on Terraform files and "+ State" on Salt states. Salt
+// SLS wins over the generic YAML→Ansible mapping.
+const snippetsFor = (path) => {
+  const p = (path || '').toLowerCase()
+  if (p.endsWith('.tf') || p.endsWith('.hcl')) return { groups: TERRAFORM_SNIPPETS, verb: 'Resource', engine: 'terraform' }
+  if (p.endsWith('.sls')) return { groups: SALT_SNIPPETS, verb: 'State', engine: 'salt' }
+  return { groups: ANSIBLE_SNIPPETS, verb: 'Task', engine: 'ansible' }
 }
 
 export default function Ide({ project, onBack, onRun }) {
@@ -23,6 +35,7 @@ export default function Ide({ project, onBack, onRun }) {
   const [taskOpen, setTaskOpen] = useState(false)
   const [delPath, setDelPath] = useState(null)
   const editorRef = useRef(null)
+  const snip = snippetsFor(path)
 
   const loadTree = useCallback(() => api(`projects/${project.id}/files`).then((d) => setTree(d.files)), [project.id])
   useEffect(() => { loadTree() }, [loadTree])
@@ -66,7 +79,8 @@ export default function Ide({ project, onBack, onRun }) {
         <h2 style={{ margin: 0 }}>{project.name}</h2><span className="muted">{project.slug}</span>
         <div className="spacer" />
         <button className="ghost sm" onClick={() => setNewOpen(true)}>+ File</button>
-        <button className="ghost sm" onClick={() => setTaskOpen(true)} disabled={path == null} title="Insert a ready-made Ansible task at the cursor">+ Task</button>
+        <button className="ghost sm" onClick={() => setTaskOpen(true)} disabled={path == null}
+          title={`Insert a ready-made ${snip.engine} ${snip.verb.toLowerCase()} at the cursor`}>+ {snip.verb}</button>
         <button className="ghost sm" onClick={save} disabled={path == null}>{saved ? 'Saved' : 'Save'}</button>
         <button className="primary sm" onClick={() => setRunOpen(true)}>▶ Run</button>
       </div>
@@ -89,7 +103,7 @@ export default function Ide({ project, onBack, onRun }) {
         </div>
       </div>
       {newOpen && <NewFile project={project} onClose={() => setNewOpen(false)} onCreated={(p) => { setNewOpen(false); loadTree(); open(p) }} />}
-      {taskOpen && <TaskPalette onClose={() => setTaskOpen(false)} onInsert={insertTask} />}
+      {taskOpen && <TaskPalette groups={snip.groups} verb={snip.verb} onClose={() => setTaskOpen(false)} onInsert={insertTask} />}
       {delPath && (
         <Modal title="Delete file" onClose={() => setDelPath(null)}>
           <div>Delete <b>{delPath}</b>? This can’t be undone.</div>
@@ -121,7 +135,7 @@ function NewFile({ project, onClose, onCreated }) {
 // category-first: a left rail of groups, and only the selected group's tasks on
 // the right. Typing in the search box switches to a flat, cross-category result
 // list (grouped by category) so nothing is buried behind a click.
-function TaskPalette({ onClose, onInsert }) {
+function TaskPalette({ groups: SNIPPET_GROUPS, verb = 'Task', onClose, onInsert }) {
   const [q, setQ] = useState('')
   const [cat, setCat] = useState(SNIPPET_GROUPS[0].group)
   const needle = q.trim().toLowerCase()
@@ -140,8 +154,8 @@ function TaskPalette({ onClose, onInsert }) {
   )
 
   return (
-    <Modal title="Insert task" onClose={onClose} wide>
-      <input autoFocus placeholder="Search tasks — shell, package, service, lvm, mount, git…"
+    <Modal title={`Insert ${verb.toLowerCase()}`} onClose={onClose} wide>
+      <input autoFocus placeholder={`Search ${verb.toLowerCase()}s…`}
         value={q} onChange={(e) => setQ(e.target.value)} />
       {searching ? (
         <div style={{ maxHeight: '56vh', overflow: 'auto', marginTop: 8 }}>
@@ -169,7 +183,7 @@ function TaskPalette({ onClose, onInsert }) {
           </div>
         </div>
       )}
-      <div className="faint" style={{ fontSize: 12, marginTop: 6 }}>Inserts a task at the cursor — indented for a play’s <span className="mono">tasks:</span> list. Adjust indentation to match your file.</div>
+      <div className="faint" style={{ fontSize: 12, marginTop: 6 }}>Inserts at the cursor. Adjust indentation to match your file.</div>
     </Modal>
   )
 }
@@ -179,7 +193,21 @@ function RunModal({ project, currentFile, onClose, onLaunched }) {
   const [target, setTarget] = useState(currentFile || 'site.yml')
   const [invs, setInvs] = useState([]); const [creds, setCreds] = useState([])
   const [inv, setInv] = useState(''); const [cred, setCred] = useState('')
+  const [vars, setVars] = useState('')       // KEY=value per line
+  const [saltTest, setSaltTest] = useState(false)
   const { wrap, node } = useErr()
+
+  // Parse the KEY=value textarea into an object (blank lines / #comments ignored).
+  const parseVars = () => {
+    const out = {}
+    for (const raw of vars.split('\n')) {
+      const line = raw.trim()
+      if (!line || line.startsWith('#')) continue
+      const i = line.indexOf('=')
+      if (i > 0) out[line.slice(0, i).trim()] = line.slice(i + 1).trim()
+    }
+    return out
+  }
 
   useEffect(() => { api('inventories').then((d) => { setInvs(d.inventories); if (d.inventories[0]) setInv(String(d.inventories[0].id)) }) }, [])
   useEffect(() => { api('credentials').then((d) => setCreds(d.credentials)) }, [])
@@ -218,12 +246,28 @@ function RunModal({ project, currentFile, onClose, onLaunched }) {
           {creds.map((c) => <option key={c.id} value={c.id}>{c.name} ({c.kind})</option>)}
         </select>
       </Field>
+      <Field label={engine === 'terraform' ? 'Variables — KEY=value per line (→ -var)'
+        : engine === 'salt' ? 'Pillar / kwargs — key=value per line'
+          : 'Extra vars — KEY=value per line (→ -e)'}>
+        <textarea rows={3} value={vars} onChange={(e) => setVars(e.target.value)}
+          placeholder={engine === 'terraform' ? 'instance_type=t3.micro' : 'env=staging'}
+          style={{ fontFamily: 'ui-monospace,Menlo,monospace', fontSize: 12.5, resize: 'vertical' }} />
+      </Field>
+      {engine === 'salt' && (
+        <label className="row" style={{ gap: 8, fontSize: 13, cursor: 'pointer' }}>
+          <input type="checkbox" checked={saltTest} onChange={(e) => setSaltTest(e.target.checked)} style={{ width: 'auto' }} />
+          Test mode (dry-run — <span className="mono">test=True</span>, report changes without applying)
+        </label>
+      )}
       {node}
       <button className="primary" onClick={() => wrap(async () => {
         if (needsInv && !inv) throw new Error('Create and select an inventory first.')
+        const extra = parseVars()
+        if (engine === 'salt' && saltTest) extra.test = 'True'
         const d = await api('runs', { method: 'POST', json: {
           project_id: project.id, kind: engine, target,
           inventory_id: needsInv ? Number(inv) : null, credential_id: cred ? Number(cred) : null,
+          extra_vars: extra,
         } })
         onClose(); onLaunched(d.run_id)
       })}>▶ Launch</button>
