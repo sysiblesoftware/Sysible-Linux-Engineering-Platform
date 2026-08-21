@@ -971,9 +971,54 @@ def keydist_distribute(iid: int, body: dict = Body(...), user: str = Depends(req
 
 @app.get("/inventories/{iid}/distribute-key/log", response_class=PlainTextResponse)
 def keydist_log(iid: int, offset: int = 0, user: str = Depends(current_user)):
-    text, nxt = keydist.distribute_log(iid, offset)
-    status = "running" if keydist.is_running(iid) else "idle"
-    return PlainTextResponse(text, headers={"X-Log-Next": str(nxt), "X-Install-Status": status})
+    text, nxt = keydist.job_log(iid, offset)
+    status = "running" if keydist.job_running(iid) else "done"
+    return PlainTextResponse(text, headers={"X-Log-Next": str(nxt), "X-Run-Status": status})
+
+
+@app.post("/inventories/{iid}/prepare-bastion")
+def keydist_prepare_bastion(iid: int, body: dict = Body(...), user: str = Depends(require_superuser)):
+    """Install SLEP's key on the inventory's jump host so the ProxyJump hop is
+    key-based. Uses the bastion spec from the body (or the inventory's saved one)."""
+    inv = db.get_inventory(iid)
+    if not inv:
+        raise HTTPException(status_code=404, detail="Inventory not found.")
+    bastion = str(body.get("bastion") or inv.get("bastion") or "").strip()
+    try:
+        keydist.start_prepare_bastion(iid, bastion, str(body.get("password") or ""))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    db.log_audit("prepare_bastion", user, f"inventory:{iid}")
+    return {"status": "started"}
+
+
+@app.get("/inventories/{iid}/prepare-bastion/log", response_class=PlainTextResponse)
+def keydist_prepare_bastion_log(iid: int, offset: int = 0, user: str = Depends(current_user)):
+    key = f"{iid}-bastion"
+    text, nxt = keydist.job_log(key, offset)
+    status = "running" if keydist.job_running(key) else "done"
+    return PlainTextResponse(text, headers={"X-Log-Next": str(nxt), "X-Run-Status": status})
+
+
+@app.post("/inventories/{iid}/test-connection")
+def keydist_test(iid: int, body: dict = Body(default={}), user: str = Depends(current_user)):
+    """Probe SSH reachability of the inventory's hosts with a chosen credential
+    (or the SLEP managed key), through the jump host. Streams a per-host report."""
+    names = body.get("host_names")
+    only = list(names) if isinstance(names, list) else None
+    try:
+        keydist.start_test(iid, only, body.get("credential_id"))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"status": "started"}
+
+
+@app.get("/inventories/{iid}/test-connection/log", response_class=PlainTextResponse)
+def keydist_test_log(iid: int, offset: int = 0, user: str = Depends(current_user)):
+    key = f"{iid}-test"
+    text, nxt = keydist.job_log(key, offset)
+    status = "running" if keydist.job_running(key) else "done"
+    return PlainTextResponse(text, headers={"X-Log-Next": str(nxt), "X-Run-Status": status})
 
 
 # ------------------------------------------------------------------ create infrastructure

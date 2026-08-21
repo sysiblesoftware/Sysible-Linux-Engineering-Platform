@@ -65,6 +65,31 @@ def test_distribute_route_requires_username(client):
     assert r.status_code == 400
 
 
+def test_prepare_bastion_installs_key(monkeypatch):
+    monkeypatch.setattr(keydist, "ensure_key", lambda: "ssh-ed25519 AAAAKEY slep-managed")
+    monkeypatch.setattr(keydist.shutil, "which", lambda n: "/usr/bin/" + n)
+    monkeypatch.setattr(keydist.subprocess, "run", lambda cmd, **k: Done(0, "SLEP_KEY_OK\n"))
+    keydist._run_prepare_bastion("9-bastion", "admin@192.168.8.212", "pw")
+    text, _ = keydist.job_log("9-bastion")
+    assert "Jump host ready" in text
+    assert not keydist.job_running("9-bastion")
+
+
+def test_prepare_bastion_requires_user_at_host(client):
+    iid = client.post("/inventories", json={"name": "b"}).json()["id"]
+    r = client.post(f"/inventories/{iid}/prepare-bastion", json={"bastion": "192.168.8.212", "password": "pw"})
+    assert r.status_code == 400
+
+
+def test_connection_test_reports_reachable(client, monkeypatch):
+    iid = _seed_inventory()
+    monkeypatch.setattr(keydist, "_auth_for", lambda cred: ([], ["-o", "BatchMode=yes"], {}, lambda: None))
+    monkeypatch.setattr(keydist.subprocess, "run", lambda cmd, **k: Done(0, "SLEP_CONN_OK\n"))
+    keydist._run_test(f"{iid}-test", iid, {"web1", "web2"}, None, "")
+    text, _ = keydist.job_log(f"{iid}-test")
+    assert "2 reachable, 0 unreachable" in text
+
+
 class _FakePath:
     def __init__(self, text):
         self._t = text

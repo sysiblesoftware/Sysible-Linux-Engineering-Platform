@@ -72,22 +72,31 @@ def public_key() -> str:
     return pub.read_text().strip() if pub.exists() else ""
 
 
-def _log_path(inventory_id: int) -> Path:
+def _log_path(key) -> Path:
     d = db.DATA_DIR / "keydist"
     d.mkdir(parents=True, exist_ok=True)
-    return d / f"{inventory_id}.log"
+    return d / f"{key}.log"
 
 
-def distribute_log(inventory_id: int, offset: int = 0):
-    p = _log_path(inventory_id)
+def job_log(key, offset: int = 0):
+    p = _log_path(key)
     if not p.exists():
         return "", 0
     data = p.read_bytes()
     return data[offset:].decode("utf-8", "replace"), len(data)
 
 
+def job_running(key) -> bool:
+    return _state.get(key, {}).get("status") == "running"
+
+
+# Back-compat names for the distribute job (keyed by the inventory id).
+def distribute_log(inventory_id: int, offset: int = 0):
+    return job_log(inventory_id, offset)
+
+
 def is_running(inventory_id: int) -> bool:
-    return _state.get(inventory_id, {}).get("status") == "running"
+    return job_running(inventory_id)
 
 
 def start_distribute(inventory_id: int, host_names, username: str, password: str, bastion: str = ""):
@@ -177,3 +186,151 @@ def _run_distribute(inventory_id: int, only: set, username: str, password: str, 
             with _lock:
                 _state[inventory_id] = {"status": "done" if ok_hosts else "failed",
                                         "ok": len(ok_hosts), "failed": len(fail_hosts)}
+
+
+# ------------------------------------------------------------------ prepare a jump host
+def start_prepare_bastion(inventory_id: int, bastion: str, password: str):
+    """Install SLEP's key on the inventory's jump host itself (direct password
+    auth), so the ProxyJump hop is key-based like the targets. `bastion` is a
+    user@host spec."""
+    bastion = (bastion or "").strip()
+    if "@" not in bastion:
+        raise ValueError("Jump host must be user@host so SLEP knows who to log in as.")
+    if not password:
+        raise ValueError("The jump host password is required to install the key the first time.")
+    key = f"{inventory_id}-bastion"
+    with _lock:
+        if job_running(key):
+            return
+        _state[key] = {"status": "running", "started": time.time()}
+    threading.Thread(target=_run_prepare_bastion, args=(key, bastion, password), daemon=True).start()
+
+
+def _run_prepare_bastion(key: str, bastion: str, password: str):
+    log = _log_path(key)
+    ok = False
+    with log.open("w", buffering=1) as f:
+        def emit(m):
+            f.write(m if m.endswith("\n") else m + "\n"); f.flush()
+        try:
+            pubkey = ensure_key()
+            sshpass = shutil.which("sshpass")
+            if not sshpass:
+                emit("!! sshpass is not available in this image — cannot feed the password."); return
+            emit(f"== Preparing jump host {bastion} ==")
+            emit(f"-- installing SLEP key: {pubkey.split()[0]} …{pubkey.split()[-1][-12:]}")
+            emit("")
+            emit(f"→ {bastion} …")
+            # Direct connection to the bastion (no ProxyJump), password → sshpass.
+            cmd = [sshpass, "-e", *_ssh_base(""), bastion, _install_cmd(pubkey)]
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=60,
+                               env=dict(os.environ, SSHPASS=password))
+            if r.returncode == 0 and "SLEP_KEY_OK" in r.stdout:
+                ok = True
+                emit(f"   ✓ SLEP key installed on {bastion}")
+                emit("")
+                emit("== Jump host ready — runs and key distribution now hop through it with the key ==")
+            else:
+                detail = (r.stderr or r.stdout or "").strip().splitlines()
+                emit(f"   ✗ {bastion}: {(detail[-1] if detail else 'unknown error')}")
+        except subprocess.TimeoutExpired:
+            emit(f"   ✗ timed out connecting to {bastion}")
+        except Exception as e:  # noqa: BLE001
+            emit(f"!! preparing the jump host failed: {e}")
+        finally:
+            with _lock:
+                _state[key] = {"status": "done" if ok else "failed"}
+
+
+# ------------------------------------------------------------------ connection test
+def _auth_for(credential):
+    """Build the SSH auth bits for a credential. Returns (prefix_argv, ssh_args,
+    env, cleanup). A password credential uses sshpass; a key credential (or the
+    SLEP managed key when credential is None) writes a temp identity and uses
+    BatchMode so a wrong key fails fast instead of prompting."""
+    import tempfile
+    if credential and credential.get("kind") == "ssh_password" and credential.get("secret"):
+        sshpass = shutil.which("sshpass")
+        if not sshpass:
+            raise RuntimeError("sshpass is not available for password auth.")
+        return ([sshpass, "-e"], ["-o", "PubkeyAuthentication=no"], {"SSHPASS": credential["secret"]}, lambda: None)
+    # key path: credential's private key, else the SLEP managed key
+    secret = (credential or {}).get("secret") if credential else None
+    if not secret:
+        priv, _ = _key_paths()
+        if not priv.exists():
+            ensure_key()
+        keyfile = str(_key_paths()[0])
+        return ([], ["-i", keyfile, "-o", "BatchMode=yes"], {}, lambda: None)
+    fd, keyfile = tempfile.mkstemp(prefix="slep-probe-")
+    with os.fdopen(fd, "w") as kf:
+        kf.write(secret if secret.endswith("\n") else secret + "\n")
+    os.chmod(keyfile, 0o600)
+    return ([], ["-i", keyfile, "-o", "BatchMode=yes"], {}, lambda: os.unlink(keyfile))
+
+
+def start_test(inventory_id: int, host_names, credential_id):
+    inv = db.get_inventory(inventory_id)
+    if not inv:
+        raise ValueError("Inventory not found.")
+    key = f"{inventory_id}-test"
+    with _lock:
+        if job_running(key):
+            return
+        _state[key] = {"status": "running", "started": time.time()}
+    threading.Thread(target=_run_test, args=(key, inventory_id, set(host_names or []),
+                                             credential_id, inv.get("bastion") or ""), daemon=True).start()
+
+
+def _run_test(key: str, inventory_id: int, only: set, credential_id, bastion: str):
+    log = _log_path(key)
+    reachable, unreachable = [], []
+    cleanup = lambda: None
+    with log.open("w", buffering=1) as f:
+        def emit(m):
+            f.write(m if m.endswith("\n") else m + "\n"); f.flush()
+        try:
+            credential = db.get_credential(int(credential_id), include_secret=True) if credential_id else None
+            conn_user = (credential or {}).get("username") or ""
+            prefix, ssh_args, env_extra, cleanup = _auth_for(credential)
+            hosts = db.list_hosts(inventory_id)
+            if only:
+                hosts = [h for h in hosts if h["name"] in only]
+            if not hosts:
+                emit("!! No hosts selected — nothing to test."); return
+            cred_label = credential["name"] if credential else "SLEP managed key"
+            emit(f"== Testing SSH to {len(hosts)} host(s) with “{cred_label}”"
+                 + (f" via jump host {bastion}" if bastion else "") + " ==")
+            emit("")
+            env = dict(os.environ, **env_extra)
+            for h in hosts:
+                user = conn_user or (h.get("variables") or {}).get("ansible_user") or ""
+                target = (f"{user}@" if user else "") + h["address"]
+                base = ["ssh", "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=15"]
+                if bastion:
+                    base += ["-o", f"ProxyJump={bastion}"]
+                # prefix+ssh_args carry the auth method (sshpass+password, or -i key+BatchMode).
+                cmd = [*prefix, *base, *ssh_args, target, "echo SLEP_CONN_OK"]
+                try:
+                    r = subprocess.run(cmd, capture_output=True, text=True, timeout=30, env=env)
+                except subprocess.TimeoutExpired:
+                    emit(f"   ✗ {h['name']} ({target}) — timed out"); unreachable.append(h["name"]); continue
+                if r.returncode == 0 and "SLEP_CONN_OK" in r.stdout:
+                    emit(f"   ✓ {h['name']} ({target}) — reachable"); reachable.append(h["name"])
+                else:
+                    detail = (r.stderr or r.stdout or "").strip().splitlines()
+                    emit(f"   ✗ {h['name']} ({target}) — {(detail[-1] if detail else 'unreachable')}")
+                    unreachable.append(h["name"])
+            emit("")
+            emit(f"== {len(reachable)} reachable, {len(unreachable)} unreachable ==")
+            if unreachable and not reachable:
+                emit("Tip: if these want a password, run “Distribute SSH key” first, then test with the SLEP managed key.")
+        except Exception as e:  # noqa: BLE001
+            emit(f"!! connection test failed: {e}")
+        finally:
+            try:
+                cleanup()
+            except OSError:
+                pass
+            with _lock:
+                _state[key] = {"status": "done", "ok": len(reachable), "failed": len(unreachable)}

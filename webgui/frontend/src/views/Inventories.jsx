@@ -57,7 +57,10 @@ function InventoryDetail({ inv, onBack, onChanged }) {
         {inv.bastion && <span className="pill" title="Runs tunnel through this SSH jump host">⤳ {inv.bastion}</span>}
         <div className="spacer" />
         <button className="ghost sm" onClick={() => setModal('bastion')}>{inv.bastion ? 'Jump host' : '+ Jump host'}</button>
+        {inv.bastion && <button className="ghost sm" title="Install SLEP's key on the jump host so runs hop through it with the key" onClick={() => setModal('bastionprep')}>⤳ Prepare jump host</button>}
         <button className="ghost sm" onClick={() => setModal('import')}>Import from Controller</button>
+        <button className="ghost sm" disabled={hosts.length === 0}
+          title="Check SSH reachability of these hosts" onClick={() => setModal('test')}>◉ Test connection</button>
         <button className="ghost sm" disabled={hosts.length === 0}
           title="Install SLEP's SSH key on these hosts so runs are key-based" onClick={() => setModal('keydist')}>🔑 Distribute SSH key</button>
         <button className="ghost sm" onClick={() => setModal('host')}>+ Host</button>
@@ -80,6 +83,8 @@ function InventoryDetail({ inv, onBack, onChanged }) {
       {modal === 'import' && <ImportController inv={inv} onClose={() => setModal(null)} onDone={() => { setModal(null); load(); onChanged() }} />}
       {modal === 'bastion' && <SetBastion inv={inv} onClose={() => setModal(null)} onDone={() => { setModal(null); onChanged() }} />}
       {modal === 'keydist' && <DistributeKey inv={inv} hosts={hosts} onClose={() => setModal(null)} />}
+      {modal === 'test' && <TestConnection inv={inv} hosts={hosts} onClose={() => setModal(null)} />}
+      {modal === 'bastionprep' && <PrepareBastion inv={inv} onClose={() => setModal(null)} />}
       </div>
     </div>
   )
@@ -123,6 +128,112 @@ function AddHost({ inv, onClose, onDone }) {
       <Field label="Groups (comma-separated)"><input value={groups} onChange={(e) => setGroups(e.target.value)} /></Field>
       {node}
       <button className="primary" onClick={() => wrap(async () => { await api(`inventories/${inv.id}/hosts`, { method: 'POST', json: { name, address, groups } }); onDone() })}>Add</button>
+    </Modal>
+  )
+}
+
+// Polls a job's log endpoint and accumulates it, stopping when the server reports
+// the job is no longer running (X-Run-Status). Shared by the SSH action modals.
+function useLogStream() {
+  const [log, setLog] = useState('')
+  const [running, setRunning] = useState(false)
+  const timer = useRef(null)
+  useEffect(() => () => { if (timer.current) clearInterval(timer.current) }, [])
+  const run = async (startFn, logPath) => {
+    setLog(''); setRunning(true)
+    await startFn()
+    let off = 0
+    const tick = async () => {
+      const { text, next, status } = await tail(`${logPath}?offset=${off}`)
+      if (text) { off = next; setLog((l) => l + text) }
+      if (status !== 'running') { clearInterval(timer.current); timer.current = null; setRunning(false) }
+    }
+    timer.current = setInterval(tick, 900); tick()
+  }
+  return { log, running, run }
+}
+
+// Test SSH reachability of the inventory's hosts with a chosen credential (or
+// SLEP's managed key), through the jump host. Read-only — just a per-host verdict.
+function TestConnection({ inv, hosts, onClose }) {
+  const [creds, setCreds] = useState([])
+  const [cid, setCid] = useState('')     // '' = SLEP managed key
+  const [sel, setSel] = useState(() => new Set(hosts.map((h) => h.name)))
+  const { log, running, run } = useLogStream()
+  const { wrap, node } = useErr()
+
+  useEffect(() => {
+    api('credentials').then((d) => {
+      setCreds(d.credentials)
+      const managed = d.credentials.find((c) => c.name === 'SLEP managed key')
+      if (managed) setCid(String(managed.id))
+    }).catch(() => {})
+  }, [])
+  const toggle = (name) => setSel((s) => { const n = new Set(s); n.has(name) ? n.delete(name) : n.add(name); return n })
+
+  const start = () => wrap(async () => {
+    if (sel.size === 0) throw new Error('Select at least one host.')
+    await run(() => api(`inventories/${inv.id}/test-connection`, { method: 'POST', json: {
+      credential_id: cid ? Number(cid) : null, host_names: [...sel] } }), `inventories/${inv.id}/test-connection/log`)
+  })
+
+  return (
+    <Modal title={`Test connection — ${inv.name}`} onClose={onClose} wide>
+      <div className="muted">Checks whether SLEP can SSH to each host with the selected credential{inv.bastion ? ' (through the jump host)' : ''}. Nothing is changed on the hosts.</div>
+      <Field label="Authenticate with">
+        <select value={cid} onChange={(e) => setCid(e.target.value)}>
+          <option value="">SLEP managed key</option>
+          {creds.map((c) => <option key={c.id} value={c.id}>{c.name}{c.username ? ` (${c.username})` : ''}</option>)}
+        </select>
+      </Field>
+      <div className="faint" style={{ fontSize: 12, margin: '4px 2px' }}>{sel.size} of {hosts.length} host(s) selected</div>
+      <div style={{ maxHeight: '22vh', overflow: 'auto', border: '1px solid var(--line)', borderRadius: 8 }}>
+        {hosts.map((h) => (
+          <label key={h.id} className="row" style={{ gap: 10, padding: '5px 10px', borderBottom: '1px solid var(--line)', cursor: 'pointer' }}>
+            <input type="checkbox" checked={sel.has(h.name)} onChange={() => toggle(h.name)} style={{ width: 'auto' }} />
+            <b className="mono" style={{ fontSize: 12, minWidth: 130 }}>{h.name}</b>
+            <span className="muted mono" style={{ fontSize: 12 }}>{h.address}</span>
+          </label>
+        ))}
+      </div>
+      {node}
+      {log && <pre className="log" style={{ marginTop: 8, maxHeight: '26vh' }}>{log}</pre>}
+      <div className="row" style={{ marginTop: 8 }}>
+        <div className="spacer" />
+        <button className="ghost" onClick={onClose}>Close</button>
+        <button className="primary" disabled={running} onClick={start}>{running ? 'Testing…' : `Test ${sel.size} host(s)`}</button>
+      </div>
+    </Modal>
+  )
+}
+
+// Install SLEP's key on the inventory's jump host itself, so the ProxyJump hop is
+// key-based like the targets. Authenticates once with the bastion password.
+function PrepareBastion({ inv, onClose }) {
+  const [bastion, setBastion] = useState(inv.bastion || '')
+  const [password, setPassword] = useState('')
+  const { log, running, run } = useLogStream()
+  const { wrap, node } = useErr()
+
+  const start = () => wrap(async () => {
+    if (!bastion.includes('@')) throw new Error('Jump host must be user@host.')
+    if (!password) throw new Error('Enter the jump host password (used once).')
+    await run(() => api(`inventories/${inv.id}/prepare-bastion`, { method: 'POST', json: {
+      bastion: bastion.trim(), password } }), `inventories/${inv.id}/prepare-bastion/log`)
+  })
+
+  return (
+    <Modal title={`Prepare jump host — ${inv.name}`} onClose={onClose}>
+      <div className="muted">Installs SLEP’s key on the jump host so runs and key distribution hop through it with the key — not a password. The password is used once and never saved.</div>
+      <Field label="Jump host (user@host)"><input value={bastion} onChange={(e) => setBastion(e.target.value)} placeholder="admin@192.168.8.212" autoFocus /></Field>
+      <Field label="Jump host password (used once)"><input type="password" value={password} autoComplete="off" onChange={(e) => setPassword(e.target.value)} /></Field>
+      {node}
+      {log && <pre className="log" style={{ marginTop: 8, maxHeight: '26vh' }}>{log}</pre>}
+      <div className="row" style={{ marginTop: 8 }}>
+        <div className="spacer" />
+        <button className="ghost" onClick={onClose}>Close</button>
+        <button className="primary" disabled={running} onClick={start}>{running ? 'Preparing…' : 'Prepare jump host'}</button>
+      </div>
     </Modal>
   )
 }
