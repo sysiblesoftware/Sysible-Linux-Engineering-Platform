@@ -888,10 +888,11 @@ def disconnect_controller(cid: int, user: str = Depends(require_superuser)):
 
 # ------------------------------------------------------------------ runs
 def _dispatch_run(project, kind, target, inventory_id, credential_id, extra_vars, actor,
-                  become_password="", limit="", start_at_task=""):
+                  become_password="", limit="", start_at_task="", tf_tool=""):
     """Create a run row and launch its engine on a background thread. Shared by the
     manual /runs route and the scheduler. Returns the run id. `become_password` is
-    a transient per-run sudo password — stashed in memory, never persisted."""
+    a transient per-run sudo password — stashed in memory, never persisted.
+    `tf_tool` picks Terraform vs OpenTofu ('terraform' | 'tofu') for terraform runs."""
     run_id = db.create_run(
         project["id"], kind, target, inventory_id=inventory_id,
         credential_id=credential_id, extra_vars=extra_vars or {}, created_by=actor,
@@ -902,6 +903,8 @@ def _dispatch_run(project, kind, target, inventory_id, credential_id, extra_vars
             ansible_runner.stash_become(run_id, become_password)
         if limit or start_at_task:
             ansible_runner.stash_opts(run_id, {"limit": limit, "start_at_task": start_at_task})
+    if kind == "terraform" and tf_tool:
+        terraform_runner.stash_tool(run_id, tf_tool)
     db.log_audit("run_launched", actor, f"#{run_id} {kind} '{target}' on {project['name']}")
     threading.Thread(target=RUNNERS[kind], args=(run_id,), daemon=True).start()
     return run_id
@@ -927,7 +930,8 @@ def launch_run(body: dict = Body(...), user: str = Depends(current_user)):
                            body.get("credential_id"), body.get("extra_vars") or {}, user,
                            become_password=str(body.get("become_password") or ""),
                            limit=str(body.get("limit") or "").strip(),
-                           start_at_task=str(body.get("start_at_task") or "").strip())
+                           start_at_task=str(body.get("start_at_task") or "").strip(),
+                           tf_tool=str(body.get("tool") or "").strip())
     return {"status": "launched", "run_id": run_id}
 
 
@@ -1018,14 +1022,19 @@ def health_warnings(user: str = Depends(current_user)):
     engine binary, an unwritable data dir. Empty list = all clear."""
     import shutil
     warnings = []
-    for binary, engine in (("ansible-playbook", "Ansible"), ("terraform", "Terraform"),
-                           ("salt-ssh", "Salt")):
-        if not shutil.which(binary):
+    # Terraform is satisfied by either `terraform` or OpenTofu's `tofu` (a drop-in).
+    engine_bins = (
+        (("ansible-playbook",), "Ansible", "ansible-playbook"),
+        (("terraform", "tofu"), "Terraform", "terraform or tofu (OpenTofu)"),
+        (("salt-ssh",), "Salt", "salt-ssh"),
+    )
+    for binaries, engine, shown in engine_bins:
+        if not any(shutil.which(b) for b in binaries):
             warnings.append({
                 "id": f"engine-{engine.lower()}",
                 "severity": "warning",
                 "title": f"{engine} is not installed",
-                "detail": f"`{binary}` isn't on PATH, so {engine} runs will fail.",
+                "detail": f"`{shown}` isn't on PATH, so {engine} runs will fail.",
                 "hint": f"Install {engine} on the SLEP host (the container image bakes it in).",
             })
     if not os.access(db.DATA_DIR, os.W_OK):

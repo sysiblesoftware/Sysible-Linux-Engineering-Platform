@@ -773,6 +773,7 @@ export function RunModal({ project, currentFile, onClose, onLaunched, initial })
   const [cred, setCred] = useState(ini.credential_id ? String(ini.credential_id) : '')
   const [vars, setVars] = useState('')       // KEY=value per line
   const [saltTest, setSaltTest] = useState(false)
+  const [tfTool, setTfTool] = useState(ini.tool || 'terraform')   // terraform | tofu
   const [becomePw, setBecomePw] = useState('')   // per-run sudo override
   const [limit, setLimit] = useState(ini.limit || '')          // --limit
   const [startAt, setStartAt] = useState(ini.start_at_task || '')  // --start-at-task
@@ -811,6 +812,14 @@ export function RunModal({ project, currentFile, onClose, onLaunched, initial })
           <option value="salt">Salt — state.apply (salt-ssh)</option>
         </select>
       </Field>
+      {engine === 'terraform' && (
+        <Field label="Tool">
+          <select value={tfTool} onChange={(e) => setTfTool(e.target.value)}>
+            <option value="terraform">Terraform</option>
+            <option value="tofu">OpenTofu (tofu)</option>
+          </select>
+        </Field>
+      )}
       <Field label={engine === 'ansible' ? 'Playbook path' : engine === 'terraform' ? 'Action' : 'State (or “highstate”)'}>
         {engine === 'terraform'
           ? <select value={target} onChange={(e) => setTarget(e.target.value)}><option>plan</option><option>apply</option><option>destroy</option></select>
@@ -875,6 +884,7 @@ export function RunModal({ project, currentFile, onClose, onLaunched, initial })
           extra_vars: extra, become_password: engine === 'ansible' ? becomePw : '',
           limit: engine === 'ansible' ? limit.trim() : '',
           start_at_task: engine === 'ansible' ? startAt.trim() : '',
+          tool: engine === 'terraform' ? tfTool : '',
         } })
         onClose(); onLaunched(d.run_id)
       })}>▶ Launch</button>
