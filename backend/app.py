@@ -14,8 +14,10 @@ Controller later.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import secrets
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -25,7 +27,7 @@ from contextlib import asynccontextmanager
 from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse
 
-from . import controller_import, db, engines, policy, vault
+from . import controller_import, db, engines, infra, policy, vault
 from .runners import ansible_runner, salt_runner, terraform_runner
 
 # Engine name -> runner.launch(run_id). Each runs to completion on a thread.
@@ -871,3 +873,106 @@ def engines_install_log(engine: str, offset: int = 0, user: str = Depends(curren
     install_status = "installed" if st["installed"] else (st["last_status"] or "")
     return PlainTextResponse(text, headers={"X-Log-Next": str(nxt),
                                             "X-Install-Status": install_status})
+
+
+# ------------------------------------------------------------------ create infrastructure
+@app.get("/infra/providers")
+def infra_providers(user: str = Depends(current_user)):
+    """Provider + VM option menus for the Create Infrastructure wizard."""
+    return {"providers": infra.provider_schema()}
+
+
+@app.get("/infra")
+def infra_list(user: str = Depends(current_user)):
+    return {"infra": db.list_infra()}
+
+
+@app.post("/infra")
+def infra_create(body: dict = Body(...), user: str = Depends(require_operator)):
+    """Generate a Terraform VM project from the wizard selections. If a Controller
+    is chosen, its SSH key is baked into the VMs' cloud-init so it can reach them
+    after boot, and the project is tagged for one-click enroll."""
+    name = str(body.get("name") or "").strip()
+    provider = str(body.get("provider") or "")
+    options = body.get("options") or {}
+    controller_id = body.get("controller_id")
+    if not name:
+        raise HTTPException(status_code=400, detail="A name is required.")
+    if provider not in infra.PROVIDERS:
+        raise HTTPException(status_code=400, detail=f"Unknown provider '{provider}'.")
+
+    controller_key = ""
+    if controller_id:
+        ctrl = db.get_controller(int(controller_id), include_key=True)
+        if not ctrl:
+            raise HTTPException(status_code=404, detail="Controller not found.")
+        try:
+            controller_key = controller_import.get_controller_key(ctrl["base_url"], ctrl["api_key"])
+        except controller_import.ControllerImportError:
+            controller_key = ""   # non-fatal: generate anyway, enroll can install the key later
+
+    try:
+        files = infra.generate(provider, options, controller_key)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    # New project (unique slug), then write the generated files to its workdir.
+    base = _slugify(name)
+    slug, n = base, 1
+    while any(p["slug"] == slug for p in db.list_projects()):
+        n += 1
+        slug = f"{base}-{n}"
+    pid = db.create_project(name, slug, f"Terraform ({infra.PROVIDERS[provider]['label']}) — built with Create Infrastructure", "", "")
+    workdir = db.project_dir(pid)
+    workdir.mkdir(parents=True, exist_ok=True)
+    for fn, content in files.items():
+        (workdir / fn).write_text(content)
+    db.set_infra(pid, provider, int(controller_id) if controller_id else None,
+                 str(options.get("ssh_user", "")), str(options.get("environment", "")))
+    db.log_audit("infra_created", user, f"{provider} project '{name}'")
+    return {"project_id": pid, "slug": slug, "files": list(files), "provider": provider}
+
+
+@app.post("/infra/{project_id}/enroll")
+def infra_enroll(project_id: int, user: str = Depends(require_operator)):
+    """After `terraform apply`, read the created VMs (the sysible_hosts output) and
+    register each into the project's connected Controller as an SSH host."""
+    meta = db.get_infra(project_id)
+    if not meta:
+        raise HTTPException(status_code=404, detail="Not an infrastructure project.")
+    if not meta.get("controller_id"):
+        raise HTTPException(status_code=400, detail="No Controller was chosen for this infrastructure.")
+    ctrl = db.get_controller(meta["controller_id"], include_key=True)
+    if not ctrl:
+        raise HTTPException(status_code=400, detail="The connected Controller no longer exists.")
+    workdir = db.project_dir(project_id)
+    engines.ensure_path()
+    try:
+        out = subprocess.run(["terraform", "output", "-json"], cwd=str(workdir),
+                             capture_output=True, text=True, timeout=60)
+    except FileNotFoundError:
+        raise HTTPException(status_code=400, detail="Terraform isn't installed — install it, then apply first.")
+    if out.returncode != 0:
+        raise HTTPException(status_code=400,
+                            detail="No Terraform outputs yet — run apply first. " + (out.stderr or "").strip()[:200])
+    try:
+        data = json.loads(out.stdout or "{}")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Couldn't parse Terraform outputs.")
+    hosts = (data.get("sysible_hosts") or {}).get("value") or []
+    if not hosts:
+        raise HTTPException(status_code=400, detail="No hosts in the Terraform output (apply may not be complete).")
+
+    results, ok_n = [], 0
+    for h in hosts:
+        nm, ip = str(h.get("name") or ""), str(h.get("ip") or "")
+        huser = str(h.get("user") or meta.get("ssh_user") or "root")
+        if not ip:
+            results.append({"name": nm, "ip": "", "ok": False, "detail": "no IP yet"})
+            continue
+        ok, detail = controller_import.register_ssh_host(
+            ctrl["base_url"], ctrl["api_key"], nm, ip, huser, meta.get("environment", ""))
+        ok_n += 1 if ok else 0
+        results.append({"name": nm, "ip": ip, "ok": ok, "detail": detail})
+    db.log_audit("infra_enrolled", user, f"{ok_n}/{len(hosts)} into Controller '{ctrl['name']}'")
+    return {"results": results, "enrolled": ok_n, "total": len(hosts), "controller": ctrl["name"]}

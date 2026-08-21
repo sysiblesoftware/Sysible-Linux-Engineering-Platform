@@ -109,6 +109,38 @@ def exchange_credentials_for_key(controller_url: str, username: str, password: s
     return key
 
 
+def get_controller_key(controller_url: str, api_key: str) -> str:
+    """Fetch a Controller's standing SSH public key (GET /remote/controller-key).
+    Baked into a new VM's cloud-init so the Controller can SSH in after boot."""
+    base = _normalize_base(controller_url)
+    data = _get(base, "/remote/controller-key", api_key, allow_404=True)
+    if isinstance(data, dict):
+        return data.get("public_key", "") or ""
+    return ""
+
+
+def register_ssh_host(controller_url: str, api_key: str, name: str, ip: str,
+                      user: str = "root", environment: str = ""):
+    """Register one SSH-managed host in a Controller (POST /remote/hosts). The
+    Controller reaches it with its own key (get_controller_key). Returns (ok, detail)."""
+    base = _normalize_base(controller_url)
+    url = base + "/remote/hosts"
+    try:
+        resp = requests.post(url, headers={"X-API-Key": api_key},
+                             json={"name": name, "ip": ip, "user": user, "environment": environment},
+                             verify=False, timeout=20)
+    except requests.exceptions.RequestException as e:
+        return False, f"could not reach Controller: {e}"
+    if resp.status_code == 200:
+        return True, "enrolled"
+    detail = f"HTTP {resp.status_code}"
+    try:
+        detail = resp.json().get("detail") or detail
+    except ValueError:
+        pass
+    return False, detail
+
+
 def test_connection(controller_url: str, api_key: str):
     """Probe a Controller with the given key — used by 'Connect to Controller'.
     Returns {ok, agents, ssh, total} (host counts it can see). Raises

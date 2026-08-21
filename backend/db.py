@@ -185,6 +185,18 @@ def init_db() -> None:
                 FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
             );
 
+            -- 'Create Infrastructure' projects: the provider + which Controller to
+            -- auto-enroll the created VMs into. One row per Terraform-builder project.
+            CREATE TABLE IF NOT EXISTS infra (
+                project_id INTEGER PRIMARY KEY,
+                provider TEXT NOT NULL,
+                controller_id INTEGER,
+                ssh_user TEXT DEFAULT '',
+                environment TEXT DEFAULT '',
+                created INTEGER NOT NULL,
+                FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+            );
+
             -- Tamper-evident admin/activity audit log. Each row's entry_hash chains
             -- the previous one (SHA-256 over length-prefixed fields), so any edit,
             -- reorder, or deletion in the middle breaks the chain from that point on.
@@ -458,6 +470,28 @@ def mark_schedule_fired(sid: int, run_id: int, status: str = "launched"):
         nxt = compute_next_run(r["cadence"], r["at"], r["weekday"]) if r else None
         c.execute("UPDATE schedules SET last_run=?, last_status=?, last_run_id=?, next_run=? WHERE id=?",
                   (_now(), status, run_id, nxt, sid))
+
+
+# ---------------------------------------------------------------- infrastructure
+def set_infra(project_id, provider, controller_id=None, ssh_user="", environment=""):
+    with _connect() as c:
+        c.execute("INSERT OR REPLACE INTO infra(project_id,provider,controller_id,ssh_user,environment,created) "
+                  "VALUES(?,?,?,?,?,?)", (project_id, provider, controller_id, ssh_user, environment, _now()))
+
+
+def get_infra(project_id):
+    with _connect() as c:
+        r = c.execute("SELECT * FROM infra WHERE project_id=?", (project_id,)).fetchone()
+    return dict(r) if r else None
+
+
+def list_infra():
+    """Infra projects joined with their project name/slug, for the Infrastructure view."""
+    with _connect() as c:
+        rows = c.execute(
+            "SELECT i.*, p.name AS project_name, p.slug AS project_slug "
+            "FROM infra i JOIN projects p ON p.id = i.project_id ORDER BY i.created DESC").fetchall()
+    return [dict(r) for r in rows]
 
 
 # ---------------------------------------------------------------- admins

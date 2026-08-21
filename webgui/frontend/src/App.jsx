@@ -9,6 +9,7 @@ import Controllers from './views/Controllers.jsx'
 import Credentials from './views/Credentials.jsx'
 import Vault from './views/Vault.jsx'
 import Users from './views/Users.jsx'
+import Infrastructure from './views/Infrastructure.jsx'
 import Schedules from './views/Schedules.jsx'
 import Activity from './views/Activity.jsx'
 import HealthBanner from './components/HealthBanner.jsx'
@@ -19,6 +20,7 @@ import Runs, { RunLog } from './views/Runs.jsx'
 const NAV = [
   { key: 'projects', label: 'Projects', icon: 'folder' },
   { key: 'inventories', label: 'Inventories', icon: 'server' },
+  { key: 'infra', label: 'Infrastructure', icon: 'cloud' },
   { key: 'controllers', label: 'Controllers', icon: 'link' },
   { key: 'credentials', label: 'Credentials', icon: 'key' },
   { key: 'vault', label: 'Vault', icon: 'lock' },
@@ -39,6 +41,7 @@ const ICONS = {
   users: <><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" /><circle cx="9" cy="7" r="4" /><path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75" /></>,
   clock: <><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></>,
   activity: <path d="M3 12h4l3 8 4-16 3 8h4" />,
+  cloud: <path d="M6.5 19a4.5 4.5 0 0 1-.5-8.97 6 6 0 0 1 11.64-1.36A4 4 0 0 1 17.5 19z" />,
 }
 
 function NavIcon({ name }) {
@@ -108,6 +111,7 @@ export default function App() {
           : project ? <Ide project={project} onBack={() => setProject(null)} onRun={(id) => setRunId(id)} />
             : view === 'projects' ? <Projects onOpen={setProject} />
               : view === 'inventories' ? <Inventories />
+                : view === 'infra' ? <Infrastructure onOpenProject={setProject} onOpenRun={setRunId} />
                 : view === 'controllers' ? <Controllers />
                   : view === 'credentials' ? <Credentials />
                     : view === 'vault' ? <Vault />
