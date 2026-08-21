@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react'
-import { api, tail } from '../api.js'
+import { api, tail, getTheme } from '../api.js'
 import { parseRun } from '../runParse.js'
 import RunViz from './RunViz.jsx'
 import { RunModal } from './Ide.jsx'
@@ -8,13 +8,21 @@ import { RunModal } from './Ide.jsx'
 // coloured spans, so the run log reads like a real terminal instead of showing
 // raw escape sequences. Text is placed in React spans (auto-escaped); only
 // recognised SGR colour/bold codes affect styling.
-const ANSI_COLORS = {
+const ANSI_DARK = {
   30: '#7d8ca3', 31: '#e5534b', 32: '#63c869', 33: '#e0a83b',
   34: '#5580ee', 35: '#c678dd', 36: '#56b6c2', 37: '#e9f0f7',
   90: '#7d8ca3', 91: '#ff7b72', 92: '#7ee787', 93: '#f2cc60',
   94: '#79c0ff', 95: '#d2a8ff', 96: '#76e3ea', 97: '#ffffff',
 }
+// Darker, higher-contrast variants for a light log background.
+const ANSI_LIGHT = {
+  30: '#5b6472', 31: '#c0392b', 32: '#2e7d32', 33: '#a15c00',
+  34: '#2f57c4', 35: '#8e44ad', 36: '#0e7490', 37: '#1c2430',
+  90: '#7a8496', 91: '#c0392b', 92: '#2e7d32', 93: '#a15c00',
+  94: '#2f57c4', 95: '#8e44ad', 96: '#0e7490', 97: '#111827',
+}
 function ansiToSpans(text) {
+  const ANSI_COLORS = getTheme() === 'light' ? ANSI_LIGHT : ANSI_DARK
   const out = []
   let cur = { color: null, bold: false }
   const re = /\u001b\[([0-9;]*)m/g   // ESC [ ... m  (SGR colour sequences)
