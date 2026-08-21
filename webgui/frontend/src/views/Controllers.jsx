@@ -112,13 +112,19 @@ function ImportModal({ ctrl, onClose, onDone }) {
   const [sel, setSel] = useState(() => new Set())
   const [q, setQ] = useState('')
   const [invs, setInvs] = useState([])
-  const [inv, setInv] = useState('')
+  const [inv, setInv] = useState('__new')          // default: create a new inventory
   const [newName, setNewName] = useState('')
   const [busy, setBusy] = useState(false)
   const [flash, setFlash] = useState('')
   const { wrap, node, setErr } = useErr()
 
-  const loadInvs = () => api('inventories').then((d) => { setInvs(d.inventories); if (!inv && d.inventories[0]) setInv(String(d.inventories[0].id)) })
+  // Load inventories; when at least one exists, target the first by default — with
+  // none, stay on '__new' so the create-new field is live (never leave `inv` empty,
+  // which would POST to inventories//import-controller and 404).
+  const loadInvs = () => api('inventories').then((d) => {
+    setInvs(d.inventories)
+    setInv((cur) => (cur === '__new' && d.inventories[0]) ? String(d.inventories[0].id) : cur)
+  })
   useEffect(() => { loadInvs() }, [])
   useEffect(() => {
     api(`controllers/${ctrl.id}/hosts`).then((d) => setHosts(d.hosts || []))
@@ -136,20 +142,58 @@ function ImportModal({ ctrl, onClose, onDone }) {
     return n
   })
 
+  // Distinct Controller environments across the hosts in play (selection if any,
+  // else everything) — drives the "one inventory per environment" quick action.
+  const inPlay = () => (hosts || []).filter((h) => sel.size === 0 || sel.has(h.name))
+  const envGroups = () => {
+    const m = new Map()
+    for (const h of inPlay()) {
+      const env = (h.groups || '').trim() || 'ungrouped'
+      if (!m.has(env)) m.set(env, [])
+      m.get(env).push(h.name)
+    }
+    return m
+  }
+  const envs = [...new Set((hosts || []).map((h) => (h.groups || '').trim()).filter(Boolean))]
+
+  const importTo = async (iid, names) =>
+    (await api(`inventories/${iid}/import-controller`, { method: 'POST', json: { controller_id: ctrl.id, host_names: names } })).imported
+
   const add = () => wrap(async () => {
     if (sel.size === 0) throw new Error('Check one or more hosts first.')
     setBusy(true)
     try {
       let iid = inv
       let invName = invs.find((i) => String(i.id) === String(inv))?.name
-      if (inv === '__new') {
+      if (inv === '__new' || !iid) {
         if (!newName.trim()) throw new Error('Name the new inventory.')
         const created = await api('inventories', { method: 'POST', json: { name: newName.trim() } })
         iid = created.id; invName = created.name
         setNewName(''); await loadInvs(); setInv(String(iid))
       }
-      const d = await api(`inventories/${iid}/import-controller`, { method: 'POST', json: { controller_id: ctrl.id, host_names: [...sel] } })
-      setFlash(`Added ${d.imported} host(s) to “${invName}”. Pick more for another inventory, or close.`)
+      const imported = await importTo(iid, [...sel])
+      setFlash(`Added ${imported} host(s) to “${invName}”. Pick more for another inventory, or close.`)
+      setSel(new Set())
+      onDone()
+    } finally { setBusy(false) }
+  })
+
+  // One inventory per Controller environment: create an inventory named after each
+  // env (reusing one that already has that name) and import its hosts into it.
+  const importPerEnv = () => wrap(async () => {
+    const groups = envGroups()
+    if (groups.size === 0) throw new Error('No hosts to import.')
+    setBusy(true)
+    try {
+      const byName = new Map(invs.map((i) => [i.name.toLowerCase(), i]))
+      let invMade = 0, hostsN = 0
+      for (const [env, names] of groups) {
+        let target = byName.get(env.toLowerCase())
+        if (!target) { target = await api('inventories', { method: 'POST', json: { name: env } }); invMade++ }
+        hostsN += await importTo(target.id, names)
+      }
+      await loadInvs()
+      setFlash(`Built ${groups.size} inventory(ies) from environments (${invMade} new) — ${hostsN} host(s) imported.`)
       setSel(new Set())
       onDone()
     } finally { setBusy(false) }
@@ -160,7 +204,16 @@ function ImportModal({ ctrl, onClose, onDone }) {
       <div className="muted">Check the hosts you want, choose a target inventory, and add them. Route different hosts to different inventories — the list stays up after each add.</div>
       {flash && <div className="ok-text" style={{ color: 'var(--ok,#63c869)', fontSize: 13 }}>{flash}</div>}
 
-      <div className="row" style={{ gap: 10, marginTop: 4 }}>
+      {envs.length > 0 && (
+        <div className="row" style={{ gap: 8, marginTop: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+          <button className="ghost sm" disabled={busy} onClick={importPerEnv}>⤵ Create inventories per environment</button>
+          <span className="faint" style={{ fontSize: 12 }}>
+            {sel.size ? `${sel.size} selected` : 'all hosts'} → one inventory each for: {envs.map((e) => <span key={e} className="pill" style={{ fontSize: 11, marginLeft: 4 }}>{e}</span>)}
+          </span>
+        </div>
+      )}
+
+      <div className="row" style={{ gap: 10, marginTop: 8 }}>
         <input placeholder="Filter hosts — name, IP, group…" value={q} onChange={(e) => setQ(e.target.value)} style={{ flex: 1 }} />
         <button className="ghost sm" onClick={toggleAll} disabled={shown.length === 0}>{allShownSelected ? 'Clear' : 'Select all'}</button>
       </div>

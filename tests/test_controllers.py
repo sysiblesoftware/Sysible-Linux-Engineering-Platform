@@ -82,6 +82,35 @@ def test_list_hosts_and_selective_import_to_different_inventories(client, monkey
     assert {h["name"] for h in client.get(f"/inventories/{dbi}/hosts").json()["hosts"]} == {"db1"}
 
 
+def test_create_one_inventory_per_environment(client, monkeypatch):
+    """The 'inventories per environment' action: group the Controller's hosts by
+    their environment and land each group in its own inventory."""
+    import backend.controller_import as ci
+    monkeypatch.setattr(ci.requests, "get", _fake_get({
+        "/agents": Resp(200, {"agents": [
+            {"hostname": "web1", "ip": "10.0.0.11", "environment": "Dev"},
+            {"hostname": "web2", "ip": "10.0.0.12", "environment": "Dev"},
+            {"hostname": "lab1", "ip": "10.0.0.31", "environment": "Sysible Labs"}]}),
+        "/remote/hosts": Resp(404, None),
+    }))
+    cid = client.post("/controllers", json={"name": "Prod", "base_url": "http://ctrl:9000", "api_key": "K"}).json()["controller"]["id"]
+
+    hosts = client.get(f"/controllers/{cid}/hosts").json()["hosts"]
+    by_env = {}
+    for h in hosts:
+        by_env.setdefault(h["groups"], []).append(h["name"])
+    assert set(by_env) == {"Dev", "Sysible Labs"}
+
+    # One inventory per env, each importing only its own hosts.
+    for env, names in by_env.items():
+        iid = client.post("/inventories", json={"name": env}).json()["id"]
+        r = client.post(f"/inventories/{iid}/import-controller",
+                        json={"controller_id": cid, "host_names": names}).json()
+        assert r["imported"] == len(names)
+        got = {h["name"] for h in client.get(f"/inventories/{iid}/hosts").json()["hosts"]}
+        assert got == set(names)
+
+
 def test_connect_rejects_bad_key(client, monkeypatch):
     import backend.controller_import as ci
     monkeypatch.setattr(ci.requests, "get", _fake_get({"/agents": Resp(401, None)}))
