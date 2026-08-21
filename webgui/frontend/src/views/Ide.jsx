@@ -6,6 +6,7 @@ import { SNIPPET_GROUPS as ANSIBLE_SNIPPETS, PLAY_GROUPS } from '../ansibleSnipp
 import CollectionsInstall from '../components/CollectionsInstall.jsx'
 import { SNIPPET_GROUPS as TERRAFORM_SNIPPETS } from '../terraformSnippets.js'
 import { SNIPPET_GROUPS as SALT_SNIPPETS } from '../saltSnippets.js'
+import { SNIPPET_GROUPS as ANSIBLECFG_SNIPPETS } from '../ansibleCfgSnippets.js'
 
 // Mirror of backend/_ansible_group: INI group names allow only letters, digits
 // and underscores, and can't start with a digit. Keep in sync so the play-target
@@ -153,6 +154,7 @@ function lintYaml(text) {
 }
 
 const langFor = (path) => {
+  if (path.endsWith('ansible.cfg') || path.endsWith('.ini') || path.endsWith('.cfg')) return 'ini'
   if (path.endsWith('.tf') || path.endsWith('.hcl')) return 'hcl'
   if (path.endsWith('.yml') || path.endsWith('.yaml') || path.endsWith('.sls')) return 'yaml'
   if (path.endsWith('.json')) return 'json'
@@ -166,6 +168,9 @@ const langFor = (path) => {
 // SLS wins over the generic YAML→Ansible mapping.
 const snippetsFor = (path) => {
   const p = (path || '').toLowerCase()
+  // ansible.cfg gets a settings palette (sections + options at their defaults) so
+  // the config can be assembled from the menu rather than remembered/hand-typed.
+  if (p === 'ansible.cfg' || p.endsWith('/ansible.cfg')) return { groups: ANSIBLECFG_SNIPPETS, verb: 'Setting', engine: 'ansiblecfg' }
   if (p.endsWith('.tf') || p.endsWith('.hcl')) return { groups: TERRAFORM_SNIPPETS, verb: 'Resource', engine: 'terraform' }
   if (p.endsWith('.sls')) return { groups: SALT_SNIPPETS, verb: 'State', engine: 'salt' }
   // Ansible palette leads with playbook-structure blocks, then the task library.
