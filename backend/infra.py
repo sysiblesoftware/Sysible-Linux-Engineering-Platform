@@ -54,8 +54,11 @@ PROVIDERS = {
     },
     "libvirt": {
         "label": "libvirt (KVM/QEMU)",
-        "blurb": "Local hypervisor VMs via the dmacvicar/libvirt provider. Set the base image + pool below.",
+        "blurb": "KVM/QEMU VMs via the dmacvicar/libvirt provider, on a local or remote hypervisor. Set the connection URI, base image + pool below.",
         "options": [
+            {"key": "uri", "label": "Hypervisor connection URI", "type": "text", "default": "qemu:///system",
+             "help": "Local host: qemu:///system. Remote KVM host over SSH: qemu+ssh://root@kvm-host/system "
+                     "(the SLEP host needs SSH access + a key to that hypervisor). Also qemu+tcp:// / qemu+tls://."},
             _COUNT, _PREFIX,
             {"key": "memory", "label": "Memory (MB)", "type": "select", "default": "2048",
              "choices": ["1024", "2048", "4096", "8192", "16384"]},
@@ -226,7 +229,7 @@ def _render_libvirt(spec, keys):
 }}
 
 provider "libvirt" {{
-  uri = "qemu:///system"
+  uri = var.uri
 }}
 
 resource "libvirt_cloudinit_disk" "ci" {{
@@ -264,6 +267,7 @@ resource "libvirt_domain" "vm" {{
 }}
 '''
     variables = _vars({
+        "uri": ("string", spec.get("uri", "qemu:///system")),
         "memory": ("number", int(spec.get("memory", 2048))),
         "vcpu": ("number", int(spec.get("vcpu", 2))),
         "pool": ("string", spec.get("pool", "default")),

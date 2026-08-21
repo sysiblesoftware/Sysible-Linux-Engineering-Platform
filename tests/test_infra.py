@@ -88,3 +88,22 @@ def test_enroll_without_controller_400(client):
     pid = client.post("/infra", json={"name": "noctrl", "provider": "aws",
                                      "options": {"count": 1, "name_prefix": "web"}}).json()["project_id"]
     assert client.post(f"/infra/{pid}/enroll").status_code == 400
+
+
+def test_libvirt_hypervisor_uri_local_and_remote():
+    """The libvirt builder exposes the hypervisor connection URI and threads it
+    into the provider block + variables — so VMs can target a local OR remote
+    KVM/QEMU host (qemu+ssh://…)."""
+    import backend.infra as infra
+    # URI is a first-class option on the libvirt provider.
+    lv = infra.provider_schema()["libvirt"]
+    assert any(o["key"] == "uri" for o in lv["options"])
+    # Remote hypervisor over SSH flows into the generated Terraform.
+    files = infra.generate("libvirt", {
+        "uri": "qemu+ssh://root@kvm-host/system", "count": 1,
+        "base_image": "https://example/img.qcow2", "pool": "default"}, "")
+    assert "uri = var.uri" in files["main.tf"]
+    assert 'qemu+ssh://root@kvm-host/system' in files["variables.tf"]
+    # Default stays the local hypervisor when unset.
+    local = infra.generate("libvirt", {"count": 1, "base_image": "x"}, "")
+    assert "qemu:///system" in local["variables.tf"]
