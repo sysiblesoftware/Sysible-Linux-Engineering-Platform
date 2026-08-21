@@ -163,6 +163,10 @@ th{color:var(--muted);font-weight:600;font-size:12px}
 .flow-legend{display:flex;flex-wrap:wrap;gap:12px;font-size:11px;margin:2px 0 8px}
 .flow-legend span{display:inline-flex;align-items:center;gap:5px}
 .flow-legend i{width:9px;height:9px;border-radius:50%;display:inline-block}
+.zoom-ctl{display:inline-flex;gap:4px;align-items:center}
+.zoom-ctl button{padding:2px 8px;min-width:30px}
+/* Resizable flow area: drag the bottom edge to grow/shrink; scrolls inside. */
+.flow-resize{resize:vertical;overflow:auto;min-height:180px;height:300px;max-height:78vh;border-radius:6px}
 /* Task-progress rail: one dot per task the play has run. */
 .task-rail{display:flex;flex-wrap:wrap;align-items:center;gap:7px}
 .task-dot{width:9px;height:9px;border-radius:50%;display:inline-block;background:var(--line-strong);cursor:default}

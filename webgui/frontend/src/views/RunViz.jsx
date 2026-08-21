@@ -1,4 +1,4 @@
-import React from 'react'
+import React, { useState } from 'react'
 
 // AAP-style run visualizations. Each takes the parsed model from runParse.js and
 // renders a live, at-a-glance picture of the run: which hosts the playbook is
@@ -25,6 +25,8 @@ function AnsibleViz({ model, seedHosts }) {
   const names = Array.from(new Set([...(seedHosts || []), ...Object.keys(model.hosts)])).sort()
   const hosts = names.map((n) => ({ name: n, ...(model.hosts[n] || { ok: 0, changed: 0, failed: 0, skipped: 0, unreachable: 0, last: 'pending' }) }))
   const recap = model.recap
+  const [zoom, setZoom] = useState(1)
+  const nudge = (d) => setZoom((z) => Math.min(3, Math.max(0.5, Math.round((z + d) * 10) / 10)))
 
   return (
     <div className="viz">
@@ -37,6 +39,11 @@ function AnsibleViz({ model, seedHosts }) {
             <b>{model.currentTask ? model.currentTask : recap ? 'Play recap' : 'Starting…'}</b>
           </div>
           <div className="spacer" />
+          <div className="zoom-ctl">
+            <button className="ghost sm" title="Zoom out" onClick={() => nudge(-0.2)}>−</button>
+            <button className="ghost sm" title="Reset zoom" onClick={() => setZoom(1)}>{Math.round(zoom * 100)}%</button>
+            <button className="ghost sm" title="Zoom in" onClick={() => nudge(0.2)}>+</button>
+          </div>
           <span className="faint" style={{ fontSize: 12 }}>{hosts.length} host(s) · {model.tasks} task(s)</span>
         </div>
         <div className="flow-legend faint">
@@ -46,7 +53,9 @@ function AnsibleViz({ model, seedHosts }) {
           <span><i style={{ background: STATUS_COLOR.unreachable }} />unreachable</span>
           <span><i style={{ background: 'transparent', border: `2px solid ${STATUS_COLOR.notrun}` }} />didn’t run</span>
         </div>
-        <HostReachFlow hosts={hosts} tasks={model.tasks} hostTasks={model.hostTasks || {}} taskList={model.taskList || []} done={!!recap} />
+        <div className="flow-resize">
+          <HostReachFlow hosts={hosts} tasks={model.tasks} hostTasks={model.hostTasks || {}} taskList={model.taskList || []} done={!!recap} zoom={zoom} />
+        </div>
       </div>
 
       <div className="viz-grid">
@@ -73,7 +82,15 @@ function AnsibleViz({ model, seedHosts }) {
 // per task in the play) so you can see which task failed on which host, then the
 // full hostname. Green ok · amber changed · red failed · purple unreachable ·
 // dim pending. Hover a dot for "task: status".
-function HostReachFlow({ hosts, tasks, hostTasks, taskList, done }) {
+// Colour of a track segment by the outcome of the task it leaves: green when the
+// task completed and the flow continued, red on failure, purple unreachable,
+// else a dim track (pending / not run).
+const segColor = (st) => (st === 'ok' || st === 'changed') ? STATUS_COLOR.ok
+  : st === 'failed' ? STATUS_COLOR.failed
+    : st === 'unreachable' ? STATUS_COLOR.unreachable
+      : 'var(--line-strong)'
+
+function HostReachFlow({ hosts, tasks, hostTasks, taskList, done, zoom = 1 }) {
   const n = hosts.length
   const nTasks = Math.max(1, tasks || 0)
   // Scale down for big playbooks: tighter dots/rows, and drop the angled column
@@ -95,8 +112,8 @@ function HostReachFlow({ hosts, tasks, hostTasks, taskList, done }) {
   const rowY = (i) => n > 1 ? headerH + 13 + i * step : cy
   const trunc = (s) => (s.length > 22 ? s.slice(0, 21) + '…' : s)
   return (
-    <div style={{ overflowX: 'auto' }}>
-      <svg className="viz-flow" width={W} height={H} viewBox={`0 0 ${W} ${H}`}>
+    <div style={{ overflow: 'auto', height: '100%' }}>
+      <svg className="viz-flow" width={Math.round(W * zoom)} height={Math.round(H * zoom)} viewBox={`0 0 ${W} ${H}`}>
         {/* Task column headers (angled) + faint guide line down each column.
             Hidden when there are too many tasks to label without overlap. */}
         {tasks > 0 && !dense && Array.from({ length: nTasks }).map((_, ti) => {
@@ -105,7 +122,9 @@ function HostReachFlow({ hosts, tasks, hostTasks, taskList, done }) {
             <g key={'h' + ti}>
               <line x1={x} y1={headerH - 6} x2={x} y2={H - 8} stroke="var(--line)" strokeOpacity="0.5" strokeWidth="1" />
               <text x={x} y={headerH - 10} fontSize="10.5" fill="var(--muted)" textAnchor="start"
-                transform={`rotate(-40 ${x} ${headerH - 10})`}>{trunc(taskList[ti]?.name || 'task ' + (ti + 1))}</text>
+                transform={`rotate(-40 ${x} ${headerH - 10})`}>{trunc(taskList[ti]?.name || 'task ' + (ti + 1))}
+                <title>{taskList[ti]?.name || 'task ' + (ti + 1)}</title>
+              </text>
             </g>
           )
         })}
@@ -125,12 +144,19 @@ function HostReachFlow({ hosts, tasks, hostTasks, taskList, done }) {
           })
           return (
             <g key={h.name}>
-              {/* server → host fan line */}
+              {/* server → host fan line, coloured by whether the first task passed */}
               <path d={`M ${cx + 15} ${cy} C ${(cx + ex) / 2} ${cy}, ${(cx + ex) / 2} ${y}, ${ex - 6} ${y}`}
-                fill="none" stroke={col} strokeWidth={reached ? 1.8 : 1} strokeOpacity={reached ? 0.8 : 0.22} />
+                fill="none" stroke={reached ? segColor(eff[0]) : col} strokeWidth={reached ? 1.8 : 1} strokeOpacity={reached ? 0.85 : 0.22} />
               <circle cx={ex} cy={y} r={4} fill={col} fillOpacity={reached ? 1 : 0.3} />
-              {/* connecting track through this host's task dots */}
-              <line x1={ex} y1={y} x2={lastDotX} y2={y} stroke="var(--line-strong)" strokeWidth="1.6" strokeOpacity="0.7" />
+              {/* each track segment reflects the task it LEAVES: green if that task
+                  completed and the flow continued, red on failure. */}
+              {eff.map((st, ti) => {
+                const x2 = dotsX + ti * dotGap
+                const x1 = ti === 0 ? ex : dotsX + (ti - 1) * dotGap
+                return <line key={'seg' + ti} x1={x1} y1={y} x2={x2} y2={y}
+                  stroke={segColor(ti === 0 ? eff[0] : eff[ti - 1])} strokeWidth="2"
+                  strokeOpacity={eff[ti === 0 ? 0 : ti - 1] === 'pending' || eff[ti === 0 ? 0 : ti - 1] === 'notrun' ? 0.35 : 0.85} />
+              })}
               {eff.map((st, ti) => {
                 const ran = st !== 'pending' && st !== 'notrun'
                 const c = STATUS_COLOR[st] || STATUS_COLOR.pending
@@ -139,7 +165,7 @@ function HostReachFlow({ hosts, tasks, hostTasks, taskList, done }) {
                   <circle key={ti} cx={dotsX + ti * dotGap} cy={y} r={dotR}
                     fill={st === 'notrun' ? 'none' : c} fillOpacity={ran ? 1 : (st === 'pending' ? 0.3 : 1)}
                     stroke={st === 'notrun' ? STATUS_COLOR.notrun : 'var(--bg)'} strokeWidth={st === 'notrun' ? 1.8 : 1.5}>
-                    <title>{`${taskList[ti]?.name || 'task ' + (ti + 1)}: ${st}`}</title>
+                    <title>{`${h.name} · ${taskList[ti]?.name || 'task ' + (ti + 1)}: ${st}`}</title>
                   </circle>
                 )
               })}
