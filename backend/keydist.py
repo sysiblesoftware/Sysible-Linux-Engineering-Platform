@@ -133,6 +133,19 @@ def start_distribute(inventory_id: int, host_names, username: str, password: str
 _HOSTKEY = ["-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null"]
 
 
+def bastion_host(bastion: str) -> str:
+    """The host part of a user@host[:port] jump spec ('' if none)."""
+    b = (bastion or "").split("@", 1)[-1]
+    return b.split(":", 1)[0].strip()
+
+
+def hop_for(bastion: str, target_address: str) -> str:
+    """The jump host to reach `target_address` — empty (direct) when the target
+    IS the jump host, which would otherwise loop the ProxyJump through itself
+    ('Connection closed by UNKNOWN')."""
+    return "" if bastion and target_address == bastion_host(bastion) else bastion
+
+
 def _key_proxy(bastion: str) -> str:
     """An explicit ProxyCommand that logs into the jump host with SLEP's managed
     key. Unlike native ProxyJump, spelling out the jump as a ProxyCommand lets us
@@ -222,8 +235,9 @@ def _run_distribute(inventory_id: int, only: set, username: str, password: str, 
 
             for h in hosts:
                 target = f"{username}@{h['address']}"
-                emit(f"→ {h['name']} ({target}) …")
-                cmd = _pw_cmd(sshpass, bastion, target, remote)
+                hop = hop_for(bastion, h["address"])
+                emit(f"→ {h['name']} ({target}){' [direct — is the jump host]' if bastion and not hop else ''} …")
+                cmd = _pw_cmd(sshpass, hop, target, remote)
                 try:
                     r = subprocess.run(cmd, capture_output=True, text=True, timeout=60, env=env)
                 except subprocess.TimeoutExpired:
@@ -363,10 +377,11 @@ def _run_test(key: str, inventory_id: int, only: set, credential_id, bastion: st
             for h in hosts:
                 user = conn_user or (h.get("variables") or {}).get("ansible_user") or ""
                 target = (f"{user}@" if user else "") + h["address"]
+                hop = hop_for(bastion, h["address"])   # direct when the target IS the jump host
                 if kind == "password":
-                    cmd = _pw_cmd(sshpass, bastion, target, "echo SLEP_CONN_OK")
+                    cmd = _pw_cmd(sshpass, hop, target, "echo SLEP_CONN_OK")
                 else:
-                    cmd = _key_cmd(bastion, keyfile, target, "echo SLEP_CONN_OK")
+                    cmd = _key_cmd(hop, keyfile, target, "echo SLEP_CONN_OK")
                 try:
                     r = subprocess.run(cmd, capture_output=True, text=True, timeout=30, env=env)
                 except subprocess.TimeoutExpired:

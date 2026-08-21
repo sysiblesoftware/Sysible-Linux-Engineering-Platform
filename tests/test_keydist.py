@@ -62,6 +62,14 @@ def test_distribute_installs_and_creates_credential(client, monkeypatch):
     assert mk and mk[0]["username"] == "admin" and mk[0]["kind"] == "ssh"
 
 
+def test_hop_for_skips_the_jump_when_target_is_the_bastion():
+    assert keydist.bastion_host("admin@192.168.8.212:22") == "192.168.8.212"
+    # A normal target still hops through the bastion.
+    assert keydist.hop_for("admin@192.168.8.212", "10.0.0.5") == "admin@192.168.8.212"
+    # The target that IS the bastion connects directly (no jump).
+    assert keydist.hop_for("admin@192.168.8.212", "192.168.8.212") == ""
+
+
 def test_distribute_route_requires_username(client):
     iid = client.post("/inventories", json={"name": "kd"}).json()["id"]
     r = client.post(f"/inventories/{iid}/distribute-key", json={"password": "pw"})

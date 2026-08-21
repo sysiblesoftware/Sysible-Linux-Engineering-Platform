@@ -42,6 +42,24 @@ def test_bastion_without_key_falls_back_to_proxyjump(tmp_path):
     assert "ansible_ssh_common_args=-o ProxyJump=ops@192.168.8.212" in text
 
 
+def test_target_that_is_the_bastion_connects_directly(tmp_path):
+    """A host whose address is the jump host must not jump through itself — it
+    lands in [slep_direct] with vars that override the [all:vars] ProxyCommand."""
+    hosts = [
+        {"name": "virt", "address": "192.168.8.212", "groups": "Dev", "variables": {}},
+        {"name": "web1", "address": "10.0.0.11", "groups": "Dev", "variables": {}},
+    ]
+    dest = tmp_path / "inv.ini"
+    _render_inventory(hosts, {"username": "admin"}, dest,
+                      bastion="admin@192.168.8.212", bastion_key="/data/ssh/slep_ed25519")
+    text = dest.read_text()
+    assert "[slep_direct]\nvirt\n" in text
+    assert "[slep_direct:vars]" in text
+    # web1 is not direct; only virt is in the direct group.
+    direct = text.split("[slep_direct]\n", 1)[1].split("[slep_direct:vars]")[0]
+    assert "web1" not in direct
+
+
 def test_bastion_with_key_uses_explicit_proxycommand(tmp_path):
     """With SLEP's managed key, the jump hop is an explicit ProxyCommand that keys
     into the bastion and disables host-key checks on that hop — native ProxyJump

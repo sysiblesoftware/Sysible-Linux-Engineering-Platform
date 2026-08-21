@@ -60,6 +60,11 @@ def _render_inventory(hosts, credential, dest: Path, bastion: str = "", bastion_
     ungrouped: list[str] = []
     conn_user = (credential or {}).get("username") or ""
 
+    bhost = keydist.bastion_host(bastion) if bastion else ""
+    # Hosts that ARE the jump host must connect directly — jumping through
+    # themselves closes the connection ("Connection closed by UNKNOWN").
+    direct_names: list[str] = []
+
     for h in hosts:
         parts = [h["name"], f"ansible_host={h['address']}"]
         if conn_user:
@@ -72,6 +77,8 @@ def _render_inventory(hosts, credential, dest: Path, bastion: str = "", bastion_
         for k, v in (h.get("variables") or {}).items():
             parts.append(f"{k}={json.dumps(v) if not isinstance(v, str) else v}")
         line = " ".join(parts)
+        if bhost and h["address"] == bhost:
+            direct_names.append(h["name"])
         gs = [_ansible_group(g) for g in (h.get("groups") or "").split(",") if g.strip()]
         if gs:
             for g in gs:
@@ -79,6 +86,7 @@ def _render_inventory(hosts, credential, dest: Path, bastion: str = "", bastion_
         else:
             ungrouped.append(line)
 
+    common = "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
     with dest.open("w") as f:
         for line in ungrouped:
             f.write(line + "\n")
@@ -93,13 +101,20 @@ def _render_inventory(hosts, credential, dest: Path, bastion: str = "", bastion_
         # the host-key options and keys into the bastion with SLEP's managed key
         # (which 'Prepare jump host' / 'Distribute SSH key' installed there).
         if bastion:
-            common = "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
             f.write("\n[all:vars]\n")
             if bastion_key:
                 proxy = f"ssh {common} -o BatchMode=yes -i {bastion_key} -W %h:%p {bastion}"
                 f.write(f'ansible_ssh_common_args=-o ProxyCommand="{proxy}" {common}\n')
             else:
                 f.write(f"ansible_ssh_common_args=-o ProxyJump={bastion} {common}\n")
+            # A target that IS the jump host connects directly: a dedicated group
+            # whose vars override [all:vars] (more specific than the 'all' group).
+            if direct_names:
+                f.write("\n[slep_direct]\n")
+                for n in direct_names:
+                    f.write(n + "\n")
+                f.write("\n[slep_direct:vars]\n")
+                f.write(f"ansible_ssh_common_args={common}\n")
 
 
 def _emit_unreachable_help(emit, has_bastion: bool, proxy_hop_closed: bool,
