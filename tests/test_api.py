@@ -41,6 +41,20 @@ def test_project_file_crud_and_path_guard(client, project):
     assert client.put(f"/projects/{pid}/file", json={"path": "../evil", "content": "x"}).status_code == 400
 
 
+def test_project_file_rename(client, project):
+    pid = project["id"]
+    client.put(f"/projects/{pid}/file", json={"path": "old.yml", "content": "- hosts: all\n"})
+    # rename moves content and updates the tree
+    r = client.post(f"/projects/{pid}/file/rename", json={"from": "old.yml", "to": "new.yml"})
+    assert r.status_code == 200
+    assert client.get(f"/projects/{pid}/file", params={"path": "new.yml"}).json()["content"] == "- hosts: all\n"
+    assert client.get(f"/projects/{pid}/file", params={"path": "old.yml"}).status_code == 404
+    # renaming onto an existing file is refused; path escape is refused
+    client.put(f"/projects/{pid}/file", json={"path": "keep.yml", "content": "x"})
+    assert client.post(f"/projects/{pid}/file/rename", json={"from": "new.yml", "to": "keep.yml"}).status_code == 409
+    assert client.post(f"/projects/{pid}/file/rename", json={"from": "new.yml", "to": "../evil"}).status_code == 400
+
+
 def test_inventory_and_hosts(client, project):
     iid = client.post("/inventories", json={"name": "prod", "project_id": project["id"]}).json()["id"]
     assert client.post(f"/inventories/{iid}/hosts", json={"name": "web1", "address": "10.0.0.11", "groups": "web"}).status_code == 200

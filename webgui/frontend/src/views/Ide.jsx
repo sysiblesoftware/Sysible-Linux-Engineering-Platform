@@ -184,6 +184,7 @@ export default function Ide({ project, onBack, onRun }) {
   const [collOpen, setCollOpen] = useState(false)
   const [targets, setTargets] = useState(['all', 'localhost'])   // host patterns for `hosts:`
   const [delPath, setDelPath] = useState(null)
+  const [renPath, setRenPath] = useState(null)
   const [menu, setMenu] = useState(null)   // {x, y} custom editor context menu
   const editorRef = useRef(null)
   const snip = snippetsFor(path)
@@ -304,6 +305,13 @@ export default function Ide({ project, onBack, onRun }) {
     } catch (e) { alert('Could not delete ' + p + ': ' + e.message) }
   }
 
+  // Rename/move a file; keep it open under its new name if it was the open file.
+  const rename = async (from, to) => {
+    await api(`projects/${project.id}/file/rename`, { method: 'POST', json: { from, to } })
+    if (from === path) setPath(to)
+    await loadTree()
+  }
+
   // Insert a task snippet at the editor cursor (fires onChange → marks unsaved).
   // Space it out: drop a blank line before the task when it follows other content
   // (so successive inserts read as separate tasks, not one wall of YAML), and end
@@ -391,6 +399,7 @@ export default function Ide({ project, onBack, onRun }) {
           {tree.map((f) => (
             <div key={f.path} className={'f ' + (f.type === 'dir' ? 'dir' : '') + (f.path === path ? ' active' : '')}>
               <span className="f-name" onClick={() => f.type === 'file' && open(f.path)}>{f.type === 'dir' ? '📁 ' : '📄 '}{f.path}</span>
+              <button className="f-del" title={'Rename ' + f.path} onClick={(e) => { e.stopPropagation(); setRenPath(f.path) }}>✎</button>
               <button className="f-del" title={'Delete ' + f.path} onClick={(e) => { e.stopPropagation(); setDelPath(f.path) }}>✕</button>
             </div>
           ))}
@@ -436,6 +445,8 @@ export default function Ide({ project, onBack, onRun }) {
           </div>
         </Modal>
       )}
+      {renPath && <RenameFile from={renPath} onClose={() => setRenPath(null)}
+        onRename={async (to) => { await rename(renPath, to); setRenPath(null) }} />}
       {runOpen && <RunModal project={project} currentFile={path} onClose={() => setRunOpen(false)} onLaunched={onRun} />}
       {menu && <EditorMenu at={menu} onClose={() => setMenu(null)}
         items={[
@@ -530,6 +541,26 @@ function NewFile({ project, onClose, onCreated }) {
       <Field label="Path"><input value={p} onChange={(e) => setP(e.target.value)} autoFocus placeholder="site.yml, main.tf, states/web.sls" /></Field>
       {node}
       <button className="primary" onClick={() => wrap(async () => { await api(`projects/${project.id}/file`, { method: 'POST', json: { path: p, type: 'file' } }); onCreated(p) })}>Create</button>
+    </Modal>
+  )
+}
+
+function RenameFile({ from, onClose, onRename }) {
+  const [to, setTo] = useState(from)
+  const { wrap, node } = useErr()
+  const submit = () => wrap(async () => {
+    const t = to.trim()
+    if (!t) throw new Error('Enter a new name.')
+    if (t === from) { onClose(); return }
+    await onRename(t)
+  })
+  return (
+    <Modal title={`Rename ${from}`} onClose={onClose}>
+      <Field label="New name / path"><input value={to} autoFocus onChange={(e) => setTo(e.target.value)}
+        onKeyDown={(e) => { if (e.key === 'Enter') submit() }} placeholder="new-name.yml or path/to/file.yml" /></Field>
+      <div className="muted">Include a path to move it (e.g. <span className="mono">roles/web/tasks.yml</span>).</div>
+      {node}
+      <button className="primary" onClick={submit}>Rename</button>
     </Modal>
   )
 }

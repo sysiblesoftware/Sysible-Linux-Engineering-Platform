@@ -421,6 +421,24 @@ def create_path(pid: int, body: dict = Body(...), user: str = Depends(current_us
     return {"status": "created", "path": path}
 
 
+@app.post("/projects/{pid}/file/rename")
+def rename_path(pid: int, body: dict = Body(...), user: str = Depends(current_user)):
+    """Rename/move a file or directory within the project (both paths are
+    confined to the project dir by _safe_path)."""
+    src = _safe_path(pid, str(body.get("from") or "").strip())
+    dst = _safe_path(pid, str(body.get("to") or "").strip())
+    if not str(body.get("to") or "").strip():
+        raise HTTPException(status_code=400, detail="A new name is required.")
+    if not src.exists():
+        raise HTTPException(status_code=404, detail="File not found.")
+    if dst.exists():
+        raise HTTPException(status_code=409, detail="A file with that name already exists.")
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    src.rename(dst)
+    db.touch_project(pid)
+    return {"status": "renamed", "path": str(body.get("to")).strip()}
+
+
 @app.delete("/projects/{pid}/file")
 def delete_path(pid: int, path: str = Query(...), user: str = Depends(current_user)):
     import shutil
