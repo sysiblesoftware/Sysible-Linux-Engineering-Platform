@@ -50,10 +50,11 @@ def test_distribute_installs_and_creates_credential(client, monkeypatch):
     monkeypatch.setattr(keydist.subprocess, "run", fake_run)
     keydist._run_distribute(iid, {"web1", "web2"}, "admin", "pw", "user@bastion")
 
-    # The jump host is prepared first (a direct password hop to it — no ProxyJump,
-    # forces the password leg), then each target jumps through it with the key.
+    # The jump host is prepared first (a direct password hop to it), then each
+    # target jumps through it via an explicit ProxyCommand that keys into the
+    # bastion (host-key checks disabled on the jump hop too).
     assert any("PubkeyAuthentication=no" in str(x) for c in seen for x in c)
-    ssh_cmds = [c for c in seen if any("ProxyJump=user@bastion" in str(x) for x in c)]
+    ssh_cmds = [c for c in seen if any("ProxyCommand=" in str(x) and "user@bastion" in str(x) for x in c)]
     assert len(ssh_cmds) == 2
     # A reusable key credential now exists.
     creds = db.list_credentials()

@@ -125,25 +125,33 @@ def start_distribute(inventory_id: int, host_names, username: str, password: str
 _HOSTKEY = ["-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null"]
 
 
+def _key_proxy(bastion: str) -> str:
+    """An explicit ProxyCommand that logs into the jump host with SLEP's managed
+    key. Unlike native ProxyJump, spelling out the jump as a ProxyCommand lets us
+    force StrictHostKeyChecking=no on the JUMP hop too (ProxyJump doesn't reliably
+    inherit it → 'Host key verification failed'). The bastion must already carry
+    the key (distribute/prepare installs it first)."""
+    mk = str(_key_paths()[0])
+    return ("ssh " + " ".join(_HOSTKEY)
+            + f" -o ConnectTimeout=15 -o BatchMode=yes -i {mk} -W %h:%p {bastion}")
+
+
 def _pw_cmd(sshpass: str, bastion: str, target: str, remote: str) -> list[str]:
     """Password SSH to `target`. With a `bastion`, the JUMP hop authenticates with
-    SLEP's managed key (install it on the bastion first) and only the target uses
-    the password — a single `sshpass` per command, which is reliable, unlike two
-    password hops. Direct (no bastion) forces the password leg."""
-    opts = [*_HOSTKEY, "-o", "ConnectTimeout=15"]
+    SLEP's managed key (via ProxyCommand) and only the target uses the password —
+    a single `sshpass` per command. Direct (no bastion) forces the password leg."""
+    opts = [*_HOSTKEY, "-o", "ConnectTimeout=15", "-o", "PubkeyAuthentication=no"]
     if bastion:
-        opts += ["-i", str(_key_paths()[0]), "-o", f"ProxyJump={bastion}"]
-    else:
-        opts += ["-o", "PubkeyAuthentication=no"]   # direct: force the password leg
+        opts += ["-o", f"ProxyCommand={_key_proxy(bastion)}"]
     return [sshpass, "-e", "ssh", *opts, target, remote]
 
 
 def _key_cmd(bastion: str, keyfile: str, target: str, remote: str) -> list[str]:
-    """Key SSH to `target` (through `bastion` if set). ProxyJump reuses the same
-    identity for the jump hop. BatchMode so a wrong key fails fast."""
+    """Key SSH to `target` (through `bastion` if set). The jump hop uses SLEP's
+    managed key (ProxyCommand); the target uses `keyfile`. BatchMode fails fast."""
     opts = [*_HOSTKEY, "-o", "ConnectTimeout=15", "-i", keyfile, "-o", "BatchMode=yes"]
     if bastion:
-        opts += ["-o", f"ProxyJump={bastion}"]
+        opts += ["-o", f"ProxyCommand={_key_proxy(bastion)}"]
     return ["ssh", *opts, target, remote]
 
 
