@@ -8,13 +8,13 @@
 # preserves the named `slep-data` volume — the SQLite DB, project files, run
 # logs, and TLS cert live there and must survive every rebuild.
 #
-# Usage: ./deploy/sysible_slep <command> [args]
-#        (run `./deploy/sysible_slep install` once to put `sysible_slep` on PATH)
+# Usage: ./deploy/slep <command> [args]
+#        (run `./deploy/slep install` once to put `slep` on PATH)
 set -euo pipefail
 
 # --- Locate the compose file relative to THIS script -----------------------
 # Resolve from the script's own directory so the CLI works no matter what the
-# current working directory is (invoked as ./deploy/sysible-slep, from an
+# current working directory is (invoked as ./deploy/slep, from an
 # absolute path, or via a symlink on PATH).
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 COMPOSE_FILE="$SCRIPT_DIR/docker-compose.yml"
@@ -179,11 +179,11 @@ cmd_version() {
 }
 
 cmd_install() {
-  # Symlink this script onto PATH as `sysible_slep` so it can be run from
-  # anywhere. Links (not copies) to the checkout so `update`/`git pull` keep the
-  # installed CLI current. Uses /usr/local/bin when writable (run with sudo for a
+  # Symlink this script onto PATH as `slep` so it can be run from anywhere.
+  # Links (not copies) to the checkout so `update`/`git pull` keep the installed
+  # CLI current. Uses /usr/local/bin when writable (run with sudo for a
   # system-wide install), else falls back to the per-user ~/.local/bin.
-  local name="sysible_slep" bindir dest
+  local name="slep" bindir dest
   if [[ -w /usr/local/bin || "$(id -u)" -eq 0 ]]; then
     bindir=/usr/local/bin
   else
@@ -208,25 +208,25 @@ cmd_install() {
 cmd_uninstall() {
   # Remove the symlink from wherever `install` may have placed it.
   local removed=0 d
-  for d in /usr/local/bin/sysible_slep "$HOME/.local/bin/sysible_slep"; do
+  for d in /usr/local/bin/slep "$HOME/.local/bin/slep"; do
     if [[ -L "$d" || -f "$d" ]]; then
       rm -f "$d" && { _ok "Removed $d"; removed=1; }
     fi
   done
-  [[ $removed -eq 1 ]] || _warn "No installed 'sysible_slep' found in /usr/local/bin or ~/.local/bin."
+  [[ $removed -eq 1 ]] || _warn "No installed 'slep' found in /usr/local/bin or ~/.local/bin."
   return 0
 }
 
 usage() {
   cat <<EOF
-${BOLD}sysible_slep${RESET} — manage the Sysible Linux Engineering Platform container
+${BOLD}slep${RESET} — manage the Sysible Linux Engineering Platform container
 
 ${BOLD}Usage:${RESET} $(basename "$0") <command> [args]
 
 ${BOLD}Commands:${RESET}
-  ${CYAN}install${RESET}   Put this CLI on your PATH as 'sysible_slep' (symlink). Run with
+  ${CYAN}install${RESET}   Put this CLI on your PATH as 'slep' (symlink). Run with
               sudo for a system-wide install, else it goes in ~/.local/bin.
-  ${CYAN}uninstall${RESET} Remove the 'sysible_slep' symlink from PATH.
+  ${CYAN}uninstall${RESET} Remove the 'slep' symlink from PATH.
   ${CYAN}update${RESET}    Pull latest code (if a git checkout), rebuild the image, and
               restart in place. Preserves the ${VOLUME} data volume.
   ${CYAN}status${RESET}    Show container status and probe the console health endpoint.
@@ -239,7 +239,7 @@ ${BOLD}Commands:${RESET}
   ${CYAN}version${RESET}   Print the running image and git short SHA (if available).
   ${CYAN}help${RESET}      Show this help.
 
-First time: ${BOLD}sudo ./deploy/sysible_slep install${RESET} — then just ${BOLD}sysible_slep update${RESET}.
+First time: ${BOLD}sudo ./deploy/slep install${RESET} — then just ${BOLD}slep update${RESET}.
 The console listens on https://localhost:${CONSOLE_PORT} by default.
 EOF
 }

@@ -12,11 +12,11 @@ docker compose -f deploy/docker-compose.yml up -d --build
 
 ### Managing / updating
 
-A small management CLI (`deploy/sysible_slep`) wraps the docker commands so you
+A small management CLI (`deploy/slep`) wraps the docker commands so you
 don't have to remember them. Put it on your PATH once:
 
 ```sh
-sudo ./deploy/sysible_slep install     # symlinks `sysible_slep` into /usr/local/bin
+sudo ./deploy/slep install     # symlinks `slep` into /usr/local/bin
 ```
 
 (Without sudo it installs into `~/.local/bin` for your user only.) After that,
@@ -24,13 +24,13 @@ run it from anywhere. To pull the latest code and rebuild + restart the containe
 in place (the `slep-data` volume is always preserved):
 
 ```sh
-sysible_slep update
+slep update
 ```
 
 Other commands: `status` (container state + console health probe), `logs`,
 `restart`, `start`, `stop`, `backup` (timestamped tarball of the data volume in
-the current dir), `version`, and `uninstall`. Run `sysible_slep help` for the
-full list. (Before installing, invoke it as `./deploy/sysible_slep <command>`.)
+the current dir), `version`, and `uninstall`. Run `slep help` for the
+full list. (Before installing, invoke it as `./deploy/slep <command>`.)
 
 ### HTTPS / TLS
 
