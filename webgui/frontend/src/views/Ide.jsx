@@ -21,6 +21,7 @@ export default function Ide({ project, onBack, onRun }) {
   const [runOpen, setRunOpen] = useState(false)
   const [newOpen, setNewOpen] = useState(false)
   const [taskOpen, setTaskOpen] = useState(false)
+  const [delPath, setDelPath] = useState(null)
   const editorRef = useRef(null)
 
   const loadTree = useCallback(() => api(`projects/${project.id}/files`).then((d) => setTree(d.files)), [project.id])
@@ -28,11 +29,14 @@ export default function Ide({ project, onBack, onRun }) {
 
   const open = async (p) => { const d = await api(`projects/${project.id}/file?path=${encodeURIComponent(p)}`); setPath(p); setContent(d.content); setSaved(true) }
 
+  // Delete via an in-app dialog (native confirm() can be suppressed by the
+  // browser, which silently blocked deletes). try/catch surfaces any error.
   const remove = async (p) => {
-    if (!confirm('Delete ' + p + '?')) return
-    await api(`projects/${project.id}/file?path=${encodeURIComponent(p)}`, { method: 'DELETE' })
-    if (p === path) { setPath(null); setContent('') }
-    loadTree()
+    try {
+      await api(`projects/${project.id}/file?path=${encodeURIComponent(p)}`, { method: 'DELETE' })
+      if (p === path) { setPath(null); setContent('') }
+      await loadTree()
+    } catch (e) { alert('Could not delete ' + p + ': ' + e.message) }
   }
 
   // Insert a task snippet at the editor cursor (fires onChange → marks unsaved).
@@ -72,7 +76,7 @@ export default function Ide({ project, onBack, onRun }) {
           {tree.map((f) => (
             <div key={f.path} className={'f ' + (f.type === 'dir' ? 'dir' : '') + (f.path === path ? ' active' : '')}>
               <span className="f-name" onClick={() => f.type === 'file' && open(f.path)}>{f.type === 'dir' ? '📁 ' : '📄 '}{f.path}</span>
-              <button className="f-del" title={'Delete ' + f.path} onClick={(e) => { e.stopPropagation(); remove(f.path) }}>✕</button>
+              <button className="f-del" title={'Delete ' + f.path} onClick={(e) => { e.stopPropagation(); setDelPath(f.path) }}>✕</button>
             </div>
           ))}
         </div>
@@ -86,6 +90,16 @@ export default function Ide({ project, onBack, onRun }) {
       </div>
       {newOpen && <NewFile project={project} onClose={() => setNewOpen(false)} onCreated={(p) => { setNewOpen(false); loadTree(); open(p) }} />}
       {taskOpen && <TaskPalette onClose={() => setTaskOpen(false)} onInsert={insertTask} />}
+      {delPath && (
+        <Modal title="Delete file" onClose={() => setDelPath(null)}>
+          <div>Delete <b>{delPath}</b>? This can’t be undone.</div>
+          <div className="row" style={{ marginTop: 6 }}>
+            <div className="spacer" />
+            <button className="ghost" onClick={() => setDelPath(null)}>Cancel</button>
+            <button className="danger" onClick={() => { const p = delPath; setDelPath(null); remove(p) }}>Delete</button>
+          </div>
+        </Modal>
+      )}
       {runOpen && <RunModal project={project} currentFile={path} onClose={() => setRunOpen(false)} onLaunched={onRun} />}
     </>
   )

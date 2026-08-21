@@ -73,7 +73,7 @@ th{color:var(--muted);font-weight:600;font-size:12px}
 .tree{background:var(--panel);border-right:1px solid var(--line);overflow:auto;padding:8px}
 .tree .f{display:flex;align-items:center;gap:4px;padding:4px 6px 4px 8px;border-radius:6px}
 .tree .f .f-name{flex:1;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.tree .f .f-del{border:none;background:transparent;color:var(--muted);opacity:0;cursor:pointer;padding:0 4px;font-size:12px}
+.tree .f .f-del{border:none;background:transparent;color:var(--muted);opacity:.45;cursor:pointer;padding:0 4px;font-size:12px}
 .tree .f:hover{background:var(--panel2)}
 .tree .f:hover .f-del{opacity:1}
 .tree .f .f-del:hover{color:var(--danger)}
