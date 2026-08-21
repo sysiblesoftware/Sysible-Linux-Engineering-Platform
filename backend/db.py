@@ -75,6 +75,7 @@ def init_db() -> None:
                 description TEXT DEFAULT '',
                 scm_url TEXT DEFAULT '',
                 scm_branch TEXT DEFAULT '',
+                git_token TEXT DEFAULT '',          -- encrypted push/pull token
                 created INTEGER NOT NULL,
                 updated INTEGER NOT NULL
             );
@@ -223,6 +224,9 @@ def init_db() -> None:
         cred_cols = [r["name"] for r in c.execute("PRAGMA table_info(credentials)")]
         if "become_secret" not in cred_cols:
             c.execute("ALTER TABLE credentials ADD COLUMN become_secret TEXT DEFAULT ''")
+        proj_cols = [r["name"] for r in c.execute("PRAGMA table_info(projects)")]
+        if "git_token" not in proj_cols:
+            c.execute("ALTER TABLE projects ADD COLUMN git_token TEXT DEFAULT ''")
     # The DB holds password hashes, session tokens, encrypted vault + Controller
     # keys — keep it owner-only so a stray world-read can't harvest them.
     _restrict_db_permissions()
@@ -554,13 +558,23 @@ def count_superusers():
 # ---------------------------------------------------------------- projects
 def list_projects():
     with _connect() as c:
-        return [dict(r) for r in c.execute("SELECT * FROM projects ORDER BY name").fetchall()]
+        rows = [dict(r) for r in c.execute("SELECT * FROM projects ORDER BY name").fetchall()]
+    for d in rows:
+        d["has_git_token"] = bool(d.get("git_token"))
+        d.pop("git_token", None)
+    return rows
 
 
-def get_project(pid: int):
+def get_project(pid: int, include_token=False):
     with _connect() as c:
         r = c.execute("SELECT * FROM projects WHERE id=?", (pid,)).fetchone()
-        return dict(r) if r else None
+    if not r:
+        return None
+    d = dict(r)
+    d["has_git_token"] = bool(d.get("git_token"))
+    if not include_token:
+        d.pop("git_token", None)
+    return d
 
 
 def create_project(name, slug, description="", scm_url="", scm_branch=""):
@@ -579,6 +593,23 @@ def create_project(name, slug, description="", scm_url="", scm_branch=""):
 def touch_project(pid: int):
     with _connect() as c:
         c.execute("UPDATE projects SET updated=? WHERE id=?", (_now(), pid))
+
+
+def set_project_scm(pid: int, scm_url=None, scm_branch=None, git_token=None):
+    """Update a project's git remote URL / default branch / encrypted token.
+    None leaves a field unchanged."""
+    sets, vals = [], []
+    if scm_url is not None:
+        sets.append("scm_url=?"); vals.append(scm_url)
+    if scm_branch is not None:
+        sets.append("scm_branch=?"); vals.append(scm_branch)
+    if git_token is not None:
+        sets.append("git_token=?"); vals.append(git_token)
+    if not sets:
+        return
+    vals.append(pid)
+    with _connect() as c:
+        c.execute(f"UPDATE projects SET {', '.join(sets)} WHERE id=?", vals)
 
 
 def delete_project(pid: int):

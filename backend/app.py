@@ -27,7 +27,7 @@ from contextlib import asynccontextmanager
 from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse
 
-from . import controller_import, db, engines, infra, keydist, policy, vault
+from . import controller_import, db, engines, gitops, infra, keydist, policy, vault
 from .runners import ansible_runner, salt_runner, terraform_runner
 
 # Engine name -> runner.launch(run_id). Each runs to completion on a thread.
@@ -419,6 +419,79 @@ def create_path(pid: int, body: dict = Body(...), user: str = Depends(current_us
             target.write_text("")
     db.touch_project(pid)
     return {"status": "created", "path": path}
+
+
+# ------------------------------------------------------------------ git ops
+def _git(fn):
+    try:
+        return fn()
+    except gitops.GitError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/projects/{pid}/git/status")
+def git_status(pid: int, user: str = Depends(current_user)):
+    if not db.get_project(pid):
+        raise HTTPException(status_code=404, detail="Project not found.")
+    return _git(lambda: gitops.status(pid))
+
+
+@app.post("/projects/{pid}/git/init")
+def git_init(pid: int, user: str = Depends(current_user)):
+    db.log_audit("git_init", user, f"project:{pid}")
+    return _git(lambda: gitops.init(pid))
+
+
+@app.post("/projects/{pid}/git/commit")
+def git_commit(pid: int, body: dict = Body(...), user: str = Depends(current_user)):
+    paths = body.get("paths")
+    return _git(lambda: gitops.commit(pid, str(body.get("message") or ""),
+                                      paths=list(paths) if isinstance(paths, list) else None))
+
+
+@app.get("/projects/{pid}/git/log")
+def git_log(pid: int, user: str = Depends(current_user)):
+    return {"commits": _git(lambda: gitops.log(pid))}
+
+
+@app.get("/projects/{pid}/git/diff", response_class=PlainTextResponse)
+def git_diff(pid: int, path: str | None = None, staged: bool = False, user: str = Depends(current_user)):
+    return PlainTextResponse(_git(lambda: gitops.diff(pid, path=path, staged=staged)))
+
+
+@app.get("/projects/{pid}/git/branches")
+def git_branches(pid: int, user: str = Depends(current_user)):
+    return {"branches": _git(lambda: gitops.branches(pid))}
+
+
+@app.post("/projects/{pid}/git/checkout")
+def git_checkout(pid: int, body: dict = Body(...), user: str = Depends(current_user)):
+    return _git(lambda: gitops.checkout(pid, str(body.get("branch") or ""), create=bool(body.get("create"))))
+
+
+@app.post("/projects/{pid}/git/remote")
+def git_remote(pid: int, body: dict = Body(...), user: str = Depends(current_user)):
+    """Set the remote URL and (optionally) an encrypted push/pull token."""
+    if not db.get_project(pid):
+        raise HTTPException(status_code=404, detail="Project not found.")
+    if "url" in body:
+        gitops.set_remote(pid, str(body.get("url") or ""))
+    if "token" in body:
+        tok = str(body.get("token") or "")
+        db.set_project_scm(pid, git_token=vault.encrypt(tok) if tok else "")
+    return _git(lambda: gitops.status(pid))
+
+
+@app.post("/projects/{pid}/git/push")
+def git_push(pid: int, user: str = Depends(current_user)):
+    db.log_audit("git_push", user, f"project:{pid}")
+    return _git(lambda: gitops.push(pid))
+
+
+@app.post("/projects/{pid}/git/pull")
+def git_pull(pid: int, user: str = Depends(current_user)):
+    db.log_audit("git_pull", user, f"project:{pid}")
+    return _git(lambda: gitops.pull(pid))
 
 
 @app.post("/projects/{pid}/file/rename")

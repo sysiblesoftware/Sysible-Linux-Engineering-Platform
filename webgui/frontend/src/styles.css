@@ -117,6 +117,8 @@ th{color:var(--muted);font-weight:600;font-size:12px}
 .job-log{background:#0a0c10;border:1px solid var(--line);border-radius:8px;padding:10px;
   font:12px/1.5 ui-monospace,Menlo,monospace;white-space:pre-wrap;overflow:auto;height:100%;min-height:260px;max-height:64vh;color:#d7dde7}
 .job-log.empty{display:flex;align-items:center;justify-content:center;color:var(--faint)}
+.git-cols{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px;margin-top:10px}
+@media (max-width:760px){.git-cols{grid-template-columns:1fr}}
 .jl-head{font-weight:700;color:var(--text);margin:10px 0 4px;font-size:12.5px}
 .jl-head:first-child{margin-top:0}
 .jl-prog{color:var(--muted)}

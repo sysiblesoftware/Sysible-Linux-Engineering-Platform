@@ -185,6 +185,7 @@ export default function Ide({ project, onBack, onRun }) {
   const [targets, setTargets] = useState(['all', 'localhost'])   // host patterns for `hosts:`
   const [delPath, setDelPath] = useState(null)
   const [renPath, setRenPath] = useState(null)
+  const [gitOpen, setGitOpen] = useState(false)
   const [menu, setMenu] = useState(null)   // {x, y} custom editor context menu
   const editorRef = useRef(null)
   const snip = snippetsFor(path)
@@ -426,6 +427,7 @@ export default function Ide({ project, onBack, onRun }) {
           <button className="ghost sm" onClick={() => setTaskOpen(true)} disabled={path == null}
             title={`Insert a ready-made ${snip.engine} ${snip.verb.toLowerCase()} at the cursor`}>Add {snip.verb}</button>
           <button className="ghost sm" onClick={save} disabled={path == null}>{saved ? 'Saved' : 'Save'}</button>
+          <button className="ghost sm" title="Version control — commit, push, pull, branches" onClick={() => setGitOpen(true)}>⎇ Git</button>
           <div className="spacer" />
           <button className="primary sm" onClick={() => setRunOpen(true)}>▶ Run</button>
         </div>
@@ -447,6 +449,7 @@ export default function Ide({ project, onBack, onRun }) {
       )}
       {renPath && <RenameFile from={renPath} onClose={() => setRenPath(null)}
         onRename={async (to) => { await rename(renPath, to); setRenPath(null) }} />}
+      {gitOpen && <GitPanel project={project} onClose={() => setGitOpen(false)} onChanged={() => loadTree()} />}
       {runOpen && <RunModal project={project} currentFile={path} onClose={() => setRunOpen(false)} onLaunched={onRun} />}
       {menu && <EditorMenu at={menu} onClose={() => setMenu(null)}
         items={[
@@ -561,6 +564,109 @@ function RenameFile({ from, onClose, onRename }) {
       <div className="muted">Include a path to move it (e.g. <span className="mono">roles/web/tasks.yml</span>).</div>
       {node}
       <button className="primary" onClick={submit}>Rename</button>
+    </Modal>
+  )
+}
+
+// Full git-ops for a project: status, stage-all commit, push/pull to a remote
+// (with an encrypted token), branch create/checkout, and a recent-commits log.
+function GitPanel({ project, onClose, onChanged }) {
+  const [st, setSt] = useState(null)        // null = loading
+  const [log, setLog] = useState([])
+  const [branches, setBranches] = useState([])
+  const [msg, setMsg] = useState('')
+  const [newBranch, setNewBranch] = useState('')
+  const [url, setUrl] = useState('')
+  const [token, setToken] = useState('')
+  const [busy, setBusy] = useState('')
+  const [flash, setFlash] = useState('')
+  const { wrap, node, setErr } = useErr()
+  const base = `projects/${project.id}/git`
+
+  const refresh = async () => {
+    const s = await api(`${base}/status`)
+    setSt(s); setUrl(s.remote || '')
+    if (s.repo) {
+      api(`${base}/log`).then((d) => setLog(d.commits)).catch(() => {})
+      api(`${base}/branches`).then((d) => setBranches(d.branches)).catch(() => {})
+    }
+  }
+  useEffect(() => { refresh().catch((e) => setErr(e.message)) }, [])
+
+  const act = (label, fn) => wrap(async () => {
+    setBusy(label); setFlash('')
+    try { const r = await fn(); if (r && r.output) setFlash(r.output); await refresh(); onChanged && onChanged() }
+    finally { setBusy('') }
+  })
+
+  if (st === null) return <Modal title="Git" onClose={onClose}><div className="muted">Loading…</div>{node}</Modal>
+
+  if (!st.repo) return (
+    <Modal title={`Git — ${project.name}`} onClose={onClose}>
+      <div className="muted">This project isn’t under version control yet.</div>
+      {node}
+      <button className="primary" disabled={busy} onClick={() => act('init', () => api(`${base}/init`, { method: 'POST' }))}>Initialize git repository</button>
+    </Modal>
+  )
+
+  const changed = st.files || []
+  return (
+    <Modal title={`Git — ${project.name}`} onClose={onClose} wide>
+      <div className="row" style={{ gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+        <span className="pill">⎇ {st.branch}</span>
+        {st.ahead > 0 && <span className="pill" title="commits to push">↑ {st.ahead}</span>}
+        {st.behind > 0 && <span className="pill" title="commits to pull">↓ {st.behind}</span>}
+        <select value="" onChange={(e) => e.target.value && act('checkout', () => api(`${base}/checkout`, { method: 'POST', json: { branch: e.target.value } }))}>
+          <option value="">Switch branch…</option>
+          {branches.filter((b) => b !== st.branch).map((b) => <option key={b} value={b}>{b}</option>)}
+        </select>
+        <input style={{ width: 150 }} placeholder="new branch…" value={newBranch} onChange={(e) => setNewBranch(e.target.value)} />
+        <button className="ghost sm" disabled={busy || !newBranch.trim()} onClick={() => act('checkout', async () => { const r = await api(`${base}/checkout`, { method: 'POST', json: { branch: newBranch.trim(), create: true } }); setNewBranch(''); return r })}>Create</button>
+        <div className="spacer" />
+        <button className="ghost sm" disabled={busy || !st.remote} onClick={() => act('pull', () => api(`${base}/pull`, { method: 'POST' }))}>{busy === 'pull' ? 'Pulling…' : `↓ Pull`}</button>
+        <button className="ghost sm" disabled={busy || !st.remote} onClick={() => act('push', () => api(`${base}/push`, { method: 'POST' }))}>{busy === 'push' ? 'Pushing…' : `↑ Push`}</button>
+      </div>
+
+      <div className="git-cols">
+        <div className="job-col">
+          <div className="pane-title">Changes ({changed.length})</div>
+          <div style={{ maxHeight: '34vh', overflow: 'auto', border: '1px solid var(--line)', borderRadius: 8 }}>
+            {changed.length === 0 ? <div className="muted" style={{ padding: 10 }}>Working tree clean.</div>
+              : changed.map((f) => (
+                <div key={f.path} className="row" style={{ gap: 8, padding: '4px 10px', borderBottom: '1px solid var(--line)' }}>
+                  <span className="mono" style={{ width: 26, color: f.untracked ? 'var(--warn)' : 'var(--accent2)' }}>{(f.x + f.y).trim() || '•'}</span>
+                  <span className="mono" style={{ fontSize: 12 }}>{f.path}</span>
+                </div>
+              ))}
+          </div>
+          <Field label="Commit message"><input value={msg} onChange={(e) => setMsg(e.target.value)} placeholder="what changed" /></Field>
+          <button className="primary" disabled={busy || changed.length === 0 || !msg.trim()}
+            onClick={() => act('commit', async () => { const r = await api(`${base}/commit`, { method: 'POST', json: { message: msg.trim() } }); setMsg(''); return r })}>{busy === 'commit' ? 'Committing…' : `Commit all (${changed.length})`}</button>
+        </div>
+
+        <div className="job-col">
+          <div className="pane-title">Remote</div>
+          <Field label="Remote URL (origin)"><input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://github.com/org/repo.git" /></Field>
+          <Field label={st.has_token ? 'Access token (set — leave blank to keep)' : 'Access token (for private push/pull)'}>
+            <input type="password" value={token} autoComplete="off" onChange={(e) => setToken(e.target.value)} placeholder="ghp_… / gitlab PAT" />
+          </Field>
+          <button className="ghost sm" disabled={busy} onClick={() => act('remote', () => api(`${base}/remote`, { method: 'POST', json: { url: url.trim(), ...(token ? { token } : {}) } }).then((r) => { setToken(''); return r }))}>Save remote</button>
+          <div className="pane-title" style={{ marginTop: 12 }}>Recent commits</div>
+          <div style={{ maxHeight: '24vh', overflow: 'auto' }}>
+            {log.length === 0 ? <div className="muted">No commits yet.</div>
+              : log.map((c) => (
+                <div key={c.hash} className="row" style={{ gap: 8, fontSize: 12, padding: '2px 0' }}>
+                  <span className="mono" style={{ color: 'var(--accent)' }}>{c.hash}</span>
+                  <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.subject}</span>
+                  <span className="faint">{c.when}</span>
+                </div>
+              ))}
+          </div>
+        </div>
+      </div>
+
+      {flash && <pre className="log" style={{ marginTop: 8, maxHeight: '18vh' }}>{flash}</pre>}
+      {node}
     </Modal>
   )
 }
