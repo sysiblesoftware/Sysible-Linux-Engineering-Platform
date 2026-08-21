@@ -65,7 +65,6 @@ export default function Runs({ onOpen }) {
 export function RunLog({ runId, onBack }) {
   const [text, setText] = useState('')
   const [status, setStatus] = useState('pending')
-  const [tab, setTab] = useState('viz')          // 'viz' | 'log'
   const [engine, setEngine] = useState('ansible')
   const [seedHosts, setSeedHosts] = useState([])
   const boxRef = useRef(null)
@@ -96,7 +95,7 @@ export function RunLog({ runId, onBack }) {
       while (alive) {
         const r = await tail(`runs/${runId}/log?offset=${offset}`)
         if (!alive) break
-        if (r.text) { acc += r.text; setText(acc); const b = boxRef.current; if (b && tab === 'log') b.scrollTop = b.scrollHeight }
+        if (r.text) { acc += r.text; setText(acc); const b = boxRef.current; if (b) b.scrollTop = b.scrollHeight }
         offset = r.next; setStatus(r.status)
         if (['success', 'failed', 'canceled'].includes(r.status)) break
         await new Promise((res) => setTimeout(res, 1000))
@@ -113,16 +112,22 @@ export function RunLog({ runId, onBack }) {
         <h2 style={{ margin: 0 }}>Run #{runId}</h2>
         <span className="muted">{engine}</span>
         <span className={'pill ' + status}>{status}</span>
-        <div className="spacer" />
-        <div className="seg">
-          <button className={'seg-btn' + (tab === 'viz' ? ' active' : '')} onClick={() => setTab('viz')}>Visualize</button>
-          <button className={'seg-btn' + (tab === 'log' ? ' active' : '')} onClick={() => setTab('log')}>Log</button>
+      </div>
+      {/* Visualize and Log together: the graph on the left, the raw log on the
+          right (they stack on narrow screens). Each pane scrolls on its own. */}
+      <div className="run-split">
+        <div className="run-pane">
+          <div className="pane-title">Visualize</div>
+          <div className="run-scroll">
+            {text ? <RunViz engine={engine} model={model} seedHosts={seedHosts} />
+              : <div className="muted" style={{ padding: 8 }}>connecting…</div>}
+          </div>
+        </div>
+        <div className="run-pane">
+          <div className="pane-title">Log</div>
+          <div className="log run-scroll" ref={boxRef}>{text ? ansiToSpans(text) : 'connecting…'}</div>
         </div>
       </div>
-      {tab === 'viz'
-        ? (text ? <RunViz engine={engine} model={model} seedHosts={seedHosts} />
-          : <div className="muted" style={{ padding: 8 }}>connecting…</div>)
-        : <div className="log" ref={boxRef}>{text ? ansiToSpans(text) : 'connecting…'}</div>}
     </>
   )
 }
