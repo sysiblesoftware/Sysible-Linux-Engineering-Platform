@@ -75,6 +75,25 @@ def test_credentials_hide_secret(client):
     assert "secret" not in c            # never returned to the browser
 
 
+def test_credential_become_password_encrypted_and_flagged(client):
+    import backend.db as db
+    r = client.post("/credentials", json={"name": "sudocred", "kind": "ssh",
+                                          "username": "admin", "secret": "KEY", "become_password": "s3cret"})
+    cid = r.json()["id"]
+    # The listing flags that a sudo password is set, but never returns it.
+    c = [x for x in client.get("/credentials").json()["credentials"] if x["id"] == cid][0]
+    assert c["has_become"] is True and "become_secret" not in c and "secret" not in c
+    # Stored encrypted at rest, not plaintext; decrypts back to the original.
+    import backend.vault as vault
+    full = db.get_credential(cid, include_secret=True)
+    assert full["become_secret"] and full["become_secret"] != "s3cret"
+    assert vault.decrypt(full["become_secret"]) == "s3cret"
+    # PATCH can clear it.
+    client.patch(f"/credentials/{cid}", json={"become_password": ""})
+    c2 = [x for x in client.get("/credentials").json()["credentials"] if x["id"] == cid][0]
+    assert c2["has_become"] is False
+
+
 def test_unknown_engine_rejected(client, project):
     r = client.post("/runs", json={"project_id": project["id"], "kind": "puppet", "target": "x"})
     assert r.status_code == 400

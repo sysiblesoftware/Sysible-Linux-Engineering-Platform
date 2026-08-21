@@ -101,6 +101,7 @@ def init_db() -> None:
                 kind TEXT NOT NULL DEFAULT 'ssh',   -- ssh | ssh_password | cloud | vault
                 username TEXT DEFAULT '',
                 secret TEXT DEFAULT '',             -- private key / password / token (server-side only)
+                become_secret TEXT DEFAULT '',      -- sudo/become password, ENCRYPTED at rest
                 created INTEGER NOT NULL
             );
 
@@ -219,6 +220,9 @@ def init_db() -> None:
         inv_cols = [r["name"] for r in c.execute("PRAGMA table_info(inventories)")]
         if "bastion" not in inv_cols:
             c.execute("ALTER TABLE inventories ADD COLUMN bastion TEXT DEFAULT ''")
+        cred_cols = [r["name"] for r in c.execute("PRAGMA table_info(credentials)")]
+        if "become_secret" not in cred_cols:
+            c.execute("ALTER TABLE credentials ADD COLUMN become_secret TEXT DEFAULT ''")
     # The DB holds password hashes, session tokens, encrypted vault + Controller
     # keys — keep it owner-only so a stray world-read can't harvest them.
     _restrict_db_permissions()
@@ -589,12 +593,18 @@ def project_dir(pid: int) -> Path:
 
 
 # ---------------------------------------------------------------- credentials
+def _strip_cred_secrets(d):
+    d.pop("secret", None)
+    # Never leak the ciphertext; expose only whether a become password is set.
+    d["has_become"] = bool(d.pop("become_secret", "") or "")
+    return d
+
+
 def list_credentials(include_secret=False):
     with _connect() as c:
         rows = [dict(r) for r in c.execute("SELECT * FROM credentials ORDER BY name").fetchall()]
     if not include_secret:
-        for r in rows:
-            r.pop("secret", None)
+        rows = [_strip_cred_secrets(r) for r in rows]
     return rows
 
 
@@ -605,32 +615,43 @@ def get_credential(cid: int, include_secret=False):
         return None
     d = dict(r)
     if not include_secret:
-        d.pop("secret", None)
+        d = _strip_cred_secrets(d)
     return d
 
 
-def create_credential(name, kind="ssh", username="", secret=""):
+def create_credential(name, kind="ssh", username="", secret="", become_secret=""):
     with _connect() as c:
         cur = c.execute(
-            "INSERT INTO credentials(name,kind,username,secret,created) VALUES(?,?,?,?,?)",
-            (name, kind, username, secret, _now()),
+            "INSERT INTO credentials(name,kind,username,secret,become_secret,created) VALUES(?,?,?,?,?,?)",
+            (name, kind, username, secret, become_secret, _now()),
         )
         return cur.lastrowid
 
 
-def upsert_credential(name, kind="ssh", username="", secret=""):
+def set_credential_become(cid: int, become_secret: str):
+    """Set (or clear, with '') a credential's encrypted sudo/become password."""
+    with _connect() as c:
+        c.execute("UPDATE credentials SET become_secret=? WHERE id=?", (become_secret, cid))
+
+
+def upsert_credential(name, kind="ssh", username="", secret="", become_secret=None):
     """Create a credential, or refresh an existing one with the same name in place
     (keeping its id, so runs already pointing at it keep working). Used by the
-    'distribute SSH key' flow to (re)publish the SLEP managed key credential."""
+    'distribute SSH key' flow to (re)publish the SLEP managed key credential.
+    `become_secret=None` preserves any already-set sudo password on update."""
     with _connect() as c:
         row = c.execute("SELECT id FROM credentials WHERE name=?", (name,)).fetchone()
         if row:
-            c.execute("UPDATE credentials SET kind=?, username=?, secret=? WHERE id=?",
-                      (kind, username, secret, row["id"]))
+            if become_secret is None:
+                c.execute("UPDATE credentials SET kind=?, username=?, secret=? WHERE id=?",
+                          (kind, username, secret, row["id"]))
+            else:
+                c.execute("UPDATE credentials SET kind=?, username=?, secret=?, become_secret=? WHERE id=?",
+                          (kind, username, secret, become_secret, row["id"]))
             return row["id"]
         cur = c.execute(
-            "INSERT INTO credentials(name,kind,username,secret,created) VALUES(?,?,?,?,?)",
-            (name, kind, username, secret, _now()),
+            "INSERT INTO credentials(name,kind,username,secret,become_secret,created) VALUES(?,?,?,?,?,?)",
+            (name, kind, username, secret, become_secret or "", _now()),
         )
         return cur.lastrowid
 

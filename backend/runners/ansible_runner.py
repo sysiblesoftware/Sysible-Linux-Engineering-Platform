@@ -26,6 +26,19 @@ from pathlib import Path
 
 from .. import db, keydist, vault
 
+# Transient per-run sudo passwords (never persisted): set just before launch(),
+# consumed once inside it. Keyed by run id; same process, so a plain dict is fine.
+_BECOME: dict[int, str] = {}
+
+
+def stash_become(run_id: int, password: str) -> None:
+    if password:
+        _BECOME[run_id] = password
+
+
+def pop_become(run_id: int) -> str:
+    return _BECOME.pop(run_id, "")
+
 
 def _ansible_group(name: str) -> str:
     """Ansible INI group names allow only letters, digits and underscores — a
@@ -198,6 +211,25 @@ def launch(run_id: int) -> None:
                 finally:
                     os.close(fd)
                 cmd += ["-e", "@" + str(vfile)]
+
+            # Sudo/become password: a per-run override (transient), else the one
+            # stored (encrypted) on the credential. Passed via a 0600 vars file so
+            # it never lands in the process list. Lets a key credential run `become`
+            # tasks against password-sudo hosts (e.g. an admin account).
+            become_pw = pop_become(run_id)
+            if not become_pw and credential and credential.get("become_secret"):
+                try:
+                    become_pw = vault.decrypt(credential["become_secret"])
+                except Exception:  # noqa: BLE001 — a bad ciphertext shouldn't crash the run
+                    become_pw = ""
+            if become_pw:
+                bfile = tmp / "become.json"
+                fd = os.open(str(bfile), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                try:
+                    os.write(fd, json.dumps({"ansible_become_password": become_pw}).encode())
+                finally:
+                    os.close(fd)
+                cmd += ["-e", "@" + str(bfile)]
 
             env = dict(os.environ)
             # First-run friendliness: don't wedge on unknown host keys. Documented,

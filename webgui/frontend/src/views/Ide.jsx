@@ -431,6 +431,7 @@ function RunModal({ project, currentFile, onClose, onLaunched }) {
   const [inv, setInv] = useState(''); const [cred, setCred] = useState('')
   const [vars, setVars] = useState('')       // KEY=value per line
   const [saltTest, setSaltTest] = useState(false)
+  const [becomePw, setBecomePw] = useState('')   // per-run sudo override
   const { wrap, node } = useErr()
 
   // Parse the KEY=value textarea into an object (blank lines / #comments ignored).
@@ -489,6 +490,14 @@ function RunModal({ project, currentFile, onClose, onLaunched }) {
           placeholder={engine === 'terraform' ? 'instance_type=t3.micro' : 'env=staging'}
           style={{ fontFamily: 'ui-monospace,Menlo,monospace', fontSize: 12.5, resize: 'vertical' }} />
       </Field>
+      {engine === 'ansible' && (
+        <Field label="Sudo (become) password — optional">
+          <input type="password" value={becomePw} autoComplete="off" onChange={(e) => setBecomePw(e.target.value)}
+                 placeholder={(creds.find((c) => String(c.id) === String(cred))?.has_become)
+                   ? 'credential already has one — leave blank to use it'
+                   : 'for become tasks on password-sudo hosts'} />
+        </Field>
+      )}
       {engine === 'salt' && (
         <label className="row" style={{ gap: 8, fontSize: 13, cursor: 'pointer' }}>
           <input type="checkbox" checked={saltTest} onChange={(e) => setSaltTest(e.target.checked)} style={{ width: 'auto' }} />
@@ -503,7 +512,7 @@ function RunModal({ project, currentFile, onClose, onLaunched }) {
         const d = await api('runs', { method: 'POST', json: {
           project_id: project.id, kind: engine, target,
           inventory_id: needsInv ? Number(inv) : null, credential_id: cred ? Number(cred) : null,
-          extra_vars: extra,
+          extra_vars: extra, become_password: engine === 'ansible' ? becomePw : '',
         } })
         onClose(); onLaunched(d.run_id)
       })}>▶ Launch</button>

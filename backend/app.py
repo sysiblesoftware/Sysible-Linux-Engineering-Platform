@@ -444,10 +444,25 @@ def create_credential(body: dict = Body(...), user: str = Depends(current_user))
     name = str(body.get("name") or "").strip()
     if not name:
         raise HTTPException(status_code=400, detail="Credential name is required.")
+    # Optional sudo/become password, stored encrypted at rest.
+    become = str(body.get("become_password") or "")
     cid = db.create_credential(
         name, kind=str(body.get("kind") or "ssh"),
         username=str(body.get("username") or ""), secret=str(body.get("secret") or ""),
+        become_secret=vault.encrypt(become) if become else "",
     )
+    return db.get_credential(cid)
+
+
+@app.patch("/credentials/{cid}")
+def update_credential(cid: int, body: dict = Body(...), user: str = Depends(current_user)):
+    """Set or clear a credential's sudo/become password (encrypted at rest). Lets
+    the auto-created 'SLEP managed key' carry the sudo password for `become` tasks."""
+    if not db.get_credential(cid):
+        raise HTTPException(status_code=404, detail="Credential not found.")
+    if "become_password" in body:
+        become = str(body.get("become_password") or "")
+        db.set_credential_become(cid, vault.encrypt(become) if become else "")
     return db.get_credential(cid)
 
 
@@ -740,13 +755,18 @@ def disconnect_controller(cid: int, user: str = Depends(require_superuser)):
 
 
 # ------------------------------------------------------------------ runs
-def _dispatch_run(project, kind, target, inventory_id, credential_id, extra_vars, actor):
+def _dispatch_run(project, kind, target, inventory_id, credential_id, extra_vars, actor,
+                  become_password=""):
     """Create a run row and launch its engine on a background thread. Shared by the
-    manual /runs route and the scheduler. Returns the run id."""
+    manual /runs route and the scheduler. Returns the run id. `become_password` is
+    a transient per-run sudo password — stashed in memory, never persisted."""
     run_id = db.create_run(
         project["id"], kind, target, inventory_id=inventory_id,
         credential_id=credential_id, extra_vars=extra_vars or {}, created_by=actor,
     )
+    if become_password and kind == "ansible":
+        from .runners import ansible_runner
+        ansible_runner.stash_become(run_id, become_password)
     db.log_audit("run_launched", actor, f"#{run_id} {kind} '{target}' on {project['name']}")
     threading.Thread(target=RUNNERS[kind], args=(run_id,), daemon=True).start()
     return run_id
@@ -769,7 +789,8 @@ def launch_run(body: dict = Body(...), user: str = Depends(current_user)):
                 "salt": "state name"}.get(kind, "target")
         raise HTTPException(status_code=400, detail=f"target ({what}) is required.")
     run_id = _dispatch_run(project, kind, target, body.get("inventory_id"),
-                           body.get("credential_id"), body.get("extra_vars") or {}, user)
+                           body.get("credential_id"), body.get("extra_vars") or {}, user,
+                           become_password=str(body.get("become_password") or ""))
     return {"status": "launched", "run_id": run_id}
 
 
