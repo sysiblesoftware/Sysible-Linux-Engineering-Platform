@@ -13,7 +13,7 @@
   --input-bg:#0c0e12; --log-bg:#0a0c10; --log-fg:#d7dde7;
   /* Topographic ground — a real contour map (brand-green minor lines with white
      index contours) painted behind the console, prominent but panel-friendly. */
-  --topo-img:url("/brand-topo-dark.png"); --topo-op:0.10;
+  --topo-img:url("/brand-topo-dark.png"); --topo-op:0.05;
 }
 /* Light mode: same brand accents on a bright ground (logs go light too). */
 :root[data-theme="light"]{
@@ -26,7 +26,7 @@
   --input-bg:#ffffff; --log-bg:#f6f8fb; --log-fg:#1c2430;
   /* On the bright ground white index lines vanish — swap to the light overlay
      (green minor lines with blue index contours) and dial it back to a watermark. */
-  --topo-img:url("/brand-topo-light.png"); --topo-op:0.13;
+  --topo-img:url("/brand-topo-light.png"); --topo-op:0.065;
 }
 :root[data-theme="light"] body::after{opacity:0.5}
 :root[data-theme="light"] button.primary{color:#fff}
