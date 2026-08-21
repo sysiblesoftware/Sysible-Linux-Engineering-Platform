@@ -360,26 +360,11 @@ export default function Ide({ project, onBack, onRun }) {
 
   return (
     <>
-      <div className="row" style={{ marginBottom: 10, flexWrap: 'wrap' }}>
+      <div className="row" style={{ marginBottom: 10 }}>
         <button className="ghost sm" onClick={onBack}>← Projects</button>
         <h2 style={{ margin: 0 }}>{project.name}</h2><span className="muted">{project.slug}</span>
-        <div className="row" style={{ marginLeft: 'auto', gap: 8 }}>
-          <button className="ghost sm" onClick={() => setNewOpen(true)}>Add File</button>
-          {snip.engine === 'ansible' && (
-            <button className="ghost sm" onClick={() => setPlayOpen(true)} disabled={path == null}
-              title="Wrap this file in a play, or insert a play header (hosts, become, tasks)">Add Play</button>
-          )}
-          {snip.engine === 'ansible' && (
-            <button className="ghost sm" onClick={() => setCollOpen(true)}
-              title="Install the Ansible Galaxy collections the modules need (community.general, ansible.posix, …)">Collections</button>
-          )}
-          <button className="ghost sm" onClick={() => setTaskOpen(true)} disabled={path == null}
-            title={`Insert a ready-made ${snip.engine} ${snip.verb.toLowerCase()} at the cursor`}>Add {snip.verb}</button>
-          <button className="ghost sm" onClick={save} disabled={path == null}>{saved ? 'Saved' : 'Save'}</button>
-          <button className="primary sm" onClick={() => setRunOpen(true)}>▶ Run</button>
-        </div>
       </div>
-      <div className="ide">
+      <div className="ide ide-3col">
         <div className="tree">
           {tree.length === 0 && <div className="muted" style={{ padding: 6 }}>Empty project — “+ File”.</div>}
           {tree.map((f) => (
@@ -396,6 +381,23 @@ export default function Ide({ project, onBack, onRun }) {
             beforeMount={beforeMount}
             onMount={(ed, monaco) => { editorRef.current = ed; monacoRef.current = monaco; validate() }}
             options={{ minimap: { enabled: false }, fontSize: 13, automaticLayout: true, contextmenu: false }} />
+        </div>
+        <div className="ide-actions">
+          <div className="faint ide-actions-h">Actions</div>
+          <button className="ghost sm" onClick={() => setNewOpen(true)}>Add File</button>
+          {snip.engine === 'ansible' && (
+            <button className="ghost sm" onClick={() => setPlayOpen(true)} disabled={path == null}
+              title="Wrap this file in a play, or insert a play header (hosts, become, tasks)">Add Play</button>
+          )}
+          {snip.engine === 'ansible' && (
+            <button className="ghost sm" onClick={() => setCollOpen(true)}
+              title="Install the Ansible Galaxy collections the modules need">Collections</button>
+          )}
+          <button className="ghost sm" onClick={() => setTaskOpen(true)} disabled={path == null}
+            title={`Insert a ready-made ${snip.engine} ${snip.verb.toLowerCase()} at the cursor`}>Add {snip.verb}</button>
+          <button className="ghost sm" onClick={save} disabled={path == null}>{saved ? 'Saved' : 'Save'}</button>
+          <div className="spacer" />
+          <button className="primary sm" onClick={() => setRunOpen(true)}>▶ Run</button>
         </div>
       </div>
       {newOpen && <NewFile project={project} onClose={() => setNewOpen(false)} onCreated={(p) => { setNewOpen(false); loadTree(); open(p) }} />}

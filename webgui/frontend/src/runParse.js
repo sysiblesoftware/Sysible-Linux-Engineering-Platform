@@ -18,8 +18,9 @@ export function parseAnsible(text) {
     h.last = key === 'ok' ? 'ok' : key === 'changed' ? 'changed'
       : key === 'skipped' ? 'skipped' : key === 'unreachable' ? 'unreachable' : 'failed'
   }
-  let currentTask = null, currentPlay = null, plays = 0, tasks = 0
-  const taskList = []          // ordered {play, name} for the task-progress rail
+  let currentTask = null, currentPlay = null, plays = 0, tasks = 0, taskIdx = -1
+  const taskList = []          // ordered {play, name}
+  const hostTasks = {}         // host -> [status per task index] — the per-host, per-task grid
   const recap = {}
   let inRecap = false
 
@@ -28,7 +29,7 @@ export function parseAnsible(text) {
     if (play) { currentPlay = play[1]; plays += 1; inRecap = false; continue }
     if (/^PLAY RECAP/.test(line)) { inRecap = true; continue }
     const task = line.match(/^TASK \[(.+?)\]/)
-    if (task) { currentTask = task[1]; tasks += 1; taskList.push({ play: currentPlay, name: task[1] }); continue }
+    if (task) { currentTask = task[1]; tasks += 1; taskIdx += 1; taskList.push({ play: currentPlay, name: task[1] }); continue }
 
     if (inRecap) {
       // web1  : ok=3 changed=1 unreachable=0 failed=0 skipped=1 rescued=0 ignored=0
@@ -44,15 +45,15 @@ export function parseAnsible(text) {
     const r = line.match(/^(ok|changed|skipping|failed|fatal|unreachable):\s*\[([^\]]+)\]/)
     if (r) {
       const host = r[2].split(' -> ')[0]
-      if (r[1] === 'ok') bump(host, 'ok')
-      else if (r[1] === 'changed') bump(host, 'changed')
-      else if (r[1] === 'skipping') bump(host, 'skipped')
-      else if (/UNREACHABLE/.test(line) || r[1] === 'unreachable') bump(host, 'unreachable')
-      else bump(host, 'failed')
+      const status = r[1] === 'ok' ? 'ok' : r[1] === 'changed' ? 'changed'
+        : r[1] === 'skipping' ? 'skipped'
+        : (/UNREACHABLE/.test(line) || r[1] === 'unreachable') ? 'unreachable' : 'failed'
+      bump(host, status)
+      if (taskIdx >= 0) (hostTasks[host] || (hostTasks[host] = []))[taskIdx] = status
     }
   }
   const hasRecap = Object.keys(recap).length > 0
-  return { engine: 'ansible', hosts, recap: hasRecap ? recap : null, currentTask, currentPlay, plays, tasks, taskList }
+  return { engine: 'ansible', hosts, recap: hasRecap ? recap : null, currentTask, currentPlay, plays, tasks, taskList, hostTasks }
 }
 
 // --------------------------------------------------------------- Terraform

@@ -31,7 +31,6 @@ function AnsibleViz({ model, seedHosts }) {
           heading, over the server-reaches-hosts diagram. */}
       <div className="viz-flow-box">
         <div className="flow-head">
-          <TaskRail tasks={model.taskList || []} done={!!recap} current={model.currentTask} />
           <div className="flow-title">
             <span className="faint">{model.currentPlay ? `PLAY · ${model.currentPlay}` : 'Ansible'}</span>
             <b>{model.currentTask ? model.currentTask : recap ? 'Play recap' : 'Starting…'}</b>
@@ -39,7 +38,7 @@ function AnsibleViz({ model, seedHosts }) {
           <div className="spacer" />
           <span className="faint" style={{ fontSize: 12 }}>{hosts.length} host(s) · {model.tasks} task(s)</span>
         </div>
-        <HostReachFlow hosts={hosts} />
+        <HostReachFlow hosts={hosts} tasks={model.tasks} hostTasks={model.hostTasks || {}} taskList={model.taskList || []} />
       </div>
 
       <div className="viz-grid">
@@ -62,49 +61,44 @@ function AnsibleViz({ model, seedHosts }) {
   )
 }
 
-// A dot per task the play has run, in order — a progress rail. Completed tasks
-// are green; the one in flight pulses in the brand accent (until the recap, when
-// all are done). Plays are separated by a thin divider; hover a dot for its name.
-function TaskRail({ tasks, done, current }) {
-  if (!tasks.length) return null
-  const lastIdx = tasks.length - 1
-  return (
-    <div className="task-rail">
-      {tasks.map((t, i) => {
-        const newPlay = i > 0 && t.play !== tasks[i - 1].play
-        const isCurrent = !done && i === lastIdx
-        const cls = 'task-dot ' + (done || i < lastIdx ? 'done' : 'current') + (isCurrent ? ' pulse' : '')
-        return (
-          <React.Fragment key={i}>
-            {newPlay && <span className="task-sep" title={`PLAY · ${t.play}`} />}
-            <span className={cls} title={`${t.play ? t.play + ' · ' : ''}${t.name}`} />
-          </React.Fragment>
-        )
-      })}
-    </div>
-  )
-}
-
-// A compact "playbook reaches the hosts" diagram: a controller node on the left
-// with a line out to each host dot, each dot coloured by its latest result.
-function HostReachFlow({ hosts }) {
-  const H = Math.max(80, hosts.length * 22 + 20)
-  const W = 460, cx = 60, cy = H / 2
-  const rightX = W - 30
-  const step = hosts.length > 1 ? (H - 40) / (hosts.length - 1) : 0
+// The SLEP server reaching each host, and — per host — a row of task dots (one
+// per task in the play) so you can see which task failed on which host, then the
+// full hostname. Green ok · amber changed · red failed · purple unreachable ·
+// dim pending. Hover a dot for "task: status".
+function HostReachFlow({ hosts, tasks, hostTasks, taskList }) {
+  const n = hosts.length
+  const nTasks = Math.max(1, tasks || 0)
+  const rowH = 26
+  const H = Math.max(96, n * rowH + 26)
+  const cx = 46, cy = H / 2, ex = 190          // ex = where the fan lines end
+  const dotR = 4, dotGap = 13
+  const dotsX = ex + 16
+  const nameX = dotsX + nTasks * dotGap + 6
+  const W = nameX + 150
+  const step = n > 1 ? (H - 30) / (n - 1) : 0
   return (
     <div style={{ overflowX: 'auto' }}>
       <svg className="viz-flow" width={W} height={H} viewBox={`0 0 ${W} ${H}`}>
         {hosts.map((h, i) => {
-          const y = hosts.length > 1 ? 20 + i * step : cy
+          const y = n > 1 ? 15 + i * step : cy
           const col = STATUS_COLOR[h.last] || STATUS_COLOR.pending
           const reached = h.last !== 'pending'
+          const statuses = hostTasks[h.name] || []
           return (
             <g key={h.name}>
-              <path d={`M ${cx + 14} ${cy} C ${(cx + rightX) / 2} ${cy}, ${(cx + rightX) / 2} ${y}, ${rightX - 8} ${y}`}
-                fill="none" stroke={col} strokeWidth={reached ? 1.8 : 1} strokeOpacity={reached ? 0.8 : 0.25} />
-              <circle cx={rightX} cy={y} r={5} fill={col} fillOpacity={reached ? 1 : 0.3} />
-              <text x={rightX + 10} y={y + 3.5} fontSize="11" fill="var(--muted)" className="mono">{h.name}</text>
+              <path d={`M ${cx + 15} ${cy} C ${(cx + ex) / 2} ${cy}, ${(cx + ex) / 2} ${y}, ${ex - 6} ${y}`}
+                fill="none" stroke={col} strokeWidth={reached ? 1.8 : 1} strokeOpacity={reached ? 0.8 : 0.22} />
+              <circle cx={ex} cy={y} r={4} fill={col} fillOpacity={reached ? 1 : 0.3} />
+              {Array.from({ length: nTasks }).map((_, ti) => {
+                const st = statuses[ti]
+                const c = STATUS_COLOR[st] || STATUS_COLOR.pending
+                return (
+                  <circle key={ti} cx={dotsX + ti * dotGap} cy={y} r={dotR} fill={c} fillOpacity={st ? 1 : 0.28}>
+                    <title>{`${taskList[ti]?.name || 'task ' + (ti + 1)}: ${st || 'pending'}`}</title>
+                  </circle>
+                )
+              })}
+              <text x={nameX} y={y + 3.5} fontSize="12" fill="var(--text)" className="mono">{h.name}</text>
             </g>
           )
         })}
