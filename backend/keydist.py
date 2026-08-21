@@ -125,21 +125,16 @@ def start_distribute(inventory_id: int, host_names, username: str, password: str
 _HOSTKEY = ["-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null"]
 
 
-def _pw_proxy(bastion: str) -> str:
-    """A ProxyCommand that logs into the jump host with the SAME password: its own
-    `sshpass -e` reads SSHPASS from the inherited env, so the bastion password
-    prompt is answered too. This is what makes a two-password-hop path work — one
-    sshpass per hop, not one sshpass for both."""
-    return ("sshpass -e ssh " + " ".join(_HOSTKEY)
-            + f" -o PubkeyAuthentication=no -o ConnectTimeout=15 -W %h:%p {bastion}")
-
-
 def _pw_cmd(sshpass: str, bastion: str, target: str, remote: str) -> list[str]:
-    """Password SSH to `target` (through `bastion` if set), forcing the password
-    leg. SSHPASS must be in the env for both the outer call and the proxy."""
-    opts = [*_HOSTKEY, "-o", "PubkeyAuthentication=no", "-o", "ConnectTimeout=15"]
+    """Password SSH to `target`. With a `bastion`, the JUMP hop authenticates with
+    SLEP's managed key (install it on the bastion first) and only the target uses
+    the password — a single `sshpass` per command, which is reliable, unlike two
+    password hops. Direct (no bastion) forces the password leg."""
+    opts = [*_HOSTKEY, "-o", "ConnectTimeout=15"]
     if bastion:
-        opts += ["-o", f"ProxyCommand={_pw_proxy(bastion)}"]
+        opts += ["-i", str(_key_paths()[0]), "-o", f"ProxyJump={bastion}"]
+    else:
+        opts += ["-o", "PubkeyAuthentication=no"]   # direct: force the password leg
     return [sshpass, "-e", "ssh", *opts, target, remote]
 
 
@@ -189,6 +184,26 @@ def _run_distribute(inventory_id: int, only: set, username: str, password: str, 
                 emit("!! sshpass is not available in this image — cannot feed the password."); return
             remote = _install_cmd(pubkey)
             env = dict(os.environ, SSHPASS=password)
+
+            # With a jump host, install the key on the bastion FIRST (one clean
+            # password hop) so the target hops can jump through it with the key —
+            # a single sshpass per host, which is reliable.
+            if bastion:
+                emit(f"→ jump host {bastion} (preparing) …")
+                try:
+                    rb = subprocess.run(_pw_cmd(sshpass, "", bastion, remote),
+                                        capture_output=True, text=True, timeout=60, env=env)
+                    if rb.returncode == 0 and "SLEP_KEY_OK" in rb.stdout:
+                        emit("   ✓ jump host ready — targets will hop through it with the key")
+                    else:
+                        emit(f"   ✗ jump host {bastion}: {_err_line(rb)}")
+                        emit("!! Can't reach targets until the jump host accepts the key. Check the "
+                             "jump host address / password and try again.")
+                        return
+                except subprocess.TimeoutExpired:
+                    emit(f"   ✗ timed out connecting to jump host {bastion}"); return
+                emit("")
+
             for h in hosts:
                 target = f"{username}@{h['address']}"
                 emit(f"→ {h['name']} ({target}) …")
