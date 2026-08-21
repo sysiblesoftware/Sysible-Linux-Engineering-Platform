@@ -25,7 +25,7 @@ from contextlib import asynccontextmanager
 from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse
 
-from . import controller_import, db, policy, vault
+from . import controller_import, db, engines, policy, vault
 from .runners import ansible_runner, salt_runner, terraform_runner
 
 # Engine name -> runner.launch(run_id). Each runs to completion on a thread.
@@ -66,6 +66,7 @@ def _scheduler_loop():
 @asynccontextmanager
 async def lifespan(_app):
     db.init_db()
+    engines.ensure_path()   # pick up any previously one-click-installed engines
     t = threading.Thread(target=_scheduler_loop, daemon=True)
     t.start()
     yield
@@ -840,3 +841,33 @@ def health_warnings(user: str = Depends(current_user)):
             "hint": "Check the volume mount and its ownership.",
         })
     return {"warnings": warnings}
+
+
+# ------------------------------------------------------------------ engines (1-click install)
+@app.get("/engines")
+def engines_status(user: str = Depends(current_user)):
+    """Install state of each automation engine (installed / installing)."""
+    return {"engines": engines.status()}
+
+
+@app.post("/engines/{engine}/install")
+def engines_install(engine: str, user: str = Depends(require_superuser)):
+    """Kick off a one-click install of a missing engine. Streams to its log."""
+    if engine not in engines.ENGINES:
+        raise HTTPException(status_code=404, detail="Unknown engine.")
+    if engines.is_installed(engine):
+        return {"status": "already-installed"}
+    engines.start_install(engine)
+    db.log_audit("engine_install", user, engine)
+    return {"status": "started"}
+
+
+@app.get("/engines/{engine}/install-log", response_class=PlainTextResponse)
+def engines_install_log(engine: str, offset: int = 0, user: str = Depends(current_user)):
+    if engine not in engines.ENGINES:
+        raise HTTPException(status_code=404, detail="Unknown engine.")
+    text, nxt = engines.install_log(engine, offset)
+    st = engines.status()[engine]
+    install_status = "installed" if st["installed"] else (st["last_status"] or "")
+    return PlainTextResponse(text, headers={"X-Log-Next": str(nxt),
+                                            "X-Install-Status": install_status})
