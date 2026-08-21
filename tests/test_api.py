@@ -48,6 +48,26 @@ def test_inventory_and_hosts(client, project):
     assert len(hosts) == 1 and hosts[0]["address"] == "10.0.0.11"
 
 
+def test_bastion_rejects_invalid_ip(client):
+    # An octet > 255 (192.268.8.212) is caught up front, not at SSH time.
+    r = client.post("/inventories", json={"name": "b1", "bastion": "admin@192.268.8.212"})
+    assert r.status_code == 400 and "valid IP" in r.json()["detail"]
+    # A valid jump host (with user + optional port) is accepted.
+    ok = client.post("/inventories", json={"name": "b2", "bastion": "admin@192.168.8.212:22"})
+    assert ok.status_code == 200
+    # A hostname (not dotted-numeric) is left alone.
+    assert client.post("/inventories", json={"name": "b3", "bastion": "bastion.example.com"}).status_code == 200
+    # PATCH is guarded too.
+    iid = ok.json()["id"]
+    assert client.patch(f"/inventories/{iid}", json={"bastion": "999.1.1.1"}).status_code == 400
+
+
+def test_collections_status_shape(client):
+    d = client.get("/engines/collections").json()
+    assert "common" in d and "installed" in d and "missing_common" in d
+    assert "community.general" in d["common"]
+
+
 def test_credentials_hide_secret(client):
     client.post("/credentials", json={"name": "k", "kind": "ssh", "username": "ansible", "secret": "PRIVATEKEY"})
     creds = client.get("/credentials").json()["credentials"]

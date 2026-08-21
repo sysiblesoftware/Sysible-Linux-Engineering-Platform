@@ -155,6 +155,10 @@ function ImportModal({ ctrl, onClose, onDone }) {
     return m
   }
   const envs = [...new Set((hosts || []).map((h) => (h.groups || '').trim()).filter(Boolean))]
+  // Ansible INI group names can't contain spaces (or other punctuation). Flag any
+  // environment that will be rewritten (e.g. "Sysible Labs" → "Sysible_Labs") so
+  // it's no surprise in the playbook's hosts: targeting.
+  const spacey = envs.filter((e) => /[^A-Za-z0-9_]/.test(e))
 
   const importTo = async (iid, names) =>
     (await api(`inventories/${iid}/import-controller`, { method: 'POST', json: { controller_id: ctrl.id, host_names: names } })).imported
@@ -203,6 +207,13 @@ function ImportModal({ ctrl, onClose, onDone }) {
     <Modal title={`Import hosts from ${ctrl.name}`} onClose={onClose} wide>
       <div className="muted">Check the hosts you want, choose a target inventory, and add them. Route different hosts to different inventories — the list stays up after each add.</div>
       {flash && <div className="ok-text" style={{ color: 'var(--ok,#63c869)', fontSize: 13 }}>{flash}</div>}
+      {spacey.length > 0 && (
+        <div className="faint" style={{ fontSize: 12, marginTop: 4 }}>
+          ⚠ Ansible group names can’t contain spaces. When a playbook runs, {spacey.map((e) => (
+            <span key={e} className="mono" style={{ marginLeft: 4 }}>“{e}” → {e.replace(/[^A-Za-z0-9_]/g, '_')}</span>
+          ))}. Target that underscored name in a play’s <span className="mono">hosts:</span>.
+        </div>
+      )}
 
       {envs.length > 0 && (
         <div className="row" style={{ gap: 8, marginTop: 6, alignItems: 'center', flexWrap: 'wrap' }}>

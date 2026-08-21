@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -34,6 +35,19 @@ ENGINES = {
     "terraform": {"label": "Terraform", "binary": "terraform"},
     "salt": {"label": "Salt", "binary": "salt-ssh"},
 }
+
+# The Galaxy collections the built-in task snippets reach for (community.general,
+# ansible.posix, community.crypto, community.docker, containers.podman). The full
+# `ansible` package bundles these, but a lean install (ansible-core only) or a
+# custom environment can miss them — one click via `ansible-galaxy` fills the gap.
+COMMON_COLLECTIONS = [
+    "community.general",
+    "ansible.posix",
+    "community.crypto",
+    "community.docker",
+    "containers.podman",
+]
+_COLL_KEY = "collections"
 
 _state: dict[str, dict] = {}          # engine -> {"status": running|done|failed}
 _lock = threading.Lock()
@@ -100,6 +114,85 @@ def start_install(engine: str) -> None:
             return
         _state[engine] = {"status": "running", "started": time.time()}
     threading.Thread(target=_run_install, args=(engine,), daemon=True).start()
+
+
+# ------------------------------------------------------------------ collections
+def _valid_collection(name: str) -> bool:
+    """namespace.name — letters, digits, underscores only. Guards the shell-free
+    ansible-galaxy call against odd input."""
+    parts = str(name).split(".")
+    return len(parts) == 2 and all(re.fullmatch(r"[a-z0-9_]+", p or "") for p in parts)
+
+
+def collections_status() -> dict:
+    """What Galaxy collections are installed, plus the curated 'common' set. Reads
+    `ansible-galaxy collection list` (JSON); if Ansible isn't installed yet, reports
+    that instead of failing."""
+    ensure_path()
+    galaxy = shutil.which("ansible-galaxy")
+    installed: list[str] = []
+    if galaxy:
+        try:
+            out = subprocess.run([galaxy, "collection", "list", "--format", "json"],
+                                 capture_output=True, text=True, timeout=60)
+            if out.returncode == 0 and out.stdout.strip():
+                import json as _json
+                data = _json.loads(out.stdout)
+                names = set()
+                for path_entry in (data or {}).values():
+                    if isinstance(path_entry, dict):
+                        names.update(path_entry.keys())
+                installed = sorted(names)
+        except Exception:  # noqa: BLE001 — best-effort listing
+            installed = []
+    st = _state.get(_COLL_KEY, {})
+    return {
+        "ansible_installed": bool(galaxy),
+        "installed": installed,
+        "common": COMMON_COLLECTIONS,
+        "missing_common": [c for c in COMMON_COLLECTIONS if c not in installed],
+        "installing": st.get("status") == "running",
+        "last_status": st.get("status"),
+    }
+
+
+def collections_install_log(offset: int = 0):
+    return install_log(_COLL_KEY, offset)
+
+
+def start_collections_install(names: list[str] | None = None) -> None:
+    """Install Galaxy collections via ansible-galaxy on a background thread,
+    streaming to the collections install log. Defaults to the curated common set."""
+    wanted = [n for n in (names or COMMON_COLLECTIONS) if _valid_collection(n)]
+    if not wanted:
+        raise ValueError("no valid collections requested")
+    with _lock:
+        if _state.get(_COLL_KEY, {}).get("status") == "running":
+            return
+        _state[_COLL_KEY] = {"status": "running", "started": time.time()}
+    threading.Thread(target=_run_collections_install, args=(wanted,), daemon=True).start()
+
+
+def _run_collections_install(names: list[str]) -> None:
+    log = _log_path(_COLL_KEY)
+    ok = False
+    with log.open("w", buffering=1) as f:
+        def emit(m):
+            f.write(m if m.endswith("\n") else m + "\n")
+            f.flush()
+        try:
+            ensure_path()
+            galaxy = shutil.which("ansible-galaxy")
+            if not galaxy:
+                raise RuntimeError("ansible-galaxy not found — install Ansible first.")
+            emit(f"== Installing {len(names)} collection(s) ==")
+            _stream([galaxy, "collection", "install", "--upgrade", *names], emit)
+            ok = True
+            emit("\n== done — collections installed ==")
+        except Exception as e:  # noqa: BLE001 — surface any failure into the log
+            emit(f"\n!! install failed: {e}")
+    with _lock:
+        _state[_COLL_KEY] = {"status": "done" if ok else "failed"}
 
 
 # ------------------------------------------------------------------ internals

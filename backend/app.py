@@ -568,6 +568,26 @@ def inventories(project_id: int | None = None, user: str = Depends(current_user)
     return {"inventories": db.list_inventories(project_id)}
 
 
+def _validate_bastion(bastion: str) -> str:
+    """A jump host is `[user@]host[:port]`. When the host part looks like a dotted
+    IPv4, make sure every octet is 0–255 — a typo like 192.268.8.212 otherwise sails
+    through and every play fails UNREACHABLE with a cryptic SSH error at run time."""
+    import ipaddress
+    import re as _re
+    b = (bastion or "").strip()
+    if not b:
+        return ""
+    host = b.split("@", 1)[1] if "@" in b else b
+    host = host.rsplit(":", 1)[0] if _re.fullmatch(r".+:\d+", host) else host
+    if _re.fullmatch(r"\d+(\.\d+){3}", host):
+        try:
+            ipaddress.ip_address(host)
+        except ValueError:
+            raise HTTPException(status_code=400,
+                                detail=f"“{host}” is not a valid IP address — each part must be 0–255. Check the jump host.")
+    return b
+
+
 @app.post("/inventories")
 def create_inventory(body: dict = Body(...), user: str = Depends(current_user)):
     name = str(body.get("name") or "").strip()
@@ -575,7 +595,7 @@ def create_inventory(body: dict = Body(...), user: str = Depends(current_user)):
         raise HTTPException(status_code=400, detail="Inventory name is required.")
     iid = db.create_inventory(name, project_id=body.get("project_id"),
                               source=str(body.get("source") or "manual"),
-                              bastion=str(body.get("bastion") or "").strip())
+                              bastion=_validate_bastion(str(body.get("bastion") or "")))
     return db.get_inventory(iid)
 
 
@@ -585,7 +605,7 @@ def update_inventory(iid: int, body: dict = Body(...), user: str = Depends(curre
     if not db.get_inventory(iid):
         raise HTTPException(status_code=404, detail="Inventory not found.")
     if "bastion" in body:
-        db.set_inventory_bastion(iid, str(body.get("bastion") or "").strip())
+        db.set_inventory_bastion(iid, _validate_bastion(str(body.get("bastion") or "")))
     return db.get_inventory(iid)
 
 
@@ -887,6 +907,36 @@ def engines_install_log(engine: str, offset: int = 0, user: str = Depends(curren
     text, nxt = engines.install_log(engine, offset)
     st = engines.status()[engine]
     install_status = "installed" if st["installed"] else (st["last_status"] or "")
+    return PlainTextResponse(text, headers={"X-Log-Next": str(nxt),
+                                            "X-Install-Status": install_status})
+
+
+# ---- Ansible Galaxy collections (one-click install of the modules snippets use)
+@app.get("/engines/collections")
+def collections_status(user: str = Depends(current_user)):
+    """Installed Galaxy collections + the curated 'common' set the task snippets use."""
+    return engines.collections_status()
+
+
+@app.post("/engines/collections/install")
+def collections_install(body: dict = Body(default={}), user: str = Depends(require_superuser)):
+    """Install Galaxy collections via ansible-galaxy (defaults to the common set).
+    Pass {"collections": ["ns.name", ...]} to choose. Streams to the collections log."""
+    names = body.get("collections")
+    names = list(names) if isinstance(names, list) and names else None
+    try:
+        engines.start_collections_install(names)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    db.log_audit("collections_install", user, ",".join(names) if names else "common")
+    return {"status": "started"}
+
+
+@app.get("/engines/collections/install-log", response_class=PlainTextResponse)
+def collections_install_log(offset: int = 0, user: str = Depends(current_user)):
+    text, nxt = engines.collections_install_log(offset)
+    st = engines.collections_status()
+    install_status = "installing" if st["installing"] else (st["last_status"] or "")
     return PlainTextResponse(text, headers={"X-Log-Next": str(nxt),
                                             "X-Install-Status": install_status})
 

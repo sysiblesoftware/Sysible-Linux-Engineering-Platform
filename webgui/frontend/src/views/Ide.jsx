@@ -3,8 +3,18 @@ import Editor from '@monaco-editor/react'
 import { api } from '../api.js'
 import { Field, Modal, useErr } from '../ui.jsx'
 import { SNIPPET_GROUPS as ANSIBLE_SNIPPETS, PLAY_GROUPS } from '../ansibleSnippets.js'
+import CollectionsInstall from '../components/CollectionsInstall.jsx'
 import { SNIPPET_GROUPS as TERRAFORM_SNIPPETS } from '../terraformSnippets.js'
 import { SNIPPET_GROUPS as SALT_SNIPPETS } from '../saltSnippets.js'
+
+// Mirror of backend/_ansible_group: INI group names allow only letters, digits
+// and underscores, and can't start with a digit. Keep in sync so the play-target
+// dropdown shows the same group the generated inventory will actually contain.
+const ansibleGroup = (name) => {
+  let g = (name || '').trim().replace(/[^A-Za-z0-9_]/g, '_')
+  if (g && g[0] >= '0' && g[0] <= '9') g = 'g_' + g
+  return g || 'ungrouped'
+}
 
 const langFor = (path) => {
   if (path.endsWith('.tf') || path.endsWith('.hcl')) return 'hcl'
@@ -35,6 +45,7 @@ export default function Ide({ project, onBack, onRun }) {
   const [newOpen, setNewOpen] = useState(false)
   const [taskOpen, setTaskOpen] = useState(false)
   const [playOpen, setPlayOpen] = useState(false)
+  const [collOpen, setCollOpen] = useState(false)
   const [targets, setTargets] = useState(['all', 'localhost'])   // host patterns for `hosts:`
   const [delPath, setDelPath] = useState(null)
   const [menu, setMenu] = useState(null)   // {x, y} custom editor context menu
@@ -43,7 +54,10 @@ export default function Ide({ project, onBack, onRun }) {
 
   // Gather `hosts:` targets from the operator's inventories — the group names
   // (Controller environments) their hosts carry — so play targeting can be picked,
-  // not memorized. Always offers all/localhost even with no inventories.
+  // not memorized. Groups are stored COMMA-separated, and a single group may
+  // contain spaces ("Sysible Labs"); we split on commas only and sanitize each to
+  // the exact group Ansible will see at run time (spaces → underscores), so the
+  // dropdown offers "Sysible_Labs" (one entry), not "Sysible" + "Labs".
   useEffect(() => {
     let live = true
     ;(async () => {
@@ -53,7 +67,9 @@ export default function Ide({ project, onBack, onRun }) {
         for (const inv of d.inventories || []) {
           try {
             const h = await api(`inventories/${inv.id}/hosts`)
-            for (const host of h.hosts || []) (host.groups || '').split(/[,\s]+/).forEach((g) => g && groups.add(g))
+            for (const host of h.hosts || []) (host.groups || '').split(',').forEach((g) => {
+              const s = ansibleGroup(g); if (g.trim()) groups.add(s)
+            })
           } catch { /* skip an unreadable inventory */ }
         }
         if (live) setTargets(['all', 'localhost', ...[...groups].sort()])
@@ -211,6 +227,10 @@ export default function Ide({ project, onBack, onRun }) {
           <button className="ghost sm" onClick={() => setPlayOpen(true)} disabled={path == null}
             title="Wrap this file in a play, or insert a play header (hosts, become, tasks)">+ Play</button>
         )}
+        {snip.engine === 'ansible' && (
+          <button className="ghost sm" onClick={() => setCollOpen(true)}
+            title="Install the Ansible Galaxy collections the modules need (community.general, ansible.posix, …)">Collections</button>
+        )}
         <button className="ghost sm" onClick={() => setTaskOpen(true)} disabled={path == null}
           title={`Insert a ready-made ${snip.engine} ${snip.verb.toLowerCase()} at the cursor`}>+ {snip.verb}</button>
         <button className="ghost sm" onClick={save} disabled={path == null}>{saved ? 'Saved' : 'Save'}</button>
@@ -239,6 +259,7 @@ export default function Ide({ project, onBack, onRun }) {
       {taskOpen && <TaskPalette groups={snip.groups} verb={snip.verb} onClose={() => setTaskOpen(false)} onInsert={insertTask} />}
       {playOpen && <PlayModal targets={targets} hasContent={(content || '').trim().length > 0}
         onClose={() => setPlayOpen(false)} onWrap={wrapInPlay} onInsert={insertPlayHeader} />}
+      {collOpen && <CollectionsInstall onClose={() => setCollOpen(false)} />}
       {delPath && (
         <Modal title="Delete file" onClose={() => setDelPath(null)}>
           <div>Delete <b>{delPath}</b>? This can’t be undone.</div>
