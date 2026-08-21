@@ -25,7 +25,7 @@ from contextlib import asynccontextmanager
 from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse
 
-from . import controller_import, db
+from . import controller_import, db, vault
 from .runners import ansible_runner, salt_runner, terraform_runner
 
 # Engine name -> runner.launch(run_id). Each runs to completion on a thread.
@@ -262,6 +262,38 @@ def create_credential(body: dict = Body(...), user: str = Depends(current_user))
 @app.delete("/credentials/{cid}")
 def delete_credential(cid: int, user: str = Depends(current_user)):
     db.delete_credential(cid)
+    return {"status": "deleted"}
+
+
+# ------------------------------------------------------------------ vault (secrets)
+@app.get("/vault")
+def vault_list(user: str = Depends(current_user)):
+    """Secret names only — values are encrypted and never returned."""
+    return {"secrets": db.list_secrets()}
+
+
+@app.post("/vault")
+def vault_set(body: dict = Body(...), user: str = Depends(current_user)):
+    """Create or replace a secret. `name` is referenced from playbooks as
+    {{ vault.NAME }}; the value is encrypted at rest and never returned."""
+    name = str(body.get("name") or "").strip()
+    value = body.get("value")
+    if not name:
+        raise HTTPException(status_code=400, detail="Secret name is required.")
+    if value is None or value == "":
+        raise HTTPException(status_code=400, detail="Secret value is required.")
+    # Ansible var names: letters/digits/underscore, not starting with a digit.
+    import re as _re
+    if not _re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", name):
+        raise HTTPException(status_code=400,
+                            detail="Name must be a valid variable: letters/digits/underscore, no leading digit.")
+    sid = db.upsert_secret(name, vault.encrypt(str(value)))
+    return {"status": "ok", "id": sid, "name": name}
+
+
+@app.delete("/vault/{sid}")
+def vault_delete(sid: int, user: str = Depends(current_user)):
+    db.delete_secret(sid)
     return {"status": "deleted"}
 
 

@@ -7,6 +7,7 @@ import Ide from './views/Ide.jsx'
 import Inventories from './views/Inventories.jsx'
 import Controllers from './views/Controllers.jsx'
 import Credentials from './views/Credentials.jsx'
+import Vault from './views/Vault.jsx'
 import Runs, { RunLog } from './views/Runs.jsx'
 
 // Left-rail navigation — same shape as the Sysible Controller console.
@@ -15,6 +16,7 @@ const NAV = [
   { key: 'inventories', label: 'Inventories', icon: 'server' },
   { key: 'controllers', label: 'Controllers', icon: 'link' },
   { key: 'credentials', label: 'Credentials', icon: 'key' },
+  { key: 'vault', label: 'Vault', icon: 'lock' },
   { key: 'runs', label: 'Runs', icon: 'play' },
 ]
 
@@ -24,6 +26,7 @@ const ICONS = {
   server: <><rect x="3" y="4" width="18" height="6" rx="1.5" /><rect x="3" y="14" width="18" height="6" rx="1.5" /><line x1="7" y1="7" x2="7.01" y2="7" /><line x1="7" y1="17" x2="7.01" y2="17" /></>,
   link: <><path d="M9 15l6-6" /><path d="M11.5 6.5l1-1a4 4 0 0 1 6 6l-1 1" /><path d="M12.5 17.5l-1 1a4 4 0 0 1-6-6l1-1" /></>,
   key: <><circle cx="8" cy="15" r="4" /><path d="M10.8 12.2 20 3M17 6l2 2M14 9l2 2" /></>,
+  lock: <><rect x="4" y="11" width="16" height="10" rx="2" /><path d="M8 11V7a4 4 0 0 1 8 0v4" /></>,
   play: <path d="M7 5l12 7-12 7z" />,
 }
 
@@ -94,7 +97,8 @@ export default function App() {
               : view === 'inventories' ? <Inventories />
                 : view === 'controllers' ? <Controllers />
                   : view === 'credentials' ? <Credentials />
-                    : <Runs onOpen={setRunId} />}
+                    : view === 'vault' ? <Vault />
+                      : <Runs onOpen={setRunId} />}
       </main>
     </div>
   )

@@ -24,7 +24,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from .. import db
+from .. import db, vault
 
 
 def _ansible_group(name: str) -> str:
@@ -142,6 +142,18 @@ def launch(run_id: int) -> None:
                 cmd += ["--private-key", str(key_file)]
             for k, v in extra_vars.items():
                 cmd += ["-e", f"{k}={v}"]
+
+            # Inject the secrets vault as `vault.<name>` via a 0600 vars file
+            # (-e @file keeps the values out of the process list / ps).
+            secrets = db.all_secret_ciphertexts()
+            if secrets:
+                vfile = tmp / "vault.json"
+                fd = os.open(str(vfile), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                try:
+                    os.write(fd, json.dumps({"vault": {n: vault.decrypt(ct) for n, ct in secrets}}).encode())
+                finally:
+                    os.close(fd)
+                cmd += ["-e", "@" + str(vfile)]
 
             env = dict(os.environ)
             # First-run friendliness: don't wedge on unknown host keys. Documented,

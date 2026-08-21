@@ -76,6 +76,13 @@ def init_db() -> None:
                 updated INTEGER NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS secrets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT UNIQUE NOT NULL,
+                value TEXT NOT NULL,            -- ciphertext (see backend/vault.py); never plaintext
+                created INTEGER NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS controllers (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL,
@@ -247,6 +254,37 @@ def create_credential(name, kind="ssh", username="", secret=""):
 def delete_credential(cid: int):
     with _connect() as c:
         c.execute("DELETE FROM credentials WHERE id=?", (cid,))
+
+
+# ---------------------------------------------------------------- vault (secrets)
+def list_secrets():
+    """Names + timestamps only — never the (encrypted) value."""
+    with _connect() as c:
+        return [{"id": r["id"], "name": r["name"], "created": r["created"]}
+                for r in c.execute("SELECT id,name,created FROM secrets ORDER BY name")]
+
+
+def upsert_secret(name, ciphertext):
+    """Store (or replace) a secret's ciphertext by name."""
+    with _connect() as c:
+        row = c.execute("SELECT id FROM secrets WHERE name=?", (name,)).fetchone()
+        if row:
+            c.execute("UPDATE secrets SET value=? WHERE id=?", (ciphertext, row["id"]))
+            return row["id"]
+        cur = c.execute("INSERT INTO secrets(name,value,created) VALUES(?,?,?)",
+                        (name, ciphertext, _now()))
+        return cur.lastrowid
+
+
+def delete_secret(sid: int):
+    with _connect() as c:
+        c.execute("DELETE FROM secrets WHERE id=?", (sid,))
+
+
+def all_secret_ciphertexts():
+    """[(name, ciphertext)] for injecting the vault into a run."""
+    with _connect() as c:
+        return [(r["name"], r["value"]) for r in c.execute("SELECT name,value FROM secrets")]
 
 
 # ---------------------------------------------------------------- controllers
