@@ -19,6 +19,7 @@ export function parseAnsible(text) {
       : key === 'skipped' ? 'skipped' : key === 'unreachable' ? 'unreachable' : 'failed'
   }
   let currentTask = null, currentPlay = null, plays = 0, tasks = 0
+  const taskList = []          // ordered {play, name} for the task-progress rail
   const recap = {}
   let inRecap = false
 
@@ -27,7 +28,7 @@ export function parseAnsible(text) {
     if (play) { currentPlay = play[1]; plays += 1; inRecap = false; continue }
     if (/^PLAY RECAP/.test(line)) { inRecap = true; continue }
     const task = line.match(/^TASK \[(.+?)\]/)
-    if (task) { currentTask = task[1]; tasks += 1; continue }
+    if (task) { currentTask = task[1]; tasks += 1; taskList.push({ play: currentPlay, name: task[1] }); continue }
 
     if (inRecap) {
       // web1  : ok=3 changed=1 unreachable=0 failed=0 skipped=1 rescued=0 ignored=0
@@ -51,7 +52,7 @@ export function parseAnsible(text) {
     }
   }
   const hasRecap = Object.keys(recap).length > 0
-  return { engine: 'ansible', hosts, recap: hasRecap ? recap : null, currentTask, currentPlay, plays, tasks }
+  return { engine: 'ansible', hosts, recap: hasRecap ? recap : null, currentTask, currentPlay, plays, tasks, taskList }
 }
 
 // --------------------------------------------------------------- Terraform

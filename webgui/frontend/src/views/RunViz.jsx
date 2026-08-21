@@ -35,6 +35,8 @@ function AnsibleViz({ model, seedHosts }) {
         <div className="faint" style={{ fontSize: 12 }}>{hosts.length} host(s) · {model.tasks} task(s)</div>
       </div>
 
+      <TaskRail tasks={model.taskList || []} done={!!recap} current={model.currentTask} />
+
       <HostReachFlow hosts={hosts} />
 
       <div className="viz-grid">
@@ -53,6 +55,30 @@ function AnsibleViz({ model, seedHosts }) {
           </div>
         ))}
       </div>
+    </div>
+  )
+}
+
+// A dot per task the play has run, in order — a progress rail. Completed tasks
+// are green; the one in flight pulses in the brand accent (until the recap, when
+// all are done). Plays are separated by a thin divider; hover a dot for its name.
+function TaskRail({ tasks, done, current }) {
+  if (!tasks.length) return null
+  const lastIdx = tasks.length - 1
+  return (
+    <div className="task-rail">
+      {tasks.map((t, i) => {
+        const newPlay = i > 0 && t.play !== tasks[i - 1].play
+        const isCurrent = !done && i === lastIdx
+        const cls = 'task-dot ' + (done || i < lastIdx ? 'done' : 'current') + (isCurrent ? ' pulse' : '')
+        return (
+          <React.Fragment key={i}>
+            {newPlay && <span className="task-sep" title={`PLAY · ${t.play}`} />}
+            <span className={cls} title={`${t.play ? t.play + ' · ' : ''}${t.name}`} />
+          </React.Fragment>
+        )
+      })}
+      <span className="faint task-rail-label">{done ? `${tasks.length} tasks` : (current || '')}</span>
     </div>
   )
 }
