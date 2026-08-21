@@ -22,8 +22,14 @@
   --rail-bg:#e9edf4;
   --input-bg:#ffffff; --log-bg:#f6f8fb; --log-fg:#1c2430;
 }
-/* On the bright ground the green contour mask would overpower — dial it back. */
-:root[data-theme="light"] body::before{opacity:0.16}
+/* On the bright ground the faint overlay's low-alpha lines vanish and a light
+   green has no contrast — so light mode uses a stronger-alpha copy of the same
+   contours in a deep, saturated green that reads clearly on the light ground. */
+:root[data-theme="light"] body::before{
+  background-color:rgba(41,120,54,0.92);
+  -webkit-mask-image:url("/brand-topo-overlay-strong.png");
+          mask-image:url("/brand-topo-overlay-strong.png");
+  opacity:0.55;}
 :root[data-theme="light"] body::after{opacity:0.5}
 :root[data-theme="light"] button.primary{color:#fff}
 :root[data-theme="light"] .avatar{color:#fff}
