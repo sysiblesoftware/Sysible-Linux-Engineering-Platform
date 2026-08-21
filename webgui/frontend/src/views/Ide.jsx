@@ -34,8 +34,60 @@ export default function Ide({ project, onBack, onRun }) {
   const [newOpen, setNewOpen] = useState(false)
   const [taskOpen, setTaskOpen] = useState(false)
   const [delPath, setDelPath] = useState(null)
+  const [menu, setMenu] = useState(null)   // {x, y} custom editor context menu
   const editorRef = useRef(null)
   const snip = snippetsFor(path)
+
+  // A brand-matched Monaco theme (defined once, before the editor mounts) so the
+  // editor surface uses the SLEP palette instead of stock vs-dark.
+  const defineTheme = (monaco) => {
+    monaco.editor.defineTheme('sysible-dark', {
+      base: 'vs-dark', inherit: true, rules: [],
+      colors: {
+        'editor.background': '#0d1117',
+        'editor.foreground': '#e9f0f7',
+        'editorLineNumber.foreground': '#4a5a72',
+        'editorLineNumber.activeForeground': '#9aa7bd',
+        'editorCursor.foreground': '#63c869',
+        'editor.selectionBackground': '#2a3b55',
+        'editor.lineHighlightBackground': '#12161f',
+        'editorIndentGuide.background': '#1c2432',
+        'editorIndentGuide.activeBackground': '#33405a',
+        'editorGutter.background': '#0d1117',
+        'editorWidget.background': '#12161f',
+        'editorWidget.border': '#232b3a',
+      },
+    })
+  }
+
+  // Read the current selection (or the whole current line when nothing is
+  // selected — matching editor norms for copy/cut).
+  const selectionText = (ed) => {
+    const model = ed.getModel(); const sel = ed.getSelection()
+    if (!sel || sel.isEmpty()) { const ln = sel ? sel.startLineNumber : 1; return model.getLineContent(ln) + '\n' }
+    return model.getValueInRange(sel)
+  }
+  const doCopy = async (ed) => { try { await navigator.clipboard.writeText(selectionText(ed)) } catch { ed.trigger('menu', 'editor.action.clipboardCopyAction') } }
+  const doCut = async (ed) => {
+    const sel = ed.getSelection()
+    try {
+      await navigator.clipboard.writeText(selectionText(ed))
+      if (sel && !sel.isEmpty()) ed.executeEdits('cut', [{ range: sel, text: '', forceMoveMarkers: true }])
+      else ed.trigger('menu', 'editor.action.deleteLines')
+      setSaved(false)
+    } catch { ed.trigger('menu', 'editor.action.clipboardCutAction') }
+    ed.focus()
+  }
+  const doPaste = async (ed) => {
+    try {
+      const text = await navigator.clipboard.readText()
+      ed.executeEdits('paste', [{ range: ed.getSelection(), text, forceMoveMarkers: true }])
+      setSaved(false); ed.focus()
+    } catch {
+      alert('Your browser blocked clipboard read. Use Ctrl+V (⌘V on Mac) to paste — that always works.')
+    }
+  }
+  const menuAction = async (fn) => { const ed = editorRef.current; setMenu(null); if (ed) await fn(ed) }
 
   const loadTree = useCallback(() => api(`projects/${project.id}/files`).then((d) => setTree(d.files)), [project.id])
   useEffect(() => { loadTree() }, [loadTree])
@@ -106,12 +158,13 @@ export default function Ide({ project, onBack, onRun }) {
             </div>
           ))}
         </div>
-        <div className="edwrap">
+        <div className="edwrap" onContextMenu={(e) => { if (path != null) { e.preventDefault(); setMenu({ x: e.clientX, y: e.clientY }) } }}>
           <div className="edtool"><span className="muted">{path || 'No file open'}{!saved && ' •'}</span></div>
-          <Editor height="100%" theme="vs-dark" path={path || 'untitled'} language={langFor(path || '')}
+          <Editor height="100%" theme="sysible-dark" path={path || 'untitled'} language={langFor(path || '')}
             value={content} onChange={(v) => { setContent(v ?? ''); setSaved(false) }}
+            beforeMount={defineTheme}
             onMount={(ed) => { editorRef.current = ed }}
-            options={{ minimap: { enabled: false }, fontSize: 13, automaticLayout: true }} />
+            options={{ minimap: { enabled: false }, fontSize: 13, automaticLayout: true, contextmenu: false }} />
         </div>
       </div>
       {newOpen && <NewFile project={project} onClose={() => setNewOpen(false)} onCreated={(p) => { setNewOpen(false); loadTree(); open(p) }} />}
@@ -127,7 +180,41 @@ export default function Ide({ project, onBack, onRun }) {
         </Modal>
       )}
       {runOpen && <RunModal project={project} currentFile={path} onClose={() => setRunOpen(false)} onLaunched={onRun} />}
+      {menu && <EditorMenu at={menu} onClose={() => setMenu(null)}
+        items={[
+          { label: 'Cut', accel: 'Ctrl+X', run: () => menuAction(doCut) },
+          { label: 'Copy', accel: 'Ctrl+C', run: () => menuAction(doCopy) },
+          { label: 'Paste', accel: 'Ctrl+V', run: () => menuAction(doPaste) },
+          { sep: true },
+          { label: 'Select all', accel: 'Ctrl+A', run: () => menuAction((ed) => { ed.setSelection(ed.getModel().getFullModelRange()); ed.focus() }) },
+          { label: 'Command palette', accel: 'F1', run: () => menuAction((ed) => { ed.focus(); ed.trigger('menu', 'editor.action.quickCommand') }) },
+        ]} />}
     </>
+  )
+}
+
+// A brand-styled right-click menu for the editor. Replaces Monaco's stock menu
+// (which, in a browser, omits Paste and can't be themed) with Cut/Copy/Paste
+// driven by the async Clipboard API. Closes on outside click, Escape, or scroll.
+function EditorMenu({ at, items, onClose }) {
+  useEffect(() => {
+    const close = () => onClose()
+    window.addEventListener('mousedown', close)
+    window.addEventListener('scroll', close, true)
+    const onKey = (e) => { if (e.key === 'Escape') onClose() }
+    window.addEventListener('keydown', onKey)
+    return () => { window.removeEventListener('mousedown', close); window.removeEventListener('scroll', close, true); window.removeEventListener('keydown', onKey) }
+  }, [onClose])
+  const x = Math.min(at.x, window.innerWidth - 210)
+  const y = Math.min(at.y, window.innerHeight - 220)
+  return (
+    <div className="ctx-menu" style={{ left: x, top: y }} onMouseDown={(e) => e.stopPropagation()} onContextMenu={(e) => e.preventDefault()}>
+      {items.map((it, i) => it.sep
+        ? <div key={i} className="ctx-sep" />
+        : <button key={i} className="ctx-item" onClick={it.run}>
+            <span>{it.label}</span>{it.accel && <span className="ctx-accel">{it.accel}</span>}
+          </button>)}
+    </div>
   )
 }
 
