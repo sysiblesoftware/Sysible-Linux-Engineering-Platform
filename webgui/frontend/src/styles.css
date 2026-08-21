@@ -11,9 +11,6 @@
   --danger:#e5534b; --ok:#63c869; --green:#43a047; --green-bright:#63c869; --warn:#e0a83b;
   --rail-bg:#0a0d13;
   --input-bg:#0c0e12; --log-bg:#0a0c10; --log-fg:#d7dde7;
-  /* Topographic ground — a real contour map (brand-green minor lines with white
-     index contours) painted behind the console, prominent but panel-friendly. */
-  --topo-img:url("/brand-topo-dark.png"); --topo-op:0.3;
 }
 /* Light mode: same brand accents on a bright ground (logs go light too). */
 :root[data-theme="light"]{
@@ -24,10 +21,9 @@
   --danger:#c62f2f; --ok:#2e9e4e; --green:#2e7d32; --green-bright:#2e9e4e; --warn:#b3781a;
   --rail-bg:#e9edf4;
   --input-bg:#ffffff; --log-bg:#f6f8fb; --log-fg:#1c2430;
-  /* On the bright ground white index lines vanish — swap to the light overlay
-     (green minor lines with blue index contours) and dial it back to a watermark. */
-  --topo-img:url("/brand-topo-light.png"); --topo-op:0.55;
 }
+/* On the bright ground the green contour mask would overpower — dial it back. */
+:root[data-theme="light"] body::before{opacity:0.16}
 :root[data-theme="light"] body::after{opacity:0.5}
 :root[data-theme="light"] button.primary{color:#fff}
 :root[data-theme="light"] .avatar{color:#fff}
@@ -44,16 +40,18 @@
 *{box-sizing:border-box}
 html,body,#root{margin:0;height:100%}
 body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:14px;-webkit-font-smoothing:antialiased}
-/* Sysible topographic ground: a brand-coloured contour map painted behind the
-   console, with soft green/teal glows over it (matches Controller). The overlay
-   image and its strength are theme-driven via the --topo-* vars above. */
+/* Sysible topographic ground: the white contour overlay recoloured to brand
+   green via a CSS mask, plus a soft green glow — identical to the Sysible
+   Controller console so the two products share one background. */
 body::before{content:"";position:fixed;inset:0;z-index:-2;pointer-events:none;
-  background:var(--topo-img) center / cover no-repeat;
-  opacity:var(--topo-op);}
+  background-color:rgba(90,216,126,0.85);   /* a little brighter + greener than Controller */
+  -webkit-mask:url("/brand-topo-overlay.png") center / cover no-repeat;
+          mask:url("/brand-topo-overlay.png") center / cover no-repeat;
+  opacity:0.62;}
 body::after{content:"";position:fixed;inset:0;z-index:-1;pointer-events:none;
   background:
-    radial-gradient(85% 60% at 12% -8%, rgba(70,177,100,0.16), transparent 55%),
-    radial-gradient(80% 70% at 100% 112%, rgba(45,138,118,0.13), transparent 55%);}
+    radial-gradient(85% 60% at 12% -8%, rgba(70,177,100,0.13), transparent 55%),
+    radial-gradient(80% 70% at 100% 112%, rgba(45,138,118,0.10), transparent 55%);}
 button{font:inherit;cursor:pointer;border:1px solid var(--line);background:var(--panel2);
   color:var(--text);padding:6px 12px;border-radius:7px}
 button:hover{border-color:var(--accent)}
@@ -97,7 +95,7 @@ a{color:var(--accent2);cursor:pointer}
 main.view{flex:1;overflow:auto;padding:22px;min-width:0}
 h2{margin:.2em 0 .6em}
 table{width:100%;border-collapse:collapse}
-th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line)}
+th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);background:var(--bg)}
 th{color:var(--muted);font-weight:600;font-size:12px}
 .ide{display:grid;grid-template-columns:230px 1fr;height:calc(100% - 46px);border:1px solid var(--line);border-radius:10px;overflow:hidden}
 .ide-3col{grid-template-columns:150px 224px 1fr}
