@@ -309,6 +309,14 @@ export default function Ide({ project, onBack, onRun }) {
   useEffect(() => { loadTree() }, [loadTree])
 
   const open = async (p) => { const d = await api(`projects/${project.id}/file?path=${encodeURIComponent(p)}`); setPath(p); setContent(d.content); setSaved(true) }
+  // Open the project's ansible.cfg — the equivalent-of-ansible.cfg configuration
+  // file. Seed it from SLEP's starter template on first use, then edit it like any
+  // file (it's real ansible.cfg on disk that the runner reads at run time).
+  const openConfig = async () => {
+    await api(`projects/${project.id}/config/default`, { method: 'POST' })
+    await loadTree()
+    await open('ansible.cfg')
+  }
 
   // Delete via an in-app dialog (native confirm() can be suppressed by the
   // browser, which silently blocked deletes). try/catch surfaces any error.
@@ -419,6 +427,10 @@ export default function Ide({ project, onBack, onRun }) {
           {snip.engine === 'ansible' && (
             <button className="ghost sm" onClick={() => setCollOpen(true)}
               title="Install the Ansible Galaxy collections the modules need">Collections</button>
+          )}
+          {snip.engine === 'ansible' && (
+            <button className="ghost sm" onClick={openConfig}
+              title="Edit this project's ansible.cfg — forks, host key checking, become, SSH, roles/collections paths">⚙ Config</button>
           )}
           <button className="ghost sm" onClick={() => setTaskOpen(true)} disabled={path == null}
             title={`Insert a ready-made ${snip.engine} ${snip.verb.toLowerCase()} at the cursor`}>Add {snip.verb}</button>

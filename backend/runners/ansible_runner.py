@@ -24,7 +24,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from .. import db, keydist, vault
+from .. import db, keydist, projcfg, vault
 
 # Transient per-run sudo passwords (never persisted): set just before launch(),
 # consumed once inside it. Keyed by run id; same process, so a plain dict is fine.
@@ -270,9 +270,17 @@ def launch(run_id: int) -> None:
                 cmd += ["-e", "@" + str(bfile)]
 
             env = dict(os.environ)
-            # First-run friendliness: don't wedge on unknown host keys. Documented,
-            # and overridable by shipping an ansible.cfg in the project.
-            env.setdefault("ANSIBLE_HOST_KEY_CHECKING", "False")
+            # The project's ansible.cfg (edited via the console's "Ansible Config"
+            # action) is authoritative: point ansible at it explicitly and let it
+            # own every setting it declares.
+            if projcfg.exists(run["project_id"]):
+                env["ANSIBLE_CONFIG"] = str(projcfg.config_path(run["project_id"]))
+            # First-run friendliness: don't wedge on unknown host keys — UNLESS the
+            # project's ansible.cfg sets host_key_checking itself (env vars override
+            # ansible.cfg, so forcing it here would silently ignore the operator's
+            # explicit choice).
+            if not projcfg.defines(run["project_id"], "defaults", "host_key_checking"):
+                env.setdefault("ANSIBLE_HOST_KEY_CHECKING", "False")
             env.setdefault("ANSIBLE_FORCE_COLOR", "1")
 
             emit(f"== SLEP run #{run_id} · project '{project['name']}' ==")

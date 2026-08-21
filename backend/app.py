@@ -27,7 +27,7 @@ from contextlib import asynccontextmanager
 from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse
 
-from . import controller_import, db, engines, gitops, infra, keydist, policy, vault
+from . import controller_import, db, engines, gitops, infra, keydist, policy, projcfg, vault
 from .runners import ansible_runner, salt_runner, terraform_runner
 
 # Engine name -> runner.launch(run_id). Each runs to completion on a thread.
@@ -430,6 +430,36 @@ def create_path(pid: int, body: dict = Body(...), user: str = Depends(current_us
             target.write_text("")
     db.touch_project(pid)
     return {"status": "created", "path": path}
+
+
+# ------------------------------------------------------------------ ansible.cfg
+# A project's configuration is a real ansible.cfg on disk (git-committable, read
+# by ansible-playbook at run time). These give the console a first-class handle
+# on it — create from a SLEP-tuned template, read, and validate-on-save.
+@app.get("/projects/{pid}/config")
+def get_config(pid: int, user: str = Depends(current_user)):
+    if not db.get_project(pid):
+        raise HTTPException(status_code=404, detail="Project not found.")
+    return projcfg.read(pid)
+
+
+@app.post("/projects/{pid}/config/default")
+def create_default_config(pid: int, user: str = Depends(current_user)):
+    """Create ansible.cfg from the starter template if it doesn't exist yet."""
+    if not db.get_project(pid):
+        raise HTTPException(status_code=404, detail="Project not found.")
+    db.log_audit("config_default", user, f"project:{pid}")
+    return projcfg.ensure_default(pid)
+
+
+@app.put("/projects/{pid}/config")
+def put_config(pid: int, body: dict = Body(...), user: str = Depends(current_user)):
+    if not db.get_project(pid):
+        raise HTTPException(status_code=404, detail="Project not found.")
+    try:
+        return projcfg.write(pid, str(body.get("content") or ""))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid ansible.cfg: {e}")
 
 
 # ------------------------------------------------------------------ git ops
