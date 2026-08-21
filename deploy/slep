@@ -16,11 +16,18 @@ set -euo pipefail
 # Resolve from the script's own directory so the CLI works no matter what the
 # current working directory is (invoked as ./deploy/slep, from an
 # absolute path, or via a symlink on PATH).
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Resolve through symlinks to the REAL script in the checkout — `install` puts a
+# `slep` symlink on PATH (e.g. /usr/local/bin/slep), and we must find the compose
+# file next to the actual script, not next to the symlink.
+_SRC="${BASH_SOURCE[0]}"
+if command -v readlink >/dev/null 2>&1; then
+  _SRC="$(readlink -f "$_SRC" 2>/dev/null || echo "$_SRC")"
+fi
+SCRIPT_DIR="$(cd "$(dirname "$_SRC")" && pwd)"
 COMPOSE_FILE="$SCRIPT_DIR/docker-compose.yml"
-# Absolute path to THIS script file (the real one in the checkout). `install`
+# Absolute path to THIS script file (the resolved one in the checkout). `install`
 # symlinks a name on PATH to this, so `git pull` updates the linked CLI in place.
-SELF="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
+SELF="$SCRIPT_DIR/$(basename "$_SRC")"
 
 SERVICE="slep"
 CONTAINER="sysible-slep"
