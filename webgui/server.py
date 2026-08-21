@@ -38,7 +38,7 @@ def health():
         return JSONResponse({"status": "backend-unreachable", "error": str(e)}, status_code=502)
 
 
-@app.api_route("/api/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
+@app.api_route("/api/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
 async def proxy(path: str, request: Request):
     """Forward /api/* to the backend, preserving method, query, body, and the
     Authorization bearer. Strips the /api prefix (the backend has no /api).

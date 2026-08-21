@@ -180,6 +180,30 @@ def set_admin_password(username, pw_hash, salt, must_change=0):
         )
 
 
+def list_admins():
+    """Users for the RBAC admin view — never the password hash/salt."""
+    with _connect() as c:
+        return [{"username": r["username"], "role": r["role"],
+                 "must_change_password": bool(r["must_change_password"]), "created": r["created"]}
+                for r in c.execute("SELECT username,role,must_change_password,created "
+                                   "FROM admins ORDER BY username")]
+
+
+def set_admin_role(username, role):
+    with _connect() as c:
+        c.execute("UPDATE admins SET role=? WHERE username=?", (role, username))
+
+
+def delete_admin(username):
+    with _connect() as c:
+        c.execute("DELETE FROM admins WHERE username=?", (username,))
+
+
+def count_superusers():
+    with _connect() as c:
+        return c.execute("SELECT COUNT(*) AS n FROM admins WHERE role='superuser'").fetchone()["n"]
+
+
 # ---------------------------------------------------------------- projects
 def list_projects():
     with _connect() as c:

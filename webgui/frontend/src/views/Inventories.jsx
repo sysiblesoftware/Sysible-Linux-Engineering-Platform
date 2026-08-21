@@ -4,9 +4,13 @@ import { Field, Modal, useErr } from '../ui.jsx'
 
 export default function Inventories() {
   const [invs, setInvs] = useState([])
+  const [selected, setSelected] = useState(null)   // inventory id being drilled into
   const [newOpen, setNewOpen] = useState(false)
   const load = () => api('inventories').then((d) => setInvs(d.inventories))
   useEffect(() => { load() }, [])
+
+  const sel = invs.find((i) => i.id === selected)
+  if (sel) return <InventoryDetail inv={sel} onBack={() => { setSelected(null); load() }} onChanged={load} />
 
   return (
     <>
@@ -14,20 +18,40 @@ export default function Inventories() {
       <div className="row" style={{ marginBottom: 12 }}>
         <button className="primary" onClick={() => setNewOpen(true)}>+ New inventory</button>
       </div>
-      {invs.length === 0 ? <div className="muted">No inventories. Create one, then add hosts or import from a Sysible Controller.</div>
-        : invs.map((inv) => <InventoryCard key={inv.id} inv={inv} onChanged={load} />)}
+      {invs.length === 0 ? <div className="muted">No inventories. Create one, then add hosts or import from a Sysible Controller.</div> : (
+        <table>
+          <thead><tr><th>Name</th><th>Source</th><th>Jump host</th><th></th></tr></thead>
+          <tbody>
+            {invs.map((inv) => (
+              <tr key={inv.id}>
+                <td><a onClick={() => setSelected(inv.id)}>{inv.name}</a></td>
+                <td><span className="pill">{inv.source}</span></td>
+                <td className="mono muted">{inv.bastion || '—'}</td>
+                <td className="row">
+                  <button className="ghost sm" onClick={() => setSelected(inv.id)}>Open →</button>
+                  <button className="danger ghost sm" onClick={async () => { if (confirm('Delete inventory ' + inv.name + '?')) { await api('inventories/' + inv.id, { method: 'DELETE' }); load() } }}>Delete</button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
       {newOpen && <NewInventory onClose={() => setNewOpen(false)} onDone={() => { setNewOpen(false); load() }} />}
     </>
   )
 }
 
-function InventoryCard({ inv, onChanged }) {
+function InventoryDetail({ inv, onBack, onChanged }) {
   const [hosts, setHosts] = useState([])
   const [modal, setModal] = useState(null)
   const load = () => api(`inventories/${inv.id}/hosts`).then((d) => setHosts(d.hosts))
   useEffect(() => { load() }, [inv.id])
   return (
-    <div className="card col" style={{ marginBottom: 12 }}>
+    <div className="col">
+      <div className="row" style={{ marginBottom: 6 }}>
+        <button className="ghost sm" onClick={onBack}>← Inventories</button>
+      </div>
+      <div className="card col">
       <div className="row">
         <b>{inv.name}</b><span className="pill">{inv.source}</span><span className="muted">{hosts.length} host(s)</span>
         {inv.bastion && <span className="pill" title="Runs tunnel through this SSH jump host">⤳ {inv.bastion}</span>}
@@ -53,6 +77,7 @@ function InventoryCard({ inv, onChanged }) {
       {modal === 'host' && <AddHost inv={inv} onClose={() => setModal(null)} onDone={() => { setModal(null); load(); onChanged() }} />}
       {modal === 'import' && <ImportController inv={inv} onClose={() => setModal(null)} onDone={() => { setModal(null); load(); onChanged() }} />}
       {modal === 'bastion' && <SetBastion inv={inv} onClose={() => setModal(null)} onDone={() => { setModal(null); onChanged() }} />}
+      </div>
     </div>
   )
 }

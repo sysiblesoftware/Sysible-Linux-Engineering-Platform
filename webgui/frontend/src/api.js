@@ -2,6 +2,7 @@
 // bearer token the backend issued at login. On 401 it clears the token and fires
 // a 'slep-logout' event so the app drops back to the sign-in screen.
 let token = localStorage.getItem('slep_token') || ''
+let role = localStorage.getItem('slep_role') || ''
 
 export const getToken = () => token
 export function setToken(t) {
@@ -9,6 +10,15 @@ export function setToken(t) {
   if (t) localStorage.setItem('slep_token', t)
   else localStorage.removeItem('slep_token')
 }
+
+export const getRole = () => role
+export function setRole(r) {
+  role = r || ''
+  if (r) localStorage.setItem('slep_role', r)
+  else localStorage.removeItem('slep_role')
+}
+export const canWrite = () => role === 'operator' || role === 'superuser'
+export const isSuperuser = () => role === 'superuser'
 
 export async function api(path, { method = 'GET', json, headers = {} } = {}) {
   const h = { ...headers }

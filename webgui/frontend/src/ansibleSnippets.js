@@ -16,10 +16,10 @@ export const SNIPPET_GROUPS = [
   {
     group: 'Packages & services',
     items: [
-      { name: 'Install packages (any distro)', search: 'package install', yaml: `    - name: Install packages\n      ansible.builtin.package:\n        name:\n          - nginx\n        state: present\n      become: true\n` },
-      { name: 'Install (apt)', search: 'apt debian ubuntu', yaml: `    - name: Install apt packages\n      ansible.builtin.apt:\n        name: [nginx]\n        state: present\n        update_cache: true\n      become: true\n` },
-      { name: 'Install (dnf)', search: 'dnf yum rocky fedora', yaml: `    - name: Install dnf packages\n      ansible.builtin.dnf:\n        name: [nginx]\n        state: present\n      become: true\n` },
-      { name: 'Service state', search: 'service systemd start enable', yaml: `    - name: Ensure service is running and enabled\n      ansible.builtin.service:\n        name: nginx\n        state: started\n        enabled: true\n      become: true\n` },
+      { name: 'Install packages (any distro)', search: 'package install', yaml: `    - name: Install packages\n      ansible.builtin.package:\n        name:\n          - your-package\n        state: present\n      become: true\n` },
+      { name: 'Install (apt)', search: 'apt debian ubuntu', yaml: `    - name: Install apt packages\n      ansible.builtin.apt:\n        name: [your-package]\n        state: present\n        update_cache: true\n      become: true\n` },
+      { name: 'Install (dnf)', search: 'dnf yum rocky fedora', yaml: `    - name: Install dnf packages\n      ansible.builtin.dnf:\n        name: [your-package]\n        state: present\n      become: true\n` },
+      { name: 'Service state', search: 'service systemd start enable', yaml: `    - name: Ensure service is running and enabled\n      ansible.builtin.service:\n        name: your-package\n        state: started\n        enabled: true\n      become: true\n` },
     ],
   },
   {

@@ -44,9 +44,13 @@ async def lifespan(_app):
 
 app = FastAPI(title="Sysible Linux Engineering Platform", version="0.1.0", lifespan=lifespan)
 
-# In-memory sessions: token -> {"user", "created"}. Cleared on restart (MVP).
+# In-memory sessions: token -> {"user", "role", "created"}. Cleared on restart.
 _SESSIONS: dict[str, dict] = {}
 _SESSION_TTL = 12 * 3600
+
+# RBAC: viewer (read-only) < operator (author + run) < superuser (manage users).
+ROLE_RANK = {"viewer": 1, "operator": 2, "superuser": 3}
+ROLES = set(ROLE_RANK)
 
 
 # ------------------------------------------------------------------ auth utils
@@ -61,20 +65,59 @@ def _check_password(password: str, pw_hash: str, salt: str) -> bool:
     return secrets.compare_digest(calc, pw_hash)
 
 
-def _new_session(user: str) -> str:
+def _new_session(user: str, role: str) -> str:
     token = secrets.token_urlsafe(32)
-    _SESSIONS[token] = {"user": user, "created": time.time()}
+    _SESSIONS[token] = {"user": user, "role": role, "created": time.time()}
     return token
 
 
-def current_user(request: Request) -> str:
+def _session_or_401(request: Request) -> dict:
     auth = request.headers.get("authorization", "")
     token = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
     sess = _SESSIONS.get(token)
     if not sess or (time.time() - sess["created"]) > _SESSION_TTL:
         _SESSIONS.pop(token, None)
         raise HTTPException(status_code=401, detail="Not authenticated.")
-    return sess["user"]
+    return sess
+
+
+def current_user(request: Request) -> str:
+    return _session_or_401(request)["user"]
+
+
+def require_role(min_role: str):
+    """Dependency: require at least `min_role`. Returns the acting username."""
+    floor = ROLE_RANK[min_role]
+
+    def dep(request: Request) -> str:
+        s = _session_or_401(request)
+        if ROLE_RANK.get(s.get("role", "viewer"), 1) < floor:
+            raise HTTPException(status_code=403, detail=f"Requires the {min_role} role or higher.")
+        return s["user"]
+    return dep
+
+
+require_operator = require_role("operator")
+require_superuser = require_role("superuser")
+
+
+# Blanket read-only guard for viewers: they may only issue GETs. Superuser/operator
+# distinctions are enforced per-route with require_superuser above. Auth endpoints
+# are exempt so a viewer can still log in/out.
+_WRITE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+_AUTH_PATHS = {"/login", "/logout", "/setup"}
+
+
+@app.middleware("http")
+async def viewer_read_only(request: Request, call_next):
+    if request.method in _WRITE_METHODS and request.url.path not in _AUTH_PATHS:
+        auth = request.headers.get("authorization", "")
+        token = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+        s = _SESSIONS.get(token)
+        if s and ROLE_RANK.get(s.get("role", "viewer"), 1) < ROLE_RANK["operator"]:
+            from fastapi.responses import JSONResponse
+            return JSONResponse({"detail": "Your role is read-only (viewer)."}, status_code=403)
+    return await call_next(request)
 
 
 # ------------------------------------------------------------------ health/setup
@@ -94,7 +137,8 @@ def setup(body: dict = Body(...)):
         raise HTTPException(status_code=400, detail="Username and a 10+ char password required.")
     pw_hash, salt = _hash_password(pw)
     db.add_admin(user, pw_hash, salt, role="superuser")
-    return {"status": "created", "username": user, "token": _new_session(user)}
+    return {"status": "created", "username": user, "role": "superuser",
+            "token": _new_session(user, "superuser")}
 
 
 @app.post("/login")
@@ -104,7 +148,9 @@ def login(body: dict = Body(...)):
     row = db.get_admin(user)
     if not row or not _check_password(pw, row["pw_hash"], row["salt"]):
         raise HTTPException(status_code=401, detail="Invalid username or password.")
-    return {"status": "ok", "username": user, "token": _new_session(user),
+    role = row.get("role") or "operator"
+    return {"status": "ok", "username": user, "role": role,
+            "token": _new_session(user, role),
             "must_change_password": bool(row.get("must_change_password"))}
 
 
@@ -117,8 +163,9 @@ def logout(request: Request):
 
 
 @app.get("/me")
-def me(user: str = Depends(current_user)):
-    return {"username": user}
+def me(request: Request):
+    s = _session_or_401(request)
+    return {"username": s["user"], "role": s.get("role", "operator")}
 
 
 # ------------------------------------------------------------------ projects
@@ -267,13 +314,13 @@ def delete_credential(cid: int, user: str = Depends(current_user)):
 
 # ------------------------------------------------------------------ vault (secrets)
 @app.get("/vault")
-def vault_list(user: str = Depends(current_user)):
+def vault_list(user: str = Depends(require_operator)):
     """Secret names only — values are encrypted and never returned."""
     return {"secrets": db.list_secrets()}
 
 
 @app.post("/vault")
-def vault_set(body: dict = Body(...), user: str = Depends(current_user)):
+def vault_set(body: dict = Body(...), user: str = Depends(require_operator)):
     """Create or replace a secret. `name` is referenced from playbooks as
     {{ vault.NAME }}; the value is encrypted at rest and never returned."""
     name = str(body.get("name") or "").strip()
@@ -292,8 +339,69 @@ def vault_set(body: dict = Body(...), user: str = Depends(current_user)):
 
 
 @app.delete("/vault/{sid}")
-def vault_delete(sid: int, user: str = Depends(current_user)):
+def vault_delete(sid: int, user: str = Depends(require_operator)):
     db.delete_secret(sid)
+    return {"status": "deleted"}
+
+
+# ------------------------------------------------------------------ users (RBAC admin)
+@app.get("/users")
+def users_list(user: str = Depends(require_superuser)):
+    return {"users": db.list_admins(), "roles": sorted(ROLES, key=lambda r: ROLE_RANK[r])}
+
+
+@app.post("/users")
+def users_create(body: dict = Body(...), acting: str = Depends(require_superuser)):
+    name = str(body.get("username") or "").strip()
+    pw = str(body.get("password") or "")
+    role = str(body.get("role") or "operator")
+    if not name:
+        raise HTTPException(status_code=400, detail="Username is required.")
+    if role not in ROLES:
+        raise HTTPException(status_code=400, detail=f"Role must be one of: {', '.join(ROLES)}.")
+    if len(pw) < 10:
+        raise HTTPException(status_code=400, detail="Password must be at least 10 characters.")
+    if db.get_admin(name):
+        raise HTTPException(status_code=409, detail="That username already exists.")
+    pw_hash, salt = _hash_password(pw)
+    db.add_admin(name, pw_hash, salt, role=role)
+    return {"status": "created", "username": name, "role": role}
+
+
+@app.patch("/users/{username}")
+def users_update(username: str, body: dict = Body(...), acting: str = Depends(require_superuser)):
+    """Change a user's role and/or reset their password. Guards against removing
+    the last superuser."""
+    row = db.get_admin(username)
+    if not row:
+        raise HTTPException(status_code=404, detail="User not found.")
+    if "role" in body:
+        role = str(body.get("role") or "")
+        if role not in ROLES:
+            raise HTTPException(status_code=400, detail=f"Role must be one of: {', '.join(ROLES)}.")
+        if row.get("role") == "superuser" and role != "superuser" and db.count_superusers() <= 1:
+            raise HTTPException(status_code=400, detail="Can't demote the last superuser.")
+        db.set_admin_role(username, role)
+    if body.get("password"):
+        pw = str(body.get("password"))
+        if len(pw) < 10:
+            raise HTTPException(status_code=400, detail="Password must be at least 10 characters.")
+        pw_hash, salt = _hash_password(pw)
+        db.set_admin_password(username, pw_hash, salt)
+    r = db.get_admin(username)
+    return {"status": "ok", "username": r["username"], "role": r.get("role")}
+
+
+@app.delete("/users/{username}")
+def users_delete(username: str, acting: str = Depends(require_superuser)):
+    row = db.get_admin(username)
+    if not row:
+        raise HTTPException(status_code=404, detail="User not found.")
+    if username == acting:
+        raise HTTPException(status_code=400, detail="You can't delete your own account.")
+    if row.get("role") == "superuser" and db.count_superusers() <= 1:
+        raise HTTPException(status_code=400, detail="Can't delete the last superuser.")
+    db.delete_admin(username)
     return {"status": "deleted"}
 
 
@@ -380,7 +488,7 @@ def controllers(user: str = Depends(current_user)):
 
 
 @app.post("/controllers")
-def connect_controller(body: dict = Body(...), user: str = Depends(current_user)):
+def connect_controller(body: dict = Body(...), user: str = Depends(require_superuser)):
     """Connect to a Sysible Controller: validate the URL + API key, then save it.
     The key is stored server-side and never returned to the browser."""
     name = str(body.get("name") or "").strip()
@@ -397,7 +505,7 @@ def connect_controller(body: dict = Body(...), user: str = Depends(current_user)
 
 
 @app.post("/controllers/{cid}/test")
-def test_controller(cid: int, user: str = Depends(current_user)):
+def test_controller(cid: int, user: str = Depends(require_superuser)):
     ctrl = db.get_controller(cid, include_key=True)
     if not ctrl:
         raise HTTPException(status_code=404, detail="Controller connection not found.")
@@ -408,7 +516,7 @@ def test_controller(cid: int, user: str = Depends(current_user)):
 
 
 @app.delete("/controllers/{cid}")
-def disconnect_controller(cid: int, user: str = Depends(current_user)):
+def disconnect_controller(cid: int, user: str = Depends(require_superuser)):
     db.delete_controller(cid)
     return {"status": "disconnected"}
 

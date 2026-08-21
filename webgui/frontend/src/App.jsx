@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react'
-import { api, setToken, getToken } from './api.js'
+import { api, setToken, getToken, setRole, isSuperuser } from './api.js'
 import { Field, useErr } from './ui.jsx'
 import Logo from './Logo.jsx'
 import Projects from './views/Projects.jsx'
@@ -8,9 +8,11 @@ import Inventories from './views/Inventories.jsx'
 import Controllers from './views/Controllers.jsx'
 import Credentials from './views/Credentials.jsx'
 import Vault from './views/Vault.jsx'
+import Users from './views/Users.jsx'
 import Runs, { RunLog } from './views/Runs.jsx'
 
 // Left-rail navigation — same shape as the Sysible Controller console.
+// `su: true` items are shown only to superusers.
 const NAV = [
   { key: 'projects', label: 'Projects', icon: 'folder' },
   { key: 'inventories', label: 'Inventories', icon: 'server' },
@@ -18,6 +20,7 @@ const NAV = [
   { key: 'credentials', label: 'Credentials', icon: 'key' },
   { key: 'vault', label: 'Vault', icon: 'lock' },
   { key: 'runs', label: 'Runs', icon: 'play' },
+  { key: 'users', label: 'Users', icon: 'users', su: true },
 ]
 
 // Feather-style line icons (inline SVG paths), matching the Controller's set.
@@ -28,6 +31,7 @@ const ICONS = {
   key: <><circle cx="8" cy="15" r="4" /><path d="M10.8 12.2 20 3M17 6l2 2M14 9l2 2" /></>,
   lock: <><rect x="4" y="11" width="16" height="10" rx="2" /><path d="M8 11V7a4 4 0 0 1 8 0v4" /></>,
   play: <path d="M7 5l12 7-12 7z" />,
+  users: <><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" /><circle cx="9" cy="7" r="4" /><path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75" /></>,
 }
 
 function NavIcon({ name }) {
@@ -42,6 +46,7 @@ export default function App() {
   const [needSetup, setNeedSetup] = useState(false)
   const [authed, setAuthed] = useState(false)
   const [username, setUsername] = useState('')
+  const [roleName, setRoleName] = useState('')
   const [view, setView] = useState('projects')
   const [project, setProject] = useState(null)
   const [runId, setRunId] = useState(null)
@@ -54,14 +59,14 @@ export default function App() {
         const h = await fetch('/api/health').then((r) => r.json())
         if (h.admins === 0) { setNeedSetup(true); setReady(true); return }
       } catch { setReady(true); return }
-      if (getToken()) { try { const me = await api('me'); setUsername(me.username); setAuthed(true) } catch { /* stale token */ } }
+      if (getToken()) { try { const me = await api('me'); setUsername(me.username); setRole(me.role); setRoleName(me.role); setAuthed(true) } catch { /* stale token */ } }
       setReady(true)
     })()
     return () => window.removeEventListener('slep-logout', onLogout)
   }, [])
 
   if (!ready) return <div className="center muted">Loading…</div>
-  if (!authed) return <Auth needSetup={needSetup} onAuthed={(u) => { setNeedSetup(false); setUsername(u); setAuthed(true) }} />
+  if (!authed) return <Auth needSetup={needSetup} onAuthed={(u, r) => { setNeedSetup(false); setUsername(u); setRoleName(r); setAuthed(true) }} />
 
   const go = (v) => { setView(v); setProject(null); setRunId(null) }
   const atNav = (k) => view === k && !project && runId == null
@@ -75,7 +80,7 @@ export default function App() {
           <div className="name">Sysible Linux<br />Engineering Platform</div>
         </div>
         <nav className="rail-nav">
-          {NAV.map((n) => (
+          {NAV.filter((n) => !n.su || roleName === 'superuser').map((n) => (
             <button key={n.key} className={'rail-item' + (atNav(n.key) ? ' active' : '')} onClick={() => go(n.key)}>
               <NavIcon name={n.icon} /> {n.label}
             </button>
@@ -85,9 +90,9 @@ export default function App() {
           <div className="ce-badge">Community Edition</div>
           <div className="account">
             <span className="avatar">{initials}</span>
-            <div style={{ lineHeight: 1.2 }}>{username || 'admin'}<br /><span className="faint" style={{ fontSize: 12 }}>administrator</span></div>
+            <div style={{ lineHeight: 1.2 }}>{username || 'admin'}<br /><span className="faint" style={{ fontSize: 12 }}>{roleName || 'operator'}</span></div>
           </div>
-          <button className="ghost" onClick={async () => { try { await api('logout', { method: 'POST' }) } catch {} setToken(''); setAuthed(false) }}>Sign out</button>
+          <button className="ghost" onClick={async () => { try { await api('logout', { method: 'POST' }) } catch {} setToken(''); setRole(''); setAuthed(false) }}>Sign out</button>
         </div>
       </aside>
       <main className="view">
@@ -98,7 +103,8 @@ export default function App() {
                 : view === 'controllers' ? <Controllers />
                   : view === 'credentials' ? <Credentials />
                     : view === 'vault' ? <Vault />
-                      : <Runs onOpen={setRunId} />}
+                      : view === 'users' ? <Users />
+                        : <Runs onOpen={setRunId} />}
       </main>
     </div>
   )
@@ -112,7 +118,7 @@ function Auth({ needSetup, onAuthed }) {
     if (needSetup && p.length < 10) throw new Error('Password must be at least 10 characters.')
     const path = needSetup ? 'setup' : 'login'
     const d = await api(path, { method: 'POST', json: { username: u, password: p } })
-    setToken(d.token); onAuthed(d.username || u)
+    setToken(d.token); setRole(d.role); onAuthed(d.username || u, d.role)
   })
   return (
     <div className="center">

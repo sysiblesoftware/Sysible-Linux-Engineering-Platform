@@ -34,9 +34,12 @@ RUN curl -fsSL -o /tmp/tf.zip \
 
 WORKDIR /app
 COPY backend/requirements.txt backend/requirements.txt
-# Ansible is first-class, so bake ansible-core. (Salt is optional — uncomment to
-# bake salt-ssh; it's a large dependency, hence off by default for a lean image.)
-RUN pip install --no-cache-dir -r backend/requirements.txt ansible-core
+# Ansible is first-class. Install the full `ansible` package (not just
+# ansible-core) so the community.general / ansible.posix collections the task
+# palette uses (LVM, mount, firewalld, selinux, authorized_key, …) are present.
+# sshpass (installed above) covers password SSH. (Salt is optional — uncomment
+# to bake salt-ssh; it's large, hence off by default for a lean image.)
+RUN pip install --no-cache-dir -r backend/requirements.txt ansible
 #   && pip install --no-cache-dir salt
 
 COPY backend/ backend/
