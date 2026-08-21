@@ -127,6 +127,13 @@ export default function Ide({ project, onBack, onRun }) {
       alert('Your browser blocked clipboard read. Use Ctrl+V (⌘V on Mac) to paste — that always works.')
     }
   }
+  // Delete the selection (or the current line when nothing is selected), no clipboard.
+  const doDelete = (ed) => {
+    const sel = ed.getSelection()
+    if (sel && !sel.isEmpty()) ed.executeEdits('delete', [{ range: sel, text: '', forceMoveMarkers: true }])
+    else ed.trigger('menu', 'editor.action.deleteLines')
+    setSaved(false); ed.focus()
+  }
   const menuAction = async (fn) => { const ed = editorRef.current; setMenu(null); if (ed) await fn(ed) }
 
   const loadTree = useCallback(() => api(`projects/${project.id}/files`).then((d) => setTree(d.files)), [project.id])
@@ -276,6 +283,7 @@ export default function Ide({ project, onBack, onRun }) {
           { label: 'Cut', accel: 'Ctrl+X', run: () => menuAction(doCut) },
           { label: 'Copy', accel: 'Ctrl+C', run: () => menuAction(doCopy) },
           { label: 'Paste', accel: 'Ctrl+V', run: () => menuAction(doPaste) },
+          { label: 'Delete', accel: 'Del', run: () => menuAction(doDelete) },
           { sep: true },
           ...(snip.engine === 'ansible' ? [
             { label: 'Play header / wrap in play…', run: () => { setMenu(null); setPlayOpen(true) } },
