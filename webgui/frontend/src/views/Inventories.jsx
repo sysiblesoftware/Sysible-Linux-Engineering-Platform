@@ -57,7 +57,7 @@ function InventoryDetail({ inv, onBack, onChanged }) {
         {inv.bastion && <span className="pill" title="Runs tunnel through this SSH jump host">⤳ {inv.bastion}</span>}
         <div className="spacer" />
         <button className="ghost sm" onClick={() => setModal('bastion')}>{inv.bastion ? 'Jump host' : '+ Jump host'}</button>
-        {inv.bastion && <button className="ghost sm" title="Install SLEP's key on the jump host so runs hop through it with the key" onClick={() => setModal('bastionprep')}>⤳ Prepare jump host</button>}
+        {inv.bastion && <button className="ghost sm" title="Install SLEP's key on the jump host so runs hop through it with the key" onClick={() => setModal('bastionprep')}>Prepare jump host</button>}
         <button className="ghost sm" onClick={() => setModal('import')}>Import from Controller</button>
         <button className="ghost sm" disabled={hosts.length === 0}
           title="Check SSH reachability of these hosts" onClick={() => setModal('test')}>◉ Test connection</button>
