@@ -114,6 +114,8 @@ th{color:var(--muted);font-weight:600;font-size:12px}
 .ide-actions button{width:100%;justify-content:center}
 .ide-actions .spacer{flex:1;min-height:8px}
 .tree{background:var(--panel);border-right:1px solid var(--line);overflow:auto;padding:8px}
+.ide-gutter{align-self:stretch;cursor:col-resize;background:linear-gradient(var(--line),var(--line)) center/2px 100% no-repeat}
+.ide-gutter:hover{background:linear-gradient(var(--accent),var(--accent)) center/2px 100% no-repeat}
 .tree .f{display:flex;align-items:center;gap:4px;padding:4px 6px 4px 8px;border-radius:6px}
 .tree .f .f-name{flex:1;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .tree .f .f-del{border:none;background:transparent;color:var(--muted);opacity:.45;cursor:pointer;padding:0 4px;font-size:12px}

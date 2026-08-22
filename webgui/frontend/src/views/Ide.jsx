@@ -194,6 +194,7 @@ export default function Ide({ project, onBack, onRun }) {
   const [renPath, setRenPath] = useState(null)
   const [gitOpen, setGitOpen] = useState(false)
   const [menu, setMenu] = useState(null)   // {x, y} custom editor context menu
+  const [treeW, setTreeW] = useState(() => { try { return Number(localStorage.getItem('slep.treeW')) || 224 } catch { return 224 } })
   const editorRef = useRef(null)
   const snip = snippetsFor(path)
 
@@ -430,13 +431,25 @@ export default function Ide({ project, onBack, onRun }) {
   // Re-lint when the open file changes (switching files doesn't fire onChange).
   useEffect(() => { validate() }, [path])
 
+  // Resizable file Explorer: drag the divider to widen it so long paths aren't
+  // clipped; the width is remembered across sessions.
+  useEffect(() => { try { localStorage.setItem('slep.treeW', String(treeW)) } catch { /* ignore */ } }, [treeW])
+  const startTreeDrag = (e) => {
+    e.preventDefault()
+    const startX = e.clientX, startW = treeW
+    const move = (ev) => setTreeW(Math.max(150, Math.min(560, startW + (ev.clientX - startX))))
+    const up = () => { window.removeEventListener('mousemove', move); window.removeEventListener('mouseup', up); document.body.style.cursor = '' }
+    document.body.style.cursor = 'col-resize'
+    window.addEventListener('mousemove', move); window.addEventListener('mouseup', up)
+  }
+
   return (
     <>
       <div className="row" style={{ marginBottom: 10 }}>
         <button className="ghost sm" onClick={onBack}>← Projects</button>
         <h2 style={{ margin: 0 }}>{project.name}</h2><span className="muted">{project.slug}</span>
       </div>
-      <div className="ide ide-3col">
+      <div className="ide ide-3col" style={{ gridTemplateColumns: `150px ${treeW}px 6px 1fr` }}>
         <div className="ide-actions">
           <div className="ide-actions-h">Actions</div>
           <button className="ghost sm" onClick={() => setNewOpen(true)}>＋ New file</button>
@@ -474,13 +487,14 @@ export default function Ide({ project, onBack, onRun }) {
             const base = f.path.split('/').pop()
             return (
               <div key={f.path} className={'f ' + (f.type === 'dir' ? 'dir' : '') + (f.path === path ? ' active' : '')} style={{ paddingLeft: 8 + depth * 13 }}>
-                <span className="f-name" onClick={() => f.type === 'file' && open(f.path)}>{f.type === 'dir' ? '📁 ' : '📄 '}{base}</span>
+                <span className="f-name" title={f.path} onClick={() => f.type === 'file' && open(f.path)}>{f.type === 'dir' ? '📁 ' : '📄 '}{base}</span>
                 {f.type === 'file' && <button className="f-del" title={'Rename ' + f.path} onClick={(e) => { e.stopPropagation(); setRenPath(f.path) }}>✎</button>}
                 <button className="f-del" title={'Delete ' + f.path} onClick={(e) => { e.stopPropagation(); setDelPath(f.path) }}>✕</button>
               </div>
             )
           })}
         </div>
+        <div className="ide-gutter" onMouseDown={startTreeDrag} title="Drag to resize the Explorer" />
         <div className="edwrap" onContextMenu={(e) => { if (path != null) { e.preventDefault(); setMenu({ x: e.clientX, y: e.clientY }) } }}>
           <div className="edtool"><span className="muted">{path || 'No file open'}{!saved && ' •'}</span></div>
           <Editor height="100%" theme={getTheme() === 'light' ? 'sysible-light' : 'sysible-dark'} path={path || 'untitled'} language={langFor(path || '')}
