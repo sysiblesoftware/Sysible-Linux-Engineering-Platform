@@ -901,11 +901,11 @@ export function RunModal({ project, currentFile, onClose, onLaunched, initial })
 // Run several steps in succession — the "create → configure → maintain" pipeline
 // (or any order). Each step becomes a normal run; the sequence stops on the first
 // failure by default. Steps run one after another on the server.
-export function PipelineModal({ project, currentFile, onClose, onLaunched }) {
+export function PipelineModal({ project, currentFile, initialSteps, onClose, onLaunched }) {
   const [invs, setInvs] = useState([]); const [creds, setCreds] = useState([])
   const [stopOnFail, setStopOnFail] = useState(true)
   const blank = (over) => ({ kind: 'ansible', target: currentFile || 'site.yml', inventory_id: '', credential_id: '', tool: 'terraform', ...over })
-  const [steps, setSteps] = useState([blank()])
+  const [steps, setSteps] = useState(initialSteps && initialSteps.length ? initialSteps.map((s) => blank(s)) : [blank()])
   const { wrap, node } = useErr()
 
   useEffect(() => { api('inventories').then((d) => { setInvs(d.inventories)

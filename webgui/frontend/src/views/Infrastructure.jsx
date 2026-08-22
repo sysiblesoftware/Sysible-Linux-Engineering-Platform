@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import { api, canWrite } from '../api.js'
 import { Field, Modal, useErr } from '../ui.jsx'
+import { PipelineModal } from './Ide.jsx'
 
 // Create Infrastructure — a form-driven Terraform VM builder. The wizard's menus
 // come from the backend provider schema; on create it generates a Terraform
@@ -8,6 +9,7 @@ import { Field, Modal, useErr } from '../ui.jsx'
 export default function Infrastructure({ onOpenProject, onOpenRun }) {
   const [rows, setRows] = useState([])
   const [open, setOpen] = useState(false)
+  const [pipe, setPipe] = useState(null)   // {project, steps} → opens the pipeline builder
   const load = () => api('infra').then((d) => setRows(d.infra))
   useEffect(() => { load() }, [])
   const writable = canWrite()
@@ -29,6 +31,23 @@ export default function Infrastructure({ onOpenProject, onOpenRun }) {
     try {
       const d = await api(`infra/${r.project_id}/scaffold`, { method: 'POST', json: { stage } })
       onOpenProject({ id: r.project_id, name: r.project_name, slug: r.project_slug, openFile: d.path })
+    } catch (e) { alert(e.message) }
+  }
+  // One-click cadence: scaffold configure/maintain (idempotent), then open the
+  // pipeline builder pre-filled with apply → configure → maintain so it runs as a
+  // sequence (pick the inventory/credential for the Ansible/Salt steps, then launch).
+  const cadence = async (r) => {
+    try {
+      await api(`infra/${r.project_id}/scaffold`, { method: 'POST', json: { stage: 'configure' } })
+      await api(`infra/${r.project_id}/scaffold`, { method: 'POST', json: { stage: 'maintain' } })
+      setPipe({
+        project: { id: r.project_id, name: r.project_name, slug: r.project_slug },
+        steps: [
+          { kind: 'terraform', target: 'apply', tool: 'terraform' },
+          { kind: 'ansible', target: 'configure.yml' },
+          { kind: 'salt', target: 'maintain.sls' },
+        ],
+      })
     } catch (e) { alert(e.message) }
   }
 
@@ -57,6 +76,7 @@ export default function Infrastructure({ onOpenProject, onOpenRun }) {
                   {writable && r.controller_id ? <button className="primary sm" onClick={() => enroll(r)}>Enroll →</button> : null}
                   {writable && <button className="ghost sm" title="Scaffold an Ansible playbook and open it (Configure)" onClick={() => scaffold(r, 'configure')}>Configure</button>}
                   {writable && <button className="ghost sm" title="Scaffold a Salt state and open it (Maintain)" onClick={() => scaffold(r, 'maintain')}>Maintain</button>}
+                  {writable && <button className="primary sm" title="Run the whole cadence in sequence: apply → configure → maintain" onClick={() => cadence(r)}>▶ Cadence</button>}
                 </td>
               </tr>
             ))}
@@ -65,6 +85,8 @@ export default function Infrastructure({ onOpenProject, onOpenRun }) {
       )}
       {open && <CreateWizard onClose={() => setOpen(false)}
         onDone={(pid, name, slug) => { setOpen(false); load(); onOpenProject({ id: pid, name, slug }) }} />}
+      {pipe && <PipelineModal project={pipe.project} initialSteps={pipe.steps}
+        onClose={() => setPipe(null)} onLaunched={(id) => { setPipe(null); onOpenRun(id) }} />}
     </>
   )
 }
