@@ -183,6 +183,7 @@ export default function Ide({ project, onBack, onRun }) {
   const [content, setContent] = useState('')
   const [saved, setSaved] = useState(true)
   const [runOpen, setRunOpen] = useState(false)
+  const [pipeOpen, setPipeOpen] = useState(false)
   const [newOpen, setNewOpen] = useState(false)
   const [taskOpen, setTaskOpen] = useState(false)
   const [playOpen, setPlayOpen] = useState(false)
@@ -445,6 +446,7 @@ export default function Ide({ project, onBack, onRun }) {
           <button className="ghost sm" onClick={save} disabled={path == null}>{saved ? 'Saved' : 'Save'}</button>
           <button className="ghost sm" title="Version control — commit, push, pull, branches" onClick={() => setGitOpen(true)}>⎇ Git</button>
           <div className="spacer" />
+          <button className="ghost sm" title="Run several steps in succession (create → configure → maintain)" onClick={() => setPipeOpen(true)}>⧉ Sequence</button>
           <button className="primary sm" onClick={() => setRunOpen(true)}>▶ Run</button>
         </div>
         <div className="tree">
@@ -490,6 +492,7 @@ export default function Ide({ project, onBack, onRun }) {
         onRename={async (to) => { await rename(renPath, to); setRenPath(null) }} />}
       {gitOpen && <GitPanel project={project} onClose={() => setGitOpen(false)} onChanged={() => loadTree()} />}
       {runOpen && <RunModal project={project} currentFile={path} onClose={() => setRunOpen(false)} onLaunched={onRun} />}
+      {pipeOpen && <PipelineModal project={project} currentFile={path} onClose={() => setPipeOpen(false)} onLaunched={onRun} />}
       {menu && <EditorMenu at={menu} onClose={() => setMenu(null)}
         items={[
           { label: 'Cut', accel: 'Ctrl+X', run: () => menuAction(doCut) },
@@ -891,6 +894,80 @@ export function RunModal({ project, currentFile, onClose, onLaunched, initial })
         } })
         onClose(); onLaunched(d.run_id)
       })}>▶ Launch</button>
+    </Modal>
+  )
+}
+
+// Run several steps in succession — the "create → configure → maintain" pipeline
+// (or any order). Each step becomes a normal run; the sequence stops on the first
+// failure by default. Steps run one after another on the server.
+export function PipelineModal({ project, currentFile, onClose, onLaunched }) {
+  const [invs, setInvs] = useState([]); const [creds, setCreds] = useState([])
+  const [stopOnFail, setStopOnFail] = useState(true)
+  const blank = (over) => ({ kind: 'ansible', target: currentFile || 'site.yml', inventory_id: '', credential_id: '', tool: 'terraform', ...over })
+  const [steps, setSteps] = useState([blank()])
+  const { wrap, node } = useErr()
+
+  useEffect(() => { api('inventories').then((d) => { setInvs(d.inventories)
+    setSteps((s) => s.map((st) => ({ ...st, inventory_id: st.inventory_id || (d.inventories[0] ? String(d.inventories[0].id) : '') }))) }) }, [])
+  useEffect(() => { api('credentials').then((d) => setCreds(d.credentials)) }, [])
+
+  const upd = (i, patch) => setSteps((s) => s.map((st, j) => (j === i ? { ...st, ...patch } : st)))
+  const add = () => setSteps((s) => [...s, blank({ inventory_id: invs[0] ? String(invs[0].id) : '' })])
+  const del = (i) => setSteps((s) => (s.length > 1 ? s.filter((_, j) => j !== i) : s))
+  const move = (i, d) => setSteps((s) => { const a = [...s]; const j = i + d; if (j < 0 || j >= a.length) return a;[a[i], a[j]] = [a[j], a[i]]; return a })
+  const defTarget = (k) => (k === 'terraform' ? 'apply' : k === 'salt' ? 'highstate' : 'site.yml')
+
+  return (
+    <Modal title="Run sequence" onClose={onClose} wide>
+      <div className="faint" style={{ fontSize: 12, marginBottom: 8 }}>Steps run one after another. The cadence is create (Terraform/OpenTofu) → configure (Ansible) → maintain (Salt).</div>
+      {steps.map((st, i) => (
+        <div key={i} className="pipe-step">
+          <span className="pipe-n">{i + 1}</span>
+          <select value={st.kind} onChange={(e) => upd(i, { kind: e.target.value, target: defTarget(e.target.value) })} style={{ width: 130 }}>
+            <option value="ansible">Ansible</option>
+            <option value="terraform">Terraform</option>
+            <option value="salt">Salt</option>
+          </select>
+          {st.kind === 'terraform'
+            ? <select value={st.target} onChange={(e) => upd(i, { target: e.target.value })} style={{ width: 120 }}><option>plan</option><option>apply</option><option>destroy</option></select>
+            : <input value={st.target} onChange={(e) => upd(i, { target: e.target.value })} placeholder={st.kind === 'salt' ? 'state / highstate' : 'playbook.yml'} />}
+          {st.kind === 'terraform'
+            ? <select value={st.tool} onChange={(e) => upd(i, { tool: e.target.value })} style={{ width: 120 }}><option value="terraform">Terraform</option><option value="tofu">OpenTofu</option></select>
+            : <select value={st.inventory_id} onChange={(e) => upd(i, { inventory_id: e.target.value })} title="Inventory">
+              {invs.length === 0 && <option value="">(no inventory)</option>}
+              {invs.map((v) => <option key={v.id} value={v.id}>{v.name}</option>)}
+            </select>}
+          <select value={st.credential_id} onChange={(e) => upd(i, { credential_id: e.target.value })} title="Credential" style={{ width: 130 }}>
+            <option value="">(no cred)</option>
+            {creds.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+          </select>
+          <div className="row" style={{ gap: 2 }}>
+            <button className="ghost sm" title="Move up" onClick={() => move(i, -1)} disabled={i === 0}>↑</button>
+            <button className="ghost sm" title="Move down" onClick={() => move(i, 1)} disabled={i === steps.length - 1}>↓</button>
+            <button className="danger ghost sm" title="Remove step" onClick={() => del(i)} disabled={steps.length === 1}>✕</button>
+          </div>
+        </div>
+      ))}
+      <div className="row" style={{ margin: '8px 0' }}>
+        <button className="ghost sm" onClick={add}>＋ Add step</button>
+        <div className="spacer" />
+        <label className="row" style={{ gap: 6, fontSize: 13, cursor: 'pointer' }}>
+          <input type="checkbox" checked={stopOnFail} onChange={(e) => setStopOnFail(e.target.checked)} style={{ width: 'auto' }} />
+          Stop on first failure
+        </label>
+      </div>
+      {node}
+      <button className="primary" onClick={() => wrap(async () => {
+        const payload = steps.map((st) => ({
+          kind: st.kind, target: st.target,
+          inventory_id: st.kind === 'terraform' ? null : (st.inventory_id ? Number(st.inventory_id) : null),
+          credential_id: st.credential_id ? Number(st.credential_id) : null,
+          tool: st.kind === 'terraform' ? st.tool : '',
+        }))
+        const d = await api('pipelines', { method: 'POST', json: { project_id: project.id, steps: payload, stop_on_failure: stopOnFail } })
+        onClose(); onLaunched(d.run_ids[0])
+      })}>▶ Run {steps.length} step{steps.length > 1 ? 's' : ''} in sequence</button>
     </Modal>
   )
 }

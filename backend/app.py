@@ -910,6 +910,64 @@ def _dispatch_run(project, kind, target, inventory_id, credential_id, extra_vars
     return run_id
 
 
+def _dispatch_pipeline(project, steps, actor, stop_on_failure=True):
+    """Run an ordered list of steps in succession. Every step becomes a normal run
+    row (queued up front so the whole sequence is visible immediately), then they
+    execute one after another on a single background thread. If a step doesn't
+    succeed and stop_on_failure is set, the remaining queued steps are canceled."""
+    from .runners import ansible_runner
+    prepared = []
+    for s in steps:
+        kind = s.get("kind")
+        rid = db.create_run(
+            project["id"], kind, str(s.get("target") or "").strip(),
+            inventory_id=s.get("inventory_id"), credential_id=s.get("credential_id"),
+            extra_vars=s.get("extra_vars") or {}, created_by=actor,
+        )
+        if kind == "ansible":
+            if s.get("become_password"):
+                ansible_runner.stash_become(rid, str(s["become_password"]))
+            if s.get("limit") or s.get("start_at_task"):
+                ansible_runner.stash_opts(rid, {"limit": str(s.get("limit") or "").strip(),
+                                                "start_at_task": str(s.get("start_at_task") or "").strip()})
+        if kind == "terraform" and s.get("tool"):
+            terraform_runner.stash_tool(rid, str(s["tool"]))
+        prepared.append((rid, kind))
+
+    def worker():
+        for i, (rid, kind) in enumerate(prepared):
+            RUNNERS[kind](rid)            # blocking — runs to completion
+            r = db.get_run(rid)
+            if stop_on_failure and (not r or r.get("status") != "success"):
+                for rid2, _ in prepared[i + 1:]:
+                    db.set_run_status(rid2, "canceled", finished=int(time.time()))
+                break
+
+    db.log_audit("pipeline_launched", actor, f"{len(prepared)} steps on {project['name']}")
+    threading.Thread(target=worker, daemon=True).start()
+    return [rid for rid, _ in prepared]
+
+
+@app.post("/pipelines")
+def launch_pipeline(body: dict = Body(...), user: str = Depends(current_user)):
+    """Launch a sequence of runs (create → configure → maintain, or any order).
+    Steps run one after another; by default the sequence stops on the first
+    failure. Each step is the same shape as a /runs body."""
+    project = db.get_project(body.get("project_id")) if body.get("project_id") else None
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    steps = body.get("steps") or []
+    if not steps:
+        raise HTTPException(status_code=400, detail="A pipeline needs at least one step.")
+    for i, s in enumerate(steps, 1):
+        if s.get("kind") not in RUNNERS:
+            raise HTTPException(status_code=400, detail=f"Step {i}: unknown engine '{s.get('kind')}'.")
+        if not str(s.get("target") or "").strip():
+            raise HTTPException(status_code=400, detail=f"Step {i}: a target is required.")
+    run_ids = _dispatch_pipeline(project, steps, user, stop_on_failure=bool(body.get("stop_on_failure", True)))
+    return {"status": "launched", "run_ids": run_ids}
+
+
 @app.post("/runs")
 def launch_run(body: dict = Body(...), user: str = Depends(current_user)):
     pid = body.get("project_id")

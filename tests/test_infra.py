@@ -140,3 +140,49 @@ def test_scaffold_configure_and_maintain(client):
     assert "pkg.installed" in client.get(f"/projects/{pid}/file?path=maintain.sls").json()["content"]
     # Unknown stage → 400.
     assert client.post(f"/infra/{pid}/scaffold", json={"stage": "bogus"}).status_code == 400
+
+
+def test_pipeline_runs_steps_in_sequence(client, monkeypatch):
+    """A pipeline creates a run per step and executes them in order; a failing
+    step cancels the rest when stop_on_failure is set."""
+    import backend.app as appmod
+    pid = client.post("/infra", json={"name": "seq", "provider": "libvirt",
+                                     "options": {"count": 1, "base_image": "x"}}).json()["project_id"]
+    inv = None   # runners are stubbed, so no real inventory is needed
+
+    calls = []
+    # Stub every runner: 1st step succeeds, 2nd fails → 3rd must be canceled.
+    def fake(kind):
+        def _launch(run_id):
+            calls.append((run_id, kind))
+            import backend.db as db
+            ok = len(calls) == 1          # only the first step "succeeds"
+            db.set_run_status(run_id, "success" if ok else "failed")
+        return _launch
+    monkeypatch.setitem(appmod.RUNNERS, "ansible", fake("ansible"))
+    monkeypatch.setitem(appmod.RUNNERS, "terraform", fake("terraform"))
+
+    steps = [
+        {"kind": "terraform", "target": "apply", "tool": "tofu"},
+        {"kind": "ansible", "target": "configure.yml", "inventory_id": inv},
+        {"kind": "ansible", "target": "maintain-after-fail.yml", "inventory_id": inv},
+    ]
+    d = client.post("/pipelines", json={"project_id": pid, "steps": steps, "stop_on_failure": True}).json()
+    assert len(d["run_ids"]) == 3
+    # The worker thread runs inline-ish; poll run statuses.
+    import time as _t
+    for _ in range(50):
+        st = [client.get(f"/runs/{r}").json()["status"] for r in d["run_ids"]]
+        if st[2] in ("canceled", "success", "failed"):
+            break
+        _t.sleep(0.02)
+    st = [client.get(f"/runs/{r}").json()["status"] for r in d["run_ids"]]
+    assert st[0] == "success" and st[1] == "failed" and st[2] == "canceled"
+
+
+def test_pipeline_needs_steps_and_valid_engine(client):
+    pid = client.post("/infra", json={"name": "seq2", "provider": "libvirt",
+                                     "options": {"count": 1, "base_image": "x"}}).json()["project_id"]
+    assert client.post("/pipelines", json={"project_id": pid, "steps": []}).status_code == 400
+    assert client.post("/pipelines", json={"project_id": pid,
+                       "steps": [{"kind": "bogus", "target": "x"}]}).status_code == 400
