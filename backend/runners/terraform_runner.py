@@ -102,6 +102,28 @@ def launch(run_id: int) -> None:
             db.set_run_status(run_id, "failed", exit_code=2, finished=int(time.time()))
             return
 
+        # Preflight the cloud-init ISO tool. The dmacvicar/libvirt provider builds
+        # each VM's cloud-init ISO by shelling out to `mkisofs` (or genisoimage /
+        # xorriso). If it's missing, apply fails *after* the slow base-image
+        # download — so on apply, when the config uses libvirt_cloudinit_disk,
+        # check up front and fail fast with a clear, actionable message.
+        if action == "apply":
+            tf_text = ""
+            for f in workdir.glob("*.tf"):
+                try:
+                    tf_text += f.read_text()
+                except OSError:
+                    pass
+            if "libvirt_cloudinit_disk" in tf_text and not any(
+                    shutil.which(b) for b in ("mkisofs", "genisoimage", "xorriso")):
+                emit("!! Missing cloud-init ISO tool. The libvirt provider builds each VM's")
+                emit("!! cloud-init ISO with `mkisofs` (or genisoimage / xorriso), which isn't on")
+                emit("!! PATH in the SLEP container. Install genisoimage (the image bakes it in as")
+                emit("!! of this release — run `slep update`), then re-apply. Failing now so you")
+                emit("!! don't wait on the base-image download first.")
+                db.set_run_status(run_id, "failed", exit_code=2, finished=int(time.time()))
+                return
+
         env = _common.credential_env(credential, os.environ)
         env.setdefault("TF_IN_AUTOMATION", "1")
 

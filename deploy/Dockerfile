@@ -20,9 +20,12 @@ FROM python:3.12-slim
 # Engines + tooling: ssh client (Ansible/salt-ssh transport), sshpass (password
 # SSH auth for Ansible), git (SCM projects), curl/unzip (fetch terraform),
 # libvirt-clients (`virsh` — the "Test hypervisor connection" probe for the
-# libvirt/KVM VM builder), ca-certificates, bash (entrypoint).
+# libvirt/KVM VM builder), genisoimage (the dmacvicar/libvirt provider builds
+# each VM's cloud-init ISO by shelling out to `mkisofs` — provide it, symlinked
+# from genisoimage), ca-certificates, bash (entrypoint).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      bash git openssh-client sshpass curl unzip ca-certificates libvirt-clients \
+      bash git openssh-client sshpass curl unzip ca-certificates libvirt-clients genisoimage \
+    && ln -sf "$(command -v genisoimage)" /usr/local/bin/mkisofs \
     && rm -rf /var/lib/apt/lists/*
 
 # Terraform (arch-aware via buildx's TARGETARCH: amd64 / arm64).

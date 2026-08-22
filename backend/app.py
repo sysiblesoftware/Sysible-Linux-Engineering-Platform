@@ -1206,6 +1206,15 @@ def health_warnings(user: str = Depends(current_user)):
                 "detail": f"`{shown}` isn't on PATH, so {engine} runs will fail.",
                 "hint": f"Install {engine} on the SLEP host (the container image bakes it in).",
             })
+    if not any(shutil.which(b) for b in ("mkisofs", "genisoimage", "xorriso")):
+        warnings.append({
+            "id": "cloudinit-iso",
+            "severity": "warning",
+            "title": "cloud-init ISO tool missing",
+            "detail": "No `mkisofs`/`genisoimage` on PATH — libvirt (KVM) VM builds fail at the "
+                      "cloud-init step (the dmacvicar/libvirt provider needs it to build each VM's ISO).",
+            "hint": "Install genisoimage on the SLEP host (the container image bakes it in — `slep update`).",
+        })
     if not os.access(db.DATA_DIR, os.W_OK):
         warnings.append({
             "id": "data-dir",
