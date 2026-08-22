@@ -65,7 +65,10 @@ PROVIDERS = {
             {"key": "vcpu", "label": "vCPUs", "type": "select", "default": "2", "choices": ["1", "2", "4", "8"]},
             {"key": "pool", "label": "Storage pool", "type": "text", "default": "default"},
             {"key": "base_image", "label": "Base image URL/path", "type": "text",
-             "default": "https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img"},
+             "default": "https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img",
+             "help": "Downloaded once into a shared base volume and cached on the hypervisor; "
+                     "each VM's disk is a fast copy-on-write clone. Point at a local path on the "
+                     "hypervisor (e.g. /var/lib/libvirt/images/jammy.img) to skip the download."},
             {"key": "network", "label": "Network name", "type": "text", "default": "default"},
             _SSH_USER, _SSH_KEY, _ENV,
         ],
@@ -245,12 +248,24 @@ resource "libvirt_cloudinit_disk" "ci" {{
   user_data = file("${{path.module}}/cloudinit.cfg")
 }}
 
+# Base image, pulled into the pool ONCE and shared. Per-VM disks below are fast
+# copy-on-write clones of it (base_volume_id) — so only the first apply downloads
+# the image; adding VMs or re-applying is near-instant, and the image is cached on
+# the hypervisor in the pool. Point var.base_image at a local path on the
+# hypervisor (e.g. /var/lib/libvirt/images/jammy.img) to skip the download too.
+resource "libvirt_volume" "base" {{
+  name   = "${{var.name_prefix}}-base.qcow2"
+  pool   = var.pool
+  source = var.base_image
+  format = "qcow2"
+}}
+
 resource "libvirt_volume" "disk" {{
-  count            = var.vm_count
-  name             = "${{var.name_prefix}}-${{count.index + 1}}.qcow2"
-  pool             = var.pool
-  source           = var.base_image
-  format           = "qcow2"
+  count          = var.vm_count
+  name           = "${{var.name_prefix}}-${{count.index + 1}}.qcow2"
+  pool           = var.pool
+  base_volume_id = libvirt_volume.base.id
+  format         = "qcow2"
 }}
 
 resource "libvirt_domain" "vm" {{

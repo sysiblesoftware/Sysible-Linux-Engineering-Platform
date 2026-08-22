@@ -42,6 +42,20 @@ def test_libvirt_provider_pinned_to_compatible_major():
     assert "network_interface {" in main and "disk {" in main
 
 
+def test_libvirt_uses_cow_base_volume():
+    """The base image is pulled into one shared base volume and each VM disk is a
+    copy-on-write clone of it — so only the first apply downloads the image and it
+    stays cached on the hypervisor."""
+    files = infra.generate("libvirt", {"count": 2, "base_image": "https://x/img.qcow2"})
+    main = files["main.tf"]
+    assert 'resource "libvirt_volume" "base"' in main
+    assert "source = var.base_image" in main               # base pulls the image
+    assert "base_volume_id = libvirt_volume.base.id" in main  # per-VM CoW clones
+    # the per-VM disk no longer downloads the image itself
+    disk = main.split('resource "libvirt_volume" "disk"')[1]
+    assert "source" not in disk.split("}")[0]
+
+
 def test_deploy_credential_key_baked_into_cloudinit(client):
     """Picking an SSH deploy credential bakes its public key into the VMs' cloud-init
     so the same credential can log in for the Configure/Maintain steps."""
