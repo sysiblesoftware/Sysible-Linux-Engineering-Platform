@@ -309,6 +309,21 @@ def test_pipeline_auto_inventory_step_backfills_following_steps(client, monkeypa
     assert seen["ansible"] == inv["id"]
 
 
+def test_hypervisor_key_is_managed_and_idempotent(client):
+    """SLEP mints/returns a persistent managed SSH key for hypervisor connections;
+    the public half + in-container keyfile path come back, and a second call
+    returns the same key (no churn)."""
+    import shutil
+    if not shutil.which("ssh-keygen"):
+        import pytest
+        pytest.skip("ssh-keygen not available")
+    d = client.post("/infra/hypervisor-key", json={}).json()
+    assert d["public_key"].startswith("ssh-ed25519 ")
+    assert d["keyfile"].endswith("/ssh/hypervisor")
+    d2 = client.post("/infra/hypervisor-key", json={}).json()
+    assert d2["public_key"] == d["public_key"]     # stable across calls
+
+
 def test_pipeline_inventory_step_allows_empty_target(client):
     """The inventory pseudo-step needs no target (validation must not reject it)."""
     pid = client.post("/infra", json={"name": "invonly", "provider": "libvirt",

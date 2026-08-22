@@ -801,6 +801,7 @@ export function RunModal({ project, currentFile, onClose, onLaunched, initial })
   const [limit, setLimit] = useState(ini.limit || '')          // --limit
   const [startAt, setStartAt] = useState(ini.start_at_task || '')  // --start-at-task
   const startTasks = ini.tasks || []           // task names for the start-at dropdown
+  const [files, setFiles] = useState([])       // project files → target autocomplete
   const { wrap, node } = useErr()
 
   // Parse the KEY=value textarea into an object (blank lines / #comments ignored).
@@ -817,6 +818,9 @@ export function RunModal({ project, currentFile, onClose, onLaunched, initial })
 
   useEffect(() => { api('inventories').then((d) => { setInvs(d.inventories); setInv((cur) => cur || (d.inventories[0] ? String(d.inventories[0].id) : '')) }) }, [])
   useEffect(() => { api('credentials').then((d) => setCreds(d.credentials)) }, [])
+  useEffect(() => { if (project?.id) api(`projects/${project.id}/files`)
+    .then((d) => setFiles((d.files || []).filter((f) => f.type === 'file').map((f) => f.path))).catch(() => {}) }, [project?.id])
+  const targetFiles = files.filter((p) => (engine === 'salt' ? p.endsWith('.sls') : (p.endsWith('.yml') || p.endsWith('.yaml'))))
   const firstEngine = useRef(true)
   useEffect(() => {
     if (firstEngine.current) { firstEngine.current = false; return }   // keep a pre-filled target
@@ -846,7 +850,9 @@ export function RunModal({ project, currentFile, onClose, onLaunched, initial })
       <Field label={engine === 'ansible' ? 'Playbook path' : engine === 'terraform' ? 'Action' : 'State (or “highstate”)'}>
         {engine === 'terraform'
           ? <select value={target} onChange={(e) => setTarget(e.target.value)}><option>plan</option><option>apply</option><option>destroy</option></select>
-          : <input value={target} onChange={(e) => setTarget(e.target.value)} />}
+          : <><input value={target} onChange={(e) => setTarget(e.target.value)} list="run-target-files"
+                     placeholder={engine === 'salt' ? 'state.sls / highstate' : 'playbook.yml'} />
+              <datalist id="run-target-files">{targetFiles.map((p) => <option key={p} value={p} />)}</datalist></>}
       </Field>
       {needsInv && (
         <Field label="Inventory">
@@ -932,9 +938,15 @@ export function PipelineModal({ project, currentFile, initialSteps, initialName,
   }))
   const { wrap, node } = useErr()
 
+  const [files, setFiles] = useState([])   // project files → target autocomplete
   useEffect(() => { api('inventories').then((d) => { setInvs(d.inventories)
     setSteps((s) => s.map((st) => ({ ...st, inventory_id: st.inventory_id || (d.inventories[0] ? String(d.inventories[0].id) : '') }))) }) }, [])
   useEffect(() => { api('credentials').then((d) => setCreds(d.credentials)) }, [])
+  useEffect(() => { if (project?.id) api(`projects/${project.id}/files`)
+    .then((d) => setFiles((d.files || []).filter((f) => f.type === 'file').map((f) => f.path))).catch(() => {}) }, [project?.id])
+  // Files that make sense as a run target for each engine — playbooks for Ansible,
+  // state files for Salt — offered as a datalist so the target is picked, not typed.
+  const filesFor = (kind) => files.filter((p) => (kind === 'salt' ? p.endsWith('.sls') : (p.endsWith('.yml') || p.endsWith('.yaml'))))
 
   const upd = (i, patch) => setSteps((s) => s.map((st, j) => (j === i ? { ...st, ...patch } : st)))
   const add = () => setSteps((s) => [...s, blank({ inventory_id: invs[0] ? String(invs[0].id) : '' })])
@@ -959,7 +971,7 @@ export function PipelineModal({ project, currentFile, initialSteps, initialName,
             : (<>
                 {st.kind === 'terraform'
                   ? <select value={st.target} onChange={(e) => upd(i, { target: e.target.value })} style={{ width: 120 }}><option>plan</option><option>apply</option><option>destroy</option></select>
-                  : <input value={st.target} onChange={(e) => upd(i, { target: e.target.value })} placeholder={st.kind === 'salt' ? 'state / highstate' : 'playbook.yml'} />}
+                  : <input value={st.target} onChange={(e) => upd(i, { target: e.target.value })} list={st.kind === 'salt' ? 'pipe-files-salt' : 'pipe-files-ansible'} placeholder={st.kind === 'salt' ? 'state / highstate' : 'playbook.yml'} />}
                 {st.kind === 'terraform'
                   ? <select value={st.tool} onChange={(e) => upd(i, { tool: e.target.value })} style={{ width: 120 }}><option value="terraform">Terraform</option><option value="tofu">OpenTofu</option></select>
                   : <select value={st.inventory_id} onChange={(e) => upd(i, { inventory_id: e.target.value })} title="Inventory">
@@ -978,6 +990,8 @@ export function PipelineModal({ project, currentFile, initialSteps, initialName,
           </div>
         </div>
       ))}
+      <datalist id="pipe-files-ansible">{filesFor('ansible').map((p) => <option key={p} value={p} />)}</datalist>
+      <datalist id="pipe-files-salt">{filesFor('salt').map((p) => <option key={p} value={p} />)}</datalist>
       <div className="row" style={{ margin: '8px 0' }}>
         <button className="ghost sm" onClick={add}>＋ Add step</button>
         <div className="spacer" />

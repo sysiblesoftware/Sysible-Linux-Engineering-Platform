@@ -138,7 +138,6 @@ function CreateWizard({ onClose, onDone }) {
   const [provider, setProvider] = useState('')
   const [values, setValues] = useState({})
   const [controllerId, setControllerId] = useState('')
-  const [hvTest, setHvTest] = useState(null)   // {ok, output} | 'testing'
   const { wrap, node } = useErr()
 
   useEffect(() => { api('infra/providers').then((d) => {
@@ -169,8 +168,10 @@ function CreateWizard({ onClose, onDone }) {
       </Field>
       <div className="faint" style={{ fontSize: 12, margin: '2px 0 8px' }}>{schema[provider]?.blurb}</div>
 
+      {provider === 'libvirt' && <LibvirtConnect values={values} set={set} />}
+
       <div className="task-palette" style={{ gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-        {opts.map((o) => (
+        {opts.filter((o) => !(provider === 'libvirt' && o.key === 'uri')).map((o) => (
           <Field key={o.key} label={o.label}>
             {o.type === 'select'
               ? <select value={values[o.key] ?? ''} onChange={(e) => set(o.key, e.target.value)}>
@@ -185,24 +186,6 @@ function CreateWizard({ onClose, onDone }) {
           </Field>
         ))}
       </div>
-
-      {provider === 'libvirt' && (
-        <div className="row" style={{ gap: 10, alignItems: 'center', margin: '2px 0 8px' }}>
-          <button className="ghost sm" disabled={hvTest === 'testing' || !values.uri}
-            onClick={() => wrap(async () => {
-              setHvTest('testing')
-              try { setHvTest(await api('infra/test-hypervisor', { method: 'POST', json: { uri: values.uri } })) }
-              catch (e) { setHvTest({ ok: false, output: String(e.message || e) }) }
-            })}>
-            {hvTest === 'testing' ? 'Testing…' : '⚡ Test hypervisor connection'}
-          </button>
-          {hvTest && hvTest !== 'testing' && (
-            <span style={{ fontSize: 12.5, color: hvTest.ok ? 'var(--green-bright)' : 'var(--danger)' }}>
-              {hvTest.ok ? '✓ reachable' : '✗ failed'} — <span className="muted">{hvTest.output}</span>
-            </span>
-          )}
-        </div>
-      )}
 
       <Field label="Auto-enroll new VMs into Controller (optional)">
         <select value={controllerId} onChange={(e) => setControllerId(e.target.value)}>
@@ -220,5 +203,97 @@ function CreateWizard({ onClose, onDone }) {
         onDone(d.project_id, name, d.slug)
       })}>Generate Terraform</button>
     </Modal>
+  )
+}
+
+// Hypervisor connection helper for the libvirt provider. Turns the fiddly
+// qemu+ssh URI + SSH-key dance into: pick Local or Remote, (for remote) enter
+// host + user and click "Get deploy key" — SLEP returns its managed public key
+// with a ready-to-paste install command and assembles the
+// qemu+ssh://user@host/system?keyfile=…&no_verify=1 URI for you. The assembled
+// URI is what the generated Terraform uses; you can still edit it by hand.
+function LibvirtConnect({ values, set }) {
+  const startRemote = /^qemu\+/.test(values.uri || '')
+  const [mode, setMode] = useState(startRemote ? 'remote' : 'local')
+  const [host, setHost] = useState('')
+  const [user, setUser] = useState('root')
+  const [key, setKey] = useState(null)        // {public_key, keyfile}
+  const [hvTest, setHvTest] = useState(null)   // {ok, output} | 'testing'
+  const [copied, setCopied] = useState(false)
+  const { wrap, node } = useErr()
+
+  const buildUri = (m, h, u, k) => {
+    if (m === 'local') return 'qemu:///system'
+    const base = `qemu+ssh://${(u || 'root').trim()}@${(h || '').trim()}/system`
+    const q = []
+    if (k?.keyfile) q.push('keyfile=' + k.keyfile)
+    q.push('no_verify=1')
+    return base + '?' + q.join('&')
+  }
+  // Keep the wizard's uri value in step with the helper's fields. `set` isn't a
+  // dep (it's a fresh closure each render); the field values are what matter.
+  useEffect(() => { set('uri', buildUri(mode, host, user, key)) }, [mode, host, user, key])   // eslint-disable-line
+
+  const cmd = key
+    ? `ssh ${(user || 'root').trim()}@${(host || 'HYPERVISOR').trim()} 'mkdir -p ~/.ssh && chmod 700 ~/.ssh && echo "${key.public_key}" >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys'`
+    : ''
+  const copy = async () => { try { await navigator.clipboard.writeText(cmd); setCopied(true); setTimeout(() => setCopied(false), 1500) } catch { /* ignore */ } }
+
+  return (
+    <div style={{ border: '1px solid var(--line)', borderRadius: 10, padding: 12, margin: '2px 0 12px' }}>
+      <div className="row" style={{ gap: 10, alignItems: 'center' }}>
+        <b style={{ fontSize: 13 }}>Hypervisor connection</b>
+        <select value={mode} onChange={(e) => setMode(e.target.value)} style={{ width: 220 }}>
+          <option value="local">Local host (qemu:///system)</option>
+          <option value="remote">Remote KVM host over SSH</option>
+        </select>
+      </div>
+
+      {mode === 'remote' && (
+        <>
+          <div className="row" style={{ gap: 10, marginTop: 8 }}>
+            <Field label="Host (IP or name)"><input value={host} onChange={(e) => setHost(e.target.value)} placeholder="192.168.8.212" /></Field>
+            <Field label="SSH user"><input value={user} onChange={(e) => setUser(e.target.value)} placeholder="root / admin" /></Field>
+          </div>
+          <div className="row" style={{ gap: 10, alignItems: 'center', marginTop: 2 }}>
+            <button className="ghost sm" onClick={() => wrap(async () => setKey(await api('infra/hypervisor-key', { method: 'POST' })))}>
+              🔑 {key ? 'Regenerate deploy key' : 'Get deploy key'}
+            </button>
+            <span className="faint" style={{ fontSize: 12 }}>SLEP’s managed key — install it on the host once, then this and every future hypervisor just works.</span>
+          </div>
+          {key && (
+            <div style={{ marginTop: 8 }}>
+              <div className="faint" style={{ fontSize: 12, marginBottom: 4 }}>Run this once on the hypervisor (or via SSH from anywhere that can reach it):</div>
+              <div className="row" style={{ gap: 6, alignItems: 'flex-start' }}>
+                <textarea readOnly rows={3} value={cmd} onClick={(e) => e.target.select()}
+                  style={{ fontFamily: 'ui-monospace,monospace', fontSize: 11.5, resize: 'vertical', flex: 1 }} />
+                <button className="ghost sm" onClick={copy}>{copied ? '✓ Copied' : 'Copy'}</button>
+              </div>
+            </div>
+          )}
+        </>
+      )}
+
+      <Field label="Connection URI (assembled — editable)">
+        <input value={values.uri || ''} onChange={(e) => set('uri', e.target.value)}
+          style={{ fontFamily: 'ui-monospace,monospace', fontSize: 12 }} />
+      </Field>
+      <div className="row" style={{ gap: 10, alignItems: 'center' }}>
+        <button className="ghost sm" disabled={hvTest === 'testing' || !values.uri}
+          onClick={() => wrap(async () => {
+            setHvTest('testing')
+            try { setHvTest(await api('infra/test-hypervisor', { method: 'POST', json: { uri: values.uri } })) }
+            catch (e) { setHvTest({ ok: false, output: String(e.message || e) }) }
+          })}>
+          {hvTest === 'testing' ? 'Testing…' : '⚡ Test hypervisor connection'}
+        </button>
+        {hvTest && hvTest !== 'testing' && (
+          <span style={{ fontSize: 12.5, color: hvTest.ok ? 'var(--green-bright)' : 'var(--danger)' }}>
+            {hvTest.ok ? '✓ reachable' : '✗ failed'} — <span className="muted">{hvTest.output}</span>
+          </span>
+        )}
+      </div>
+      {node}
+    </div>
   )
 }

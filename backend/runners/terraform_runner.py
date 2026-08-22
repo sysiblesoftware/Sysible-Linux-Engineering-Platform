@@ -125,22 +125,43 @@ def launch(run_id: int) -> None:
                 cmd = [tool, "destroy", "-input=false", "-auto-approve", "-no-color", *var_args]
             return _common.stream(cmd, workdir, env, log)
 
-        rc = run_action(upgrade=False)
-
-        # Self-heal a stale provider lock: if the action failed with schema-
-        # mismatch errors and a lock file is present, re-init with -upgrade (which
-        # re-resolves the lock against the config's version constraints) and retry
-        # once. This is what makes a `destroy` work again after a provider whose
-        # schema drifted from the config got pinned in .terraform.lock.hcl.
-        if rc != 0 and (workdir / ".terraform.lock.hcl").exists():
+        def _mismatch() -> bool:
             try:
                 tail = log_path.read_text()[-8000:]
             except OSError:
                 tail = ""
-            if any(sig in tail for sig in _SCHEMA_MISMATCH):
-                emit("\n-- provider schema mismatch detected (stale .terraform.lock.hcl?).")
-                emit(f"-- re-resolving providers with `{tool} init -upgrade` and retrying {action} --\n")
-                rc = run_action(upgrade=True)
+            return any(sig in tail for sig in _SCHEMA_MISMATCH)
+
+        rc = run_action(upgrade=False)
+
+        # Self-heal tier 1 — stale provider lock: if the action failed with schema-
+        # mismatch errors and a lock file is present, re-init with -upgrade (which
+        # re-resolves the lock against the config's version constraints) and retry
+        # once. This is what makes a `destroy` work again after a provider whose
+        # schema drifted from the config got pinned in .terraform.lock.hcl.
+        if rc != 0 and (workdir / ".terraform.lock.hcl").exists() and _mismatch():
+            emit("\n-- provider schema mismatch detected (stale .terraform.lock.hcl?).")
+            emit(f"-- re-resolving providers with `{tool} init -upgrade` and retrying {action} --\n")
+            rc = run_action(upgrade=True)
+
+        # Self-heal tier 2 — poisoned provider cache: a corrupt/stub provider plugin
+        # in the project's local .terraform cache survives `-upgrade` (it still
+        # satisfies the version constraint, so init reports "using previously-
+        # installed …" and reuses it). Wipe the .terraform dir + lock and re-init
+        # from scratch so a clean provider is downloaded, then retry once. State
+        # (terraform.tfstate) is deliberately left untouched.
+        if rc != 0 and _mismatch():
+            emit("\n-- still schema-mismatched after -upgrade — the cached provider plugin looks corrupt.")
+            emit("-- clearing the local provider cache (.terraform + lock) and re-initialising clean --\n")
+            shutil.rmtree(workdir / ".terraform", ignore_errors=True)
+            (workdir / ".terraform.lock.hcl").unlink(missing_ok=True)
+            rc = run_action(upgrade=False)
+            if rc != 0 and _mismatch():
+                emit("\n-- STILL schema-mismatched after a clean re-download. The provider your")
+                emit(f"-- {tool} is fetching for dmacvicar/libvirt is not the genuine plugin (its schema")
+                emit("-- rejects the standard libvirt_domain/volume/cloudinit_disk model). Check that")
+                emit("-- this host can reach registry.terraform.io and isn't behind a provider mirror")
+                emit("-- serving a stub — see: terraform providers schema -json --")
 
         emit(f"\n== finished: exit code {rc} ==")
         db.set_run_status(run_id, "success" if rc == 0 else "failed",

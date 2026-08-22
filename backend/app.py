@@ -1399,6 +1399,35 @@ def infra_test_hypervisor(body: dict = Body(...), user: str = Depends(current_us
         return {"ok": False, "output": str(e)}
 
 
+@app.post("/infra/hypervisor-key")
+def infra_hypervisor_key(user: str = Depends(require_operator)):
+    """Ensure SLEP's managed hypervisor SSH key exists (a persistent ed25519 pair
+    under the data volume) and return its public half + the in-container keyfile
+    path. This is what makes remote-KVM setup a two-step flow: the operator drops
+    the returned public key into the hypervisor's authorized_keys, and SLEP builds
+    the `qemu+ssh://…?keyfile=…` URI itself — no manual ssh-keygen or path-guessing.
+    The key lives on the data volume, so it survives image rebuilds."""
+    import shutil
+    key = db.DATA_DIR / "ssh" / "hypervisor"
+    key.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(key.parent, 0o700)
+    except OSError:
+        pass
+    if not key.exists():
+        if not shutil.which("ssh-keygen"):
+            raise HTTPException(status_code=500, detail="ssh-keygen isn't available on the SLEP host.")
+        r = subprocess.run(["ssh-keygen", "-t", "ed25519", "-N", "", "-C", "slep-hypervisor",
+                            "-f", str(key)], capture_output=True, text=True, timeout=30)
+        if r.returncode != 0:
+            raise HTTPException(status_code=500, detail="Couldn't generate the key: " + (r.stderr or "").strip()[:200])
+    try:
+        pub = Path(str(key) + ".pub").read_text().strip()   # ssh-keygen writes <key>.pub
+    except OSError:
+        raise HTTPException(status_code=500, detail="Key generated but its public half couldn't be read.")
+    return {"public_key": pub, "keyfile": str(key)}
+
+
 @app.post("/infra/{project_id}/scaffold")
 def infra_scaffold(project_id: int, body: dict = Body(...), user: str = Depends(current_user)):
     """Scaffold the next cadence stage into an infra project: 'configure' writes a
