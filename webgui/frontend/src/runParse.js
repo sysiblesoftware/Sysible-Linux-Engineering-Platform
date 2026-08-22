@@ -114,5 +114,8 @@ export function parseSalt(text) {
 export function parseRun(engine, text) {
   if (engine === 'terraform') return parseTerraform(text)
   if (engine === 'salt') return parseSalt(text)
+  // The pipeline's auto-inventory pseudo-step has no host/task model — its viz
+  // reads the summary straight from the log, so hand back the raw text.
+  if (engine === 'inventory') return { raw: text || '' }
   return parseAnsible(text)
 }

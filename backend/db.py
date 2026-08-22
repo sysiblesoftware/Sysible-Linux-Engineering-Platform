@@ -975,6 +975,14 @@ def set_run_status(run_id, status, exit_code=None, started=None, finished=None):
         c.execute(f"UPDATE runs SET {', '.join(sets)} WHERE id=?", args)
 
 
+def set_run_inventory(run_id, inventory_id):
+    """Point an already-queued run at an inventory. Used by the pipeline's
+    auto-inventory step to back-fill the inventory built from freshly-applied VMs
+    into the Ansible/Salt steps that follow it in the same sequence."""
+    with _connect() as c:
+        c.execute("UPDATE runs SET inventory_id=? WHERE id=?", (inventory_id, run_id))
+
+
 def get_run(run_id: int):
     with _connect() as c:
         r = c.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()

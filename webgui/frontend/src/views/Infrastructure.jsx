@@ -42,8 +42,11 @@ export default function Infrastructure({ onOpenProject, onOpenRun }) {
     } catch (e) { alert(e.message) }
   }
   // One-click cadence: scaffold configure/maintain (idempotent), then open the
-  // pipeline builder pre-filled with apply → configure → maintain so it runs as a
-  // sequence (pick the inventory/credential for the Ansible/Salt steps, then launch).
+  // pipeline builder pre-filled with apply → build-inventory → configure → maintain
+  // so it runs as a sequence. The Inventory step reads the VMs the apply just
+  // created into this project's inventory and auto-targets the Ansible/Salt steps
+  // at them — so Create flows straight into Configure → Maintain with no manual
+  // inventory hop.
   const cadence = async (r) => {
     try {
       await api(`infra/${r.project_id}/scaffold`, { method: 'POST', json: { stage: 'configure' } })
@@ -52,6 +55,7 @@ export default function Infrastructure({ onOpenProject, onOpenRun }) {
         project: { id: r.project_id, name: r.project_name, slug: r.project_slug },
         steps: [
           { kind: 'terraform', target: 'apply', tool: 'terraform' },
+          { kind: 'inventory', target: 'from VMs' },
           { kind: 'ansible', target: 'configure.yml' },
           { kind: 'salt', target: 'maintain.sls' },
         ],

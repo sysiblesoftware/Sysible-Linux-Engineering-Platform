@@ -15,7 +15,30 @@ const STATUS_COLOR = {
 export default function RunViz({ engine, model, seedHosts }) {
   if (engine === 'terraform') return <TerraformViz model={model} />
   if (engine === 'salt') return <SaltViz model={model} />
+  if (engine === 'inventory') return <InventoryViz model={model} />
   return <AnsibleViz model={model} seedHosts={seedHosts} />
+}
+
+// The pipeline's auto-inventory pseudo-step: no hosts to reach, it just reads the
+// freshly-applied VMs into the project's inventory. Surface the hosts it built and
+// the outcome (parsed from the run log) rather than an empty Ansible grid.
+function InventoryViz({ model }) {
+  const lines = (model.raw || '').split('\n')
+  const built = lines.find((l) => l.includes('Built inventory')) || ''
+  const failed = lines.find((l) => l.trim().startsWith('!!')) || ''
+  return (
+    <div style={{ padding: 10 }}>
+      <div className="pane-title" style={{ marginTop: 0 }}>Build inventory from VMs</div>
+      {failed
+        ? <div className="pill failed" style={{ display: 'inline-block' }}>{failed.replace(/^!!\s*/, '')}</div>
+        : built
+          ? <div style={{ fontSize: 13 }}>✓ {built.trim()}</div>
+          : <div className="muted">Reading the applied VMs into this project’s inventory…</div>}
+      <div className="faint" style={{ fontSize: 12, marginTop: 10 }}>
+        The Ansible/Salt steps that follow in this sequence are pointed at the inventory built here.
+      </div>
+    </div>
+  )
 }
 
 // -------------------------------------------------------------- Ansible

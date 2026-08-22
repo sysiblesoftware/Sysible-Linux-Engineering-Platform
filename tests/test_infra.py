@@ -257,3 +257,63 @@ def test_infra_to_inventory_builds_slep_inventory(client, monkeypatch):
     d2 = client.post(f"/infra/{pid}/inventory", json={}).json()
     assert d2["inventory_id"] == iid
     assert len(client.get(f"/inventories/{iid}/hosts").json()["hosts"]) == 2
+
+
+def test_pipeline_auto_inventory_step_backfills_following_steps(client, monkeypatch):
+    """The cadence 'inventory' pseudo-step reads the applied VMs into the project's
+    inventory and back-fills that inventory_id into the Ansible/Salt steps that
+    follow it in the same sequence — so Create flows into Configure with no manual
+    inventory hop."""
+    import backend.app as appmod
+    import backend.db as db
+    pid = client.post("/infra", json={"name": "cadence", "provider": "libvirt",
+                                     "options": {"count": 1, "base_image": "x", "environment": "prod"}}).json()["project_id"]
+
+    class Out:
+        returncode = 0
+        stdout = '{"sysible_hosts":{"value":[{"name":"c-1","ip":"10.0.0.9","user":"ubuntu"}]}}'
+        stderr = ""
+    monkeypatch.setattr(appmod.subprocess, "run", lambda *a, **k: Out())
+
+    seen = {}
+    # Stub the real engines; each records the inventory_id its run carries at
+    # execution time, so we can prove the inventory step back-filled it.
+    def fake(kind):
+        def _launch(run_id):
+            seen[kind] = db.get_run(run_id).get("inventory_id")
+            db.set_run_status(run_id, "success")
+        return _launch
+    monkeypatch.setitem(appmod.RUNNERS, "terraform", fake("terraform"))
+    monkeypatch.setitem(appmod.RUNNERS, "ansible", fake("ansible"))
+
+    steps = [
+        {"kind": "terraform", "target": "apply", "tool": "tofu"},
+        {"kind": "inventory", "target": "from VMs"},
+        {"kind": "ansible", "target": "configure.yml", "inventory_id": None},
+    ]
+    d = client.post("/pipelines/run", json={"project_id": pid, "steps": steps, "stop_on_failure": True}).json()
+    assert len(d["run_ids"]) == 3
+    import time as _t
+    for _ in range(100):
+        grp = client.get(f"/pipelines/runs/{d['group_id']}").json()["runs"]
+        if grp and all(r["status"] in ("success", "failed", "canceled") for r in grp):
+            break
+        _t.sleep(0.02)
+    grp = client.get(f"/pipelines/runs/{d['group_id']}").json()["runs"]
+    assert [r["status"] for r in grp] == ["success", "success", "success"]
+    assert grp[1]["kind"] == "inventory"
+    # The inventory step built the project's infra inventory...
+    inv = db.find_inventory(pid, "infra")
+    assert inv is not None
+    # ...and the following Ansible step was pointed at it automatically.
+    assert seen["ansible"] == inv["id"]
+
+
+def test_pipeline_inventory_step_allows_empty_target(client):
+    """The inventory pseudo-step needs no target (validation must not reject it)."""
+    pid = client.post("/infra", json={"name": "invonly", "provider": "libvirt",
+                                     "options": {"count": 1, "base_image": "x"}}).json()["project_id"]
+    r = client.post("/pipelines", json={"project_id": pid, "name": "inv step",
+                                        "steps": [{"kind": "inventory", "target": ""}]})
+    assert r.status_code == 200
+    assert r.json()["pipeline"]["steps"][0]["kind"] == "inventory"

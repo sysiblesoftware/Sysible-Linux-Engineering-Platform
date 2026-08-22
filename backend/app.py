@@ -910,13 +910,17 @@ def _dispatch_run(project, kind, target, inventory_id, credential_id, extra_vars
     return run_id
 
 
+# Pipeline steps are the real engines, plus the "inventory" pseudo-step: it has no
+# runner of its own — the worker reads the just-applied VMs into the project's
+# inventory and points the following Ansible/Salt steps at it.
 def _validate_steps(steps):
     if not steps:
         raise HTTPException(status_code=400, detail="A pipeline needs at least one step.")
     for i, s in enumerate(steps, 1):
-        if s.get("kind") not in RUNNERS:
-            raise HTTPException(status_code=400, detail=f"Step {i}: unknown engine '{s.get('kind')}'.")
-        if not str(s.get("target") or "").strip():
+        kind = s.get("kind")
+        if kind not in RUNNERS and kind != "inventory":
+            raise HTTPException(status_code=400, detail=f"Step {i}: unknown engine '{kind}'.")
+        if kind != "inventory" and not str(s.get("target") or "").strip():
             raise HTTPException(status_code=400, detail=f"Step {i}: a target is required.")
 
 
@@ -931,8 +935,9 @@ def _dispatch_pipeline(project, steps, actor, stop_on_failure=True):
     prepared = []
     for s in steps:
         kind = s.get("kind")
+        target = str(s.get("target") or "").strip() or ("from VMs" if kind == "inventory" else "")
         rid = db.create_run(
-            project["id"], kind, str(s.get("target") or "").strip(),
+            project["id"], kind, target,
             inventory_id=s.get("inventory_id"), credential_id=s.get("credential_id"),
             extra_vars=s.get("extra_vars") or {}, created_by=actor, group_id=group_id,
         )
@@ -948,7 +953,18 @@ def _dispatch_pipeline(project, steps, actor, stop_on_failure=True):
 
     def worker():
         for i, (rid, kind) in enumerate(prepared):
-            RUNNERS[kind](rid)            # blocking — runs to completion
+            if kind == "inventory":
+                iid = _run_inventory_step(rid, project)
+                # Back-fill the inventory just built from the applied VMs into the
+                # following Ansible/Salt steps that don't already name one, so the
+                # sequence can configure/maintain the machines it just created.
+                if iid:
+                    for rid2, kind2 in prepared[i + 1:]:
+                        r2 = db.get_run(rid2)
+                        if kind2 in ("ansible", "salt") and r2 and not r2.get("inventory_id"):
+                            db.set_run_inventory(rid2, iid)
+            else:
+                RUNNERS[kind](rid)        # blocking — runs to completion
             r = db.get_run(rid)
             if stop_on_failure and (not r or r.get("status") != "success"):
                 for rid2, _ in prepared[i + 1:]:
@@ -958,6 +974,36 @@ def _dispatch_pipeline(project, steps, actor, stop_on_failure=True):
     db.log_audit("pipeline_launched", actor, f"{len(prepared)} steps on {project['name']}")
     threading.Thread(target=worker, daemon=True).start()
     return [rid for rid, _ in prepared], group_id
+
+
+def _run_inventory_step(run_id: int, project) -> int | None:
+    """The 'inventory' pseudo-step: read the just-applied VMs into the project's
+    infra inventory, writing a normal run log + status so it shows in the sequence
+    visualizer. Returns the inventory id on success (for back-filling later steps),
+    or None on failure."""
+    log_path = db.run_log_path(run_id)
+    db.set_run_status(run_id, "running", started=int(time.time()))
+    with log_path.open("w", buffering=1) as log:
+        def emit(m):
+            log.write(m if m.endswith("\n") else m + "\n")
+
+        emit(f"== SLEP run #{run_id} · project '{project['name']}' · build inventory from applied VMs ==")
+        meta = db.get_infra(project["id"])
+        if not meta:
+            emit("!! Not an infrastructure project — nothing to read.")
+            db.set_run_status(run_id, "failed", exit_code=2, finished=int(time.time()))
+            return None
+        try:
+            iid, name, n = _build_infra_inventory(project, meta)
+        except HTTPException as e:
+            emit(f"!! {e.detail}")
+            db.set_run_status(run_id, "failed", exit_code=2, finished=int(time.time()))
+            return None
+        emit(f"Built inventory “{name}” (#{iid}) with {n} host(s).")
+        emit("The following Ansible/Salt steps in this sequence will target it.")
+        emit("\n== finished: exit code 0 ==")
+        db.set_run_status(run_id, "success", exit_code=0, finished=int(time.time()))
+        return iid
 
 
 @app.post("/pipelines/run")
@@ -1451,22 +1497,17 @@ def _infra_applied_hosts(project_id: int):
     return hosts
 
 
-@app.post("/infra/{project_id}/inventory")
-def infra_to_inventory(project_id: int, user: str = Depends(require_operator)):
-    """After apply, read the created VMs (sysible_hosts) into a SLEP Ansible
-    inventory for this project (name → address = ip, ansible_user set, grouped by
-    the environment tag). Reuses/refreshes the project's infra inventory on re-run,
-    so the Configure (Ansible) step can immediately target the new machines."""
-    project = db.get_project(project_id)
-    meta = db.get_infra(project_id)
-    if not project or not meta:
-        raise HTTPException(status_code=404, detail="Not an infrastructure project.")
-    hosts = _infra_applied_hosts(project_id)
-    inv = db.find_inventory(project_id, "infra")
-    if inv:
-        iid = inv["id"]
-    else:
-        iid = db.create_inventory(f"{project['name']} (VMs)", project_id=project_id, source="infra")
+def _build_infra_inventory(project, meta):
+    """Read the applied VMs (sysible_hosts) into the project's 'infra' inventory
+    (created once, refreshed on re-run): name → address = ip, ansible_user set,
+    grouped by the environment tag. Returns (inventory_id, name, host_count).
+    Raises HTTPException (via _infra_applied_hosts) when apply hasn't produced
+    hosts yet. Shared by the manual '→ Inventory' action and the pipeline's
+    auto-inventory step."""
+    hosts = _infra_applied_hosts(project["id"])
+    inv = db.find_inventory(project["id"], "infra")
+    iid = inv["id"] if inv else db.create_inventory(
+        f"{project['name']} (VMs)", project_id=project["id"], source="infra")
     group = ansible_runner._ansible_group(meta.get("environment", "")) if meta.get("environment") else ""
     n = 0
     for h in hosts:
@@ -1476,8 +1517,22 @@ def infra_to_inventory(project_id: int, user: str = Depends(require_operator)):
             continue
         db.upsert_host(iid, nm, ip, groups=group, variables={"ansible_user": huser}, source="infra")
         n += 1
+    return iid, db.get_inventory(iid)["name"], n
+
+
+@app.post("/infra/{project_id}/inventory")
+def infra_to_inventory(project_id: int, user: str = Depends(require_operator)):
+    """After apply, read the created VMs (sysible_hosts) into a SLEP Ansible
+    inventory for this project. Reuses/refreshes the project's infra inventory on
+    re-run, so the Configure (Ansible) step can immediately target the new
+    machines."""
+    project = db.get_project(project_id)
+    meta = db.get_infra(project_id)
+    if not project or not meta:
+        raise HTTPException(status_code=404, detail="Not an infrastructure project.")
+    iid, name, n = _build_infra_inventory(project, meta)
     db.log_audit("infra_to_inventory", user, f"{n} host(s) into inventory #{iid}")
-    return {"inventory_id": iid, "name": db.get_inventory(iid)["name"], "hosts": n}
+    return {"inventory_id": iid, "name": name, "hosts": n}
 
 
 @app.post("/infra/{project_id}/enroll")
