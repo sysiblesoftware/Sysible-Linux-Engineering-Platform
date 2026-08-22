@@ -42,6 +42,32 @@ def test_libvirt_provider_pinned_to_compatible_major():
     assert "network_interface {" in main and "disk {" in main
 
 
+def test_deploy_credential_key_baked_into_cloudinit(client):
+    """Picking an SSH deploy credential bakes its public key into the VMs' cloud-init
+    so the same credential can log in for the Configure/Maintain steps."""
+    import shutil
+    if not shutil.which("ssh-keygen"):
+        import pytest
+        pytest.skip("ssh-keygen not available")
+    import subprocess as sp
+    import tempfile
+    import os as _os
+    # Make a throwaway keypair; store the private half as an SSH credential.
+    with tempfile.TemporaryDirectory() as td:
+        kp = _os.path.join(td, "k")
+        sp.run(["ssh-keygen", "-t", "ed25519", "-N", "", "-f", kp], check=True, capture_output=True)
+        priv = open(kp).read()
+        pub = open(kp + ".pub").read().strip()
+    cred = client.post("/credentials", json={"name": "vm-login", "kind": "ssh", "username": "clouduser", "secret": priv}).json()
+
+    pid = client.post("/infra", json={"name": "keyed", "provider": "libvirt",
+                                      "options": {"count": 1, "base_image": "x", "ssh_user": "clouduser"},
+                                      "deploy_credential_id": cred["id"]}).json()["project_id"]
+    ci = client.get(f"/projects/{pid}/file?path=cloudinit.cfg").json()["content"]
+    assert pub in ci                                   # the derived public key is present
+    assert "[]" not in ci                              # not an empty authorized_keys list
+
+
 def test_cloudinit_injects_controller_key():
     files = infra.generate("aws", {"ssh_user": "ubuntu", "ssh_public_key": "ssh-ed25519 DEPLOY"},
                            controller_key="ssh-ed25519 CTRLKEY")

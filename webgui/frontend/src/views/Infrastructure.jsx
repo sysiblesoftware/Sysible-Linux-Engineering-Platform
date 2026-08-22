@@ -138,6 +138,8 @@ function CreateWizard({ onClose, onDone }) {
   const [provider, setProvider] = useState('')
   const [values, setValues] = useState({})
   const [controllerId, setControllerId] = useState('')
+  const [creds, setCreds] = useState([])
+  const [deployCredId, setDeployCredId] = useState('')
   const { wrap, node } = useErr()
 
   useEffect(() => { api('infra/providers').then((d) => {
@@ -146,6 +148,9 @@ function CreateWizard({ onClose, onDone }) {
     setProvider(first); seed(d.providers, first)
   }) }, [])
   useEffect(() => { api('controllers').then((d) => setControllers(d.controllers)) }, [])
+  // SSH key credentials only — those are the ones we can derive a public key from
+  // and bake into the VMs so SLEP's Ansible/Salt can log in.
+  useEffect(() => { api('credentials').then((d) => setCreds((d.credentials || []).filter((c) => c.kind === 'ssh'))) }, [])
 
   const seed = (providers, p) => {
     const v = {}
@@ -187,18 +192,30 @@ function CreateWizard({ onClose, onDone }) {
         ))}
       </div>
 
+      <Field label="Deploy SSH credential (so SLEP can log in to configure the VMs)">
+        <select value={deployCredId} onChange={(e) => setDeployCredId(e.target.value)}>
+          <option value="">None (VMs won’t be reachable by SLEP unless you add a key another way)</option>
+          {creds.map((c) => <option key={c.id} value={c.id}>{c.name}{c.username ? ` (${c.username})` : ''}</option>)}
+        </select>
+      </Field>
+      <div className="faint" style={{ fontSize: 12 }}>
+        SLEP bakes this credential’s <b>public</b> key into the VMs’ cloud-init, so the same credential you pick for the cadence’s Ansible/Salt steps can SSH in. Pick an <b>SSH key</b> credential.
+        {creds.length === 0 && <> No SSH key credentials yet — add one under <b>Credentials</b> first.</>}
+      </div>
+
       <Field label="Auto-enroll new VMs into Controller (optional)">
         <select value={controllerId} onChange={(e) => setControllerId(e.target.value)}>
           <option value="">Don’t enroll</option>
           {controllers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
         </select>
       </Field>
-      <div className="faint" style={{ fontSize: 12 }}>If chosen, the Controller’s SSH key is baked into the VMs’ cloud-init so it can reach them, and “Enroll →” registers them after apply.</div>
+      <div className="faint" style={{ fontSize: 12 }}>If chosen, the Controller’s SSH key is also baked into the VMs’ cloud-init so it can reach them, and “Enroll →” registers them after apply.</div>
       {node}
       <button className="primary" onClick={() => wrap(async () => {
         if (!name.trim()) throw new Error('Give it a name.')
         const d = await api('infra', { method: 'POST', json: {
           name, provider, options: values, controller_id: controllerId ? Number(controllerId) : null,
+          deploy_credential_id: deployCredId ? Number(deployCredId) : null,
         } })
         onDone(d.project_id, name, d.slug)
       })}>Generate Terraform</button>

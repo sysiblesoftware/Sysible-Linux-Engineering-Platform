@@ -556,12 +556,15 @@ def _outputs(resource: str, ip_attr: str, ssh_user: str) -> str:
             f'  }} ]\n}}\n')
 
 
-def generate(provider: str, spec: dict, controller_key: str = "") -> dict:
-    """Return {filename: content} for the chosen provider + options. `controller_key`
-    (if given) is injected into cloud-init so a Controller can SSH the VM after boot."""
+def generate(provider: str, spec: dict, controller_key: str = "", deploy_key: str = "") -> dict:
+    """Return {filename: content} for the chosen provider + options. Keys baked into
+    cloud-init (so the machine is reachable after boot): the operator's typed
+    `ssh_public_key`, `deploy_key` (the public half of a chosen SLEP SSH credential —
+    what lets SLEP's own Ansible/Salt log in), and `controller_key` (so a connected
+    Controller can reach it). Each is a separate authorized_keys entry."""
     if provider not in _RENDERERS:
         raise ValueError(f"unknown provider '{provider}'")
-    keys = [spec.get("ssh_public_key", ""), controller_key]
+    keys = [spec.get("ssh_public_key", ""), deploy_key, controller_key]
     return _RENDERERS[provider](spec, keys)
 
 

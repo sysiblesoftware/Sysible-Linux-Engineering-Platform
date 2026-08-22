@@ -1463,11 +1463,32 @@ def infra_list(user: str = Depends(current_user)):
     return {"infra": db.list_infra()}
 
 
+def _derive_public_key(private_key: str) -> str:
+    """Derive the OpenSSH public key from a private key (`ssh-keygen -y`). Returns ''
+    when it can't — no ssh-keygen, a malformed key, or a passphrase-protected one
+    (which fails non-interactively). Never writes the key anywhere persistent."""
+    import shutil
+    import tempfile
+    if not private_key or not shutil.which("ssh-keygen"):
+        return ""
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "k"
+        p.write_text(private_key if private_key.endswith("\n") else private_key + "\n")
+        try:
+            os.chmod(p, 0o600)
+            r = subprocess.run(["ssh-keygen", "-y", "-f", str(p)],
+                               capture_output=True, text=True, timeout=15)
+        except Exception:  # noqa: BLE001
+            return ""
+        return r.stdout.strip() if r.returncode == 0 else ""
+
+
 @app.post("/infra")
 def infra_create(body: dict = Body(...), user: str = Depends(require_operator)):
-    """Generate a Terraform VM project from the wizard selections. If a Controller
-    is chosen, its SSH key is baked into the VMs' cloud-init so it can reach them
-    after boot, and the project is tagged for one-click enroll."""
+    """Generate a Terraform VM project from the wizard selections. A chosen deploy
+    SSH credential's public key is baked into the VMs' cloud-init (so SLEP's own
+    Ansible/Salt can log in), as is a chosen Controller's key (so it can reach them
+    after boot); the project is tagged for one-click enroll."""
     name = str(body.get("name") or "").strip()
     provider = str(body.get("provider") or "")
     options = body.get("options") or {}
@@ -1487,8 +1508,23 @@ def infra_create(body: dict = Body(...), user: str = Depends(require_operator)):
         except controller_import.ControllerImportError:
             controller_key = ""   # non-fatal: generate anyway, enroll can install the key later
 
+    # Deploy credential: bake the public half of a SLEP SSH credential into the VMs
+    # so the same credential you pick for the cadence's Ansible/Salt steps can log in.
+    deploy_key = ""
+    deploy_cred_id = body.get("deploy_credential_id")
+    if deploy_cred_id:
+        cred = db.get_credential(int(deploy_cred_id), include_secret=True)
+        if not cred:
+            raise HTTPException(status_code=404, detail="Deploy credential not found.")
+        if cred.get("kind") != "ssh":
+            raise HTTPException(status_code=400, detail="The deploy credential must be an SSH key credential (not a password/cloud one).")
+        deploy_key = _derive_public_key(cred.get("secret") or "")
+        if not deploy_key:
+            raise HTTPException(status_code=400,
+                                detail="Couldn't derive a public key from that credential — it must be an unencrypted SSH private key.")
+
     try:
-        files = infra.generate(provider, options, controller_key)
+        files = infra.generate(provider, options, controller_key, deploy_key=deploy_key)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
