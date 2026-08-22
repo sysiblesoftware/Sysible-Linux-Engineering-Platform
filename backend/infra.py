@@ -222,9 +222,15 @@ resource "digitalocean_droplet" "vm" {{
 
 def _render_libvirt(spec, keys):
     ssh_user = _opt(spec, "ssh_user", "ubuntu")
+    # Pin to the 0.7.x line. dmacvicar/libvirt 0.9.x is a terraform-plugin-framework
+    # rewrite that changed the HCL surface (nested blocks like disk/network_interface/
+    # console became nested *attributes*, `cloudinit` moved, `type`/`meta_data` became
+    # required) — so the block syntax this file emits is rejected by 0.9.x. A bare
+    # "~> 0.7" allows any 0.x < 1.0 (it would resolve to 0.9.x); "~> 0.7.0" locks to
+    # 0.7.z, which matches the resource model generated below.
     main = f'''terraform {{
   required_providers {{
-    libvirt = {{ source = "dmacvicar/libvirt", version = "~> 0.7" }}
+    libvirt = {{ source = "dmacvicar/libvirt", version = "~> 0.7.0" }}
   }}
 }}
 

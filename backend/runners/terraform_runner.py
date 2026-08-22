@@ -157,11 +157,11 @@ def launch(run_id: int) -> None:
             (workdir / ".terraform.lock.hcl").unlink(missing_ok=True)
             rc = run_action(upgrade=False)
             if rc != 0 and _mismatch():
-                emit("\n-- STILL schema-mismatched after a clean re-download. The provider your")
-                emit(f"-- {tool} is fetching for dmacvicar/libvirt is not the genuine plugin (its schema")
-                emit("-- rejects the standard libvirt_domain/volume/cloudinit_disk model). Check that")
-                emit("-- this host can reach registry.terraform.io and isn't behind a provider mirror")
-                emit("-- serving a stub — see: terraform providers schema -json --")
+                emit("\n-- STILL schema-mismatched after a clean re-download. This is a provider")
+                emit("-- major-version schema change, not a bad download: the config's HCL syntax")
+                emit("-- doesn't match the resolved provider version. Pin the provider to a compatible")
+                emit("-- version in required_providers (e.g. a tighter version constraint), then apply.")
+                emit("-- (dmacvicar/libvirt 0.9.x rewrote its resource schema vs 0.7/0.8.) --")
 
         emit(f"\n== finished: exit code {rc} ==")
         db.set_run_status(run_id, "success" if rc == 0 else "failed",

@@ -30,6 +30,18 @@ def test_generate_all_providers_emit_normalized_output():
         assert "sysible_hosts" in files["outputs.tf"]
 
 
+def test_libvirt_provider_pinned_to_compatible_major():
+    """The generated libvirt HCL uses 0.7/0.8 block syntax (disk/network_interface/
+    console blocks), so the provider must be pinned to 0.7.x — a bare '~> 0.7' would
+    resolve to the 0.9.x plugin-framework rewrite and reject that syntax."""
+    files = infra.generate("libvirt", {"count": 1, "base_image": "x", "ssh_user": "ubuntu"})
+    main = files["main.tf"]
+    assert 'source = "dmacvicar/libvirt"' in main
+    assert 'version = "~> 0.7.0"' in main       # 0.7.z only, not 0.8/0.9
+    # sanity: the block syntax the pin protects
+    assert "network_interface {" in main and "disk {" in main
+
+
 def test_cloudinit_injects_controller_key():
     files = infra.generate("aws", {"ssh_user": "ubuntu", "ssh_public_key": "ssh-ed25519 DEPLOY"},
                            controller_key="ssh-ed25519 CTRLKEY")
