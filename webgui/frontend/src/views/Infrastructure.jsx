@@ -23,6 +23,14 @@ export default function Infrastructure({ onOpenProject, onOpenRun }) {
       alert(`Enrolled ${d.enrolled}/${d.total} into ${d.controller}:\n\n${lines}`)
     } catch (e) { alert(e.message) }
   }
+  // Cadence steps 2 & 3: scaffold a starter Ansible playbook / Salt state into the
+  // infra project and open it in the IDE, so Create flows into Configure → Maintain.
+  const scaffold = async (r, stage) => {
+    try {
+      const d = await api(`infra/${r.project_id}/scaffold`, { method: 'POST', json: { stage } })
+      onOpenProject({ id: r.project_id, name: r.project_name, slug: r.project_slug, openFile: d.path })
+    } catch (e) { alert(e.message) }
+  }
 
   return (
     <>
@@ -43,10 +51,12 @@ export default function Infrastructure({ onOpenProject, onOpenRun }) {
                 <td className="muted">{r.provider}</td>
                 <td className="muted">{r.controller_id ? `Controller #${r.controller_id}${r.environment ? ' · ' + r.environment : ''}` : '—'}</td>
                 <td className="row">
-                  {writable && <button className="ghost sm" onClick={() => run(r, 'plan')}>Plan</button>}
-                  {writable && <button className="ghost sm" onClick={() => run(r, 'apply')}>Apply</button>}
+                  {writable && <button className="ghost sm" title="Terraform/OpenTofu plan" onClick={() => run(r, 'plan')}>Plan</button>}
+                  {writable && <button className="ghost sm" title="Terraform/OpenTofu apply — create the VMs" onClick={() => run(r, 'apply')}>Apply</button>}
                   {writable && <button className="danger ghost sm" onClick={() => run(r, 'destroy')}>Destroy</button>}
                   {writable && r.controller_id ? <button className="primary sm" onClick={() => enroll(r)}>Enroll →</button> : null}
+                  {writable && <button className="ghost sm" title="Scaffold an Ansible playbook and open it (Configure)" onClick={() => scaffold(r, 'configure')}>Configure</button>}
+                  {writable && <button className="ghost sm" title="Scaffold a Salt state and open it (Maintain)" onClick={() => scaffold(r, 'maintain')}>Maintain</button>}
                 </td>
               </tr>
             ))}

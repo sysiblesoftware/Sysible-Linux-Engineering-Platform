@@ -1230,6 +1230,27 @@ def infra_test_hypervisor(body: dict = Body(...), user: str = Depends(current_us
         return {"ok": False, "output": str(e)}
 
 
+@app.post("/infra/{project_id}/scaffold")
+def infra_scaffold(project_id: int, body: dict = Body(...), user: str = Depends(current_user)):
+    """Scaffold the next cadence stage into an infra project: 'configure' writes a
+    starter Ansible playbook, 'maintain' a starter Salt state — so an operator goes
+    straight from built VMs to configuring/maintaining them. Won't overwrite an
+    existing file. Returns the path to open in the IDE."""
+    project = db.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    try:
+        fname, content = infra.scaffold(str(body.get("stage") or ""), project.get("name", ""))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="stage must be 'configure' or 'maintain'.")
+    dest = db.project_dir(project_id) / fname
+    created = not dest.exists()
+    if created:
+        dest.write_text(content)
+        db.touch_project(project_id)
+    return {"path": fname, "created": created}
+
+
 @app.get("/infra")
 def infra_list(user: str = Depends(current_user)):
     return {"infra": db.list_infra()}

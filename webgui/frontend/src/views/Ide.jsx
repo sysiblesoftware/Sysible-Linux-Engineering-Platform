@@ -312,6 +312,9 @@ export default function Ide({ project, onBack, onRun }) {
 
   const loadTree = useCallback(() => api(`projects/${project.id}/files`).then((d) => setTree(d.files)), [project.id])
   useEffect(() => { loadTree() }, [loadTree])
+  // Opened with a target file (e.g. the cadence "Configure"/"Maintain" scaffold)?
+  // Open it once on mount so the operator lands directly in that file.
+  useEffect(() => { if (project.openFile) open(project.openFile) }, [project.id])
 
   const open = async (p) => { const d = await api(`projects/${project.id}/file?path=${encodeURIComponent(p)}`); setPath(p); setContent(d.content); setSaved(true) }
   // Open the project's ansible.cfg — the equivalent-of-ansible.cfg configuration

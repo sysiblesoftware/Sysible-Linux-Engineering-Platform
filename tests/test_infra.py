@@ -122,3 +122,21 @@ def test_test_hypervisor_without_virsh_is_graceful(client, monkeypatch):
     assert r.status_code == 200
     body = r.json()
     assert body["ok"] is False and "libvirt-clients" in body["output"]
+
+
+def test_scaffold_configure_and_maintain(client):
+    pid = client.post("/infra", json={"name": "fleet-a", "provider": "libvirt",
+                                     "options": {"count": 1, "base_image": "x"}}).json()["project_id"]
+    # Configure → an Ansible playbook lands in the project.
+    d = client.post(f"/infra/{pid}/scaffold", json={"stage": "configure"}).json()
+    assert d["path"] == "configure.yml" and d["created"] is True
+    txt = client.get(f"/projects/{pid}/file?path=configure.yml").json()["content"]
+    assert "hosts: all" in txt and "ansible.builtin" in txt
+    # Idempotent — second call doesn't clobber.
+    assert client.post(f"/infra/{pid}/scaffold", json={"stage": "configure"}).json()["created"] is False
+    # Maintain → a Salt state lands.
+    m = client.post(f"/infra/{pid}/scaffold", json={"stage": "maintain"}).json()
+    assert m["path"] == "maintain.sls"
+    assert "pkg.installed" in client.get(f"/projects/{pid}/file?path=maintain.sls").json()["content"]
+    # Unknown stage → 400.
+    assert client.post(f"/infra/{pid}/scaffold", json={"stage": "bogus"}).status_code == 400

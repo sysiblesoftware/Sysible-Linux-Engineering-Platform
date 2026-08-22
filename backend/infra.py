@@ -557,3 +557,61 @@ def generate(provider: str, spec: dict, controller_key: str = "") -> dict:
         raise ValueError(f"unknown provider '{provider}'")
     keys = [spec.get("ssh_public_key", ""), controller_key]
     return _RENDERERS[provider](spec, keys)
+
+
+# --- Lifecycle cadence scaffolds -------------------------------------------
+# After Create (Terraform/OpenTofu), the recommended flow is Configure (Ansible)
+# then Maintain (Salt). These write a sensible starter file into the same project
+# so the operator can go straight from built VMs to configuring and maintaining
+# them, without hand-typing the scaffolding.
+_CONFIGURE_YML = """\
+---
+# Configure — Ansible. Runs after the VMs exist (Create step). Target the hosts
+# you enrolled (pick the inventory built from your Controller environment), and
+# install / set up software here. Run it from the IDE: press Run -> Ansible.
+- name: Configure {name}
+  hosts: all
+  become: true
+  gather_facts: true
+  tasks:
+    - name: Ping the hosts
+      ansible.builtin.ping:
+
+    - name: Install base packages
+      ansible.builtin.package:
+        name:
+          - htop
+          - curl
+        state: present
+"""
+
+_MAINTAIN_SLS = """\
+# Maintain - Salt. Keep the hosts in a known state over time: declare what must
+# always be true (packages, services, files) and re-apply it on a schedule. Run
+# it from the IDE: press Run -> Salt (salt-ssh state.apply / highstate).
+base_packages:
+  pkg.installed:
+    - pkgs:
+      - htop
+      - curl
+
+# Example - ensure a service stays running:
+#sshd_running:
+#  service.running:
+#    - name: ssh
+#    - enable: true
+"""
+
+_SCAFFOLDS = {
+    "configure": ("configure.yml", lambda name: _CONFIGURE_YML.format(name=name or "hosts")),
+    "maintain": ("maintain.sls", lambda name: _MAINTAIN_SLS),
+}
+
+
+def scaffold(stage: str, project_name: str = "") -> tuple:
+    """(filename, content) for a cadence stage: 'configure' (Ansible) | 'maintain' (Salt)."""
+    entry = _SCAFFOLDS.get((stage or "").strip().lower())
+    if not entry:
+        raise ValueError(f"unknown stage '{stage}'")
+    fname, render = entry
+    return fname, render(project_name)
