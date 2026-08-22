@@ -130,6 +130,8 @@ def launch(run_id: int) -> None:
         var_args = []
         for k, v in extra_vars.items():
             var_args += ["-var", f"{k}={v}"]
+        # Secret -var values must not be echoed into the (viewer-readable) run log.
+        redact = [str(v) for v in extra_vars.values() if str(v)]
 
         def run_action(upgrade: bool) -> int:
             init = [tool, "init", "-input=false", "-no-color"]
@@ -145,7 +147,7 @@ def launch(run_id: int) -> None:
                 cmd = [tool, "apply", "-input=false", "-auto-approve", "-no-color", *var_args]
             else:  # destroy
                 cmd = [tool, "destroy", "-input=false", "-auto-approve", "-no-color", *var_args]
-            return _common.stream(cmd, workdir, env, log)
+            return _common.stream(cmd, workdir, env, log, redact=redact)
 
         def _mismatch() -> bool:
             try:

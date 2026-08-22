@@ -407,6 +407,52 @@ def test_hypervisor_key_is_managed_and_idempotent(client):
     assert d2["public_key"] == d["public_key"]     # stable across calls
 
 
+def test_saved_pipeline_strips_become_password(client):
+    """Security: a saved pipeline is readable by any authenticated user, so a
+    per-step sudo/become password must not be persisted (was disclosed to viewers)."""
+    import json as _json
+    pid = client.post("/infra", json={"name": "secpipe", "provider": "libvirt",
+                                      "options": {"count": 1, "base_image": "x"}}).json()["project_id"]
+    saved = client.post("/pipelines", json={"project_id": pid, "name": "p", "steps": [
+        {"kind": "ansible", "target": "site.yml", "become_password": "hunter2secret"}]}).json()["pipeline"]
+    assert all("become_password" not in s for s in saved["steps"])
+    listed = client.get("/pipelines").json()["pipelines"]
+    p = next(x for x in listed if x["id"] == saved["id"])
+    assert "hunter2secret" not in _json.dumps(p)
+
+
+def test_shown_cmd_redacts_secret_var_values():
+    """Security: secret -var/-e/pillar values must be masked in the (viewer-readable)
+    run-log command echo."""
+    from backend.runners._common import shown_cmd
+    out = shown_cmd(["terraform", "apply", "-var", "db_password=hunter2secret", "-var", "network=homelab"],
+                    ["hunter2secret", "homelab"])
+    assert "hunter2secret" not in out and "homelab" not in out and "***" in out
+    assert shown_cmd(["x", "a=b"], ["b"]) == "x a=b"          # trivially short values left alone
+
+
+def test_generated_hcl_escapes_user_values():
+    """Security/correctness: a quote/newline in a user value can't break out of the
+    HCL string and inject a resource (or corrupt the file)."""
+    evil = 'app"\nresource "null_resource" "pwn" {\n  provisioner "local-exec" { command = "id" }\n}\nvariable "j" {\n  default = "x'
+    files = infra.generate("libvirt", {"count": 1, "base_image": "x", "name_prefix": evil, "ssh_user": evil})
+    tf = files["variables.tf"] + files["main.tf"] + files["outputs.tf"]
+    # The payload survives only as escaped TEXT inside a string literal — never as a
+    # real HCL block: no unescaped `resource "null_resource"` / `provisioner "..."`.
+    assert 'resource "null_resource"' not in tf
+    assert 'provisioner "local-exec"' not in tf
+    assert '\\"' in files["variables.tf"]                    # proves the quote was escaped
+
+
+def test_cloudinit_no_directive_injection():
+    """Security: a newline in an SSH key / user can't inject a top-level cloud-init
+    directive (e.g. runcmd) that would run as root on the VM."""
+    files = infra.generate("libvirt", {"count": 1, "base_image": "x", "ssh_user": "ubuntu",
+                                       "ssh_public_key": "ssh-ed25519 AAAA\nruncmd:\n  - [sh, -c, id]"})
+    lines = files["cloudinit.cfg"].split("\n")
+    assert not any(ln.startswith("runcmd") for ln in lines)   # no column-0 injected directive
+
+
 def test_pipeline_inventory_step_allows_empty_target(client):
     """The inventory pseudo-step needs no target (validation must not reject it)."""
     pid = client.post("/infra", json={"name": "invonly", "provider": "libvirt",

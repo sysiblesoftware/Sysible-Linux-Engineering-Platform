@@ -25,6 +25,7 @@ import time
 from pathlib import Path
 
 from .. import db, keydist, projcfg, vault
+from . import _common
 
 # Transient per-run sudo passwords (never persisted): set just before launch(),
 # consumed once inside it. Keyed by run id; same process, so a plain dict is fine.
@@ -283,8 +284,9 @@ def launch(run_id: int) -> None:
                 env.setdefault("ANSIBLE_HOST_KEY_CHECKING", "False")
             env.setdefault("ANSIBLE_FORCE_COLOR", "1")
 
+            # Secret -e values must not be echoed into the (viewer-readable) log.
             emit(f"== SLEP run #{run_id} · project '{project['name']}' ==")
-            emit(f"$ {' '.join(cmd)}")
+            emit(f"$ {_common.shown_cmd(cmd, [str(v) for v in extra_vars.values() if str(v)])}")
             emit(f"-- inventory: {len(hosts)} host(s); credential: "
                  f"{credential['name'] if credential else 'none'}"
                  f"{'; jump host: ' + bastion if bastion else ''} --\n")

@@ -7,10 +7,24 @@ from __future__ import annotations
 import subprocess
 
 
-def stream(cmd, cwd, env, log) -> int:
+def shown_cmd(cmd, redact=()) -> str:
+    """Render a command line for the run log with secret substrings masked. Run
+    logs are readable by any authenticated user (viewers included), so values
+    passed inline (e.g. `-var k=secret` / `-e k=secret` / salt `k=secret`) must not
+    be echoed verbatim. `redact` is the list of secret VALUE strings to mask."""
+    s = " ".join(cmd)
+    for r in redact:
+        r = str(r)
+        if len(r) >= 3:                 # don't mask trivially-short/empty values
+            s = s.replace(r, "***")
+    return s
+
+
+def stream(cmd, cwd, env, log, redact=()) -> int:
     """Run `cmd` in `cwd`, streaming combined stdout/stderr into the open `log`
-    file. Returns the exit code (127 if the binary isn't installed)."""
-    log.write(f"$ {' '.join(cmd)}\n")
+    file. Returns the exit code (127 if the binary isn't installed). `redact` masks
+    secret values in the echoed command line (see shown_cmd)."""
+    log.write(f"$ {shown_cmd(cmd, redact)}\n")
     log.flush()
     try:
         proc = subprocess.Popen(

@@ -924,6 +924,16 @@ def _validate_steps(steps):
             raise HTTPException(status_code=400, detail=f"Step {i}: a target is required.")
 
 
+# Saved pipelines are stored verbatim (steps JSON) and readable by ANY authenticated
+# user, viewers included, via GET /pipelines — so a saved step must never carry a
+# secret. Strip the per-step sudo/become password before persisting: a saved
+# pipeline draws its become password from the attached credential (encrypted at
+# rest) at run time. Ad-hoc /pipelines/run still passes it transiently (in-memory,
+# never stored).
+def _strip_saved_pipeline_secrets(steps):
+    return [{k: v for k, v in (s or {}).items() if k != "become_password"} for s in (steps or [])]
+
+
 def _dispatch_pipeline(project, steps, actor, stop_on_failure=True):
     """Run an ordered list of steps in succession. Every step becomes a normal run
     row (queued up front so the whole sequence is visible immediately), sharing one
@@ -1043,7 +1053,7 @@ def create_saved_pipeline(body: dict = Body(...), user: str = Depends(current_us
         raise HTTPException(status_code=400, detail="A pipeline name is required.")
     steps = body.get("steps") or []
     _validate_steps(steps)
-    pid = db.create_pipeline(project["id"], name, steps, bool(body.get("stop_on_failure", True)))
+    pid = db.create_pipeline(project["id"], name, _strip_saved_pipeline_secrets(steps), bool(body.get("stop_on_failure", True)))
     db.log_audit("pipeline_saved", user, f"#{pid} '{name}' on {project['name']}")
     return {"pipeline": db.get_pipeline(pid)}
 
@@ -1055,6 +1065,7 @@ def edit_saved_pipeline(pipeline_id: int, body: dict = Body(...), user: str = De
     steps = body.get("steps")
     if steps is not None:
         _validate_steps(steps)
+        steps = _strip_saved_pipeline_secrets(steps)
     db.update_pipeline(pipeline_id, name=(str(body["name"]).strip() if "name" in body else None),
                        steps=steps, stop_on_failure=body.get("stop_on_failure"))
     return {"pipeline": db.get_pipeline(pipeline_id)}
@@ -1513,9 +1524,14 @@ def _derive_public_key(private_key: str) -> str:
         return ""
     with tempfile.TemporaryDirectory() as td:
         p = Path(td) / "k"
-        p.write_text(private_key if private_key.endswith("\n") else private_key + "\n")
+        data = (private_key if private_key.endswith("\n") else private_key + "\n").encode()
+        # Atomic create at 0600 (never a 0644 window) — mirrors the runners' _write_key.
+        fd = os.open(str(p), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         try:
-            os.chmod(p, 0o600)
+            os.write(fd, data)
+        finally:
+            os.close(fd)
+        try:
             r = subprocess.run(["ssh-keygen", "-y", "-f", str(p)],
                                capture_output=True, text=True, timeout=15)
         except Exception:  # noqa: BLE001

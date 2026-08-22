@@ -134,8 +134,36 @@ def _opt(spec, key, default=""):
     return spec.get(key, default)
 
 
+def _hcl_inner(s) -> str:
+    """Escape a value for embedding inside an HCL double-quoted string (no quotes
+    added): backslash, quote, newline, and the ${ / %{ interpolation sigils — so a
+    user value can't break out of the string or be treated as an HCL interpolation.
+    Also a correctness fix: a legitimate value containing a quote no longer corrupts
+    the generated file."""
+    s = "" if s is None else str(s)
+    return (s.replace("\\", "\\\\").replace('"', '\\"')
+             .replace("\n", "\\n").replace("\r", "")
+             .replace("${", "$${").replace("%{", "%%{"))
+
+
+def _hcl(s) -> str:
+    """A safe HCL double-quoted string literal (quotes included) for a user value."""
+    return f'"{_hcl_inner(s)}"'
+
+
+def _one_line(s) -> str:
+    """First line only, trimmed — for values dropped into hand-built cloud-init YAML
+    (a username / an SSH key), so a newline can't inject a top-level cloud-init
+    directive (e.g. runcmd)."""
+    parts = str(s or "").splitlines()
+    return (parts[0].strip() if parts else "")
+
+
 def _cloudinit(ssh_user: str, keys: list[str]) -> str:
-    clean = [k.strip() for k in keys if k and k.strip()]
+    # Single-line each value so nothing can inject a top-level cloud-init directive.
+    ssh_user = _one_line(ssh_user) or "user"
+    clean = [_one_line(k) for k in keys if k and k.strip()]
+    clean = [k for k in clean if k]
     lines = ["#cloud-config", "users:", f"  - name: {ssh_user}",
              "    sudo: ALL=(ALL) NOPASSWD:ALL", "    shell: /bin/bash",
              "    ssh_authorized_keys:"]
@@ -303,7 +331,7 @@ resource "libvirt_domain" "vm" {{
   value = [ for i, d in libvirt_domain.vm : {{
     name = "${{var.name_prefix}}-${{i + 1}}"
     ip   = try(d.network_interface[0].addresses[0], "")
-    user = "{ssh_user}"
+    user = {_hcl(ssh_user)}
   }} ]
 }}
 '''
@@ -313,7 +341,7 @@ resource "libvirt_domain" "vm" {{
 
 def _render_proxmox(spec, keys):
     ssh_user = _opt(spec, "ssh_user", "ubuntu")
-    key_hcl = ", ".join(f'"{k.strip()}"' for k in keys if k and k.strip()) or ""
+    key_hcl = ", ".join(_hcl(k.strip()) for k in keys if k and k.strip()) or ""
     main = f'''terraform {{
   required_providers {{
     proxmox = {{ source = "bpg/proxmox", version = "~> 0.60" }}
@@ -352,7 +380,7 @@ resource "proxmox_virtual_environment_vm" "vm" {{
       }}
     }}
     user_account {{
-      username = "{ssh_user}"
+      username = {_hcl(ssh_user)}
       keys     = [{key_hcl}]
     }}
   }}
@@ -374,7 +402,7 @@ resource "proxmox_virtual_environment_vm" "vm" {{
   value = [ for i, v in proxmox_virtual_environment_vm.vm : {{
     name = "${{var.name_prefix}}-${{i + 1}}"
     ip   = try(v.ipv4_addresses[1][0], "")
-    user = "{ssh_user}"
+    user = {_hcl(ssh_user)}
   }} ]
 }}
 '''
@@ -385,7 +413,7 @@ def _render_gcp(spec, keys):
     ssh_user = _opt(spec, "ssh_user", "ubuntu")
     # GCE injects SSH keys via instance metadata `ssh-keys` (newline-separated
     # "user:key" lines) — no cloud-init file needed.
-    ssh_keys = "\\n".join(f"{ssh_user}:{k.strip()}" for k in keys if k and k.strip())
+    ssh_keys = "\\n".join(f"{_hcl_inner(ssh_user)}:{_hcl_inner(k.strip())}" for k in keys if k and k.strip())
     main = f'''terraform {{
   required_providers {{
     google = {{ source = "hashicorp/google", version = "~> 5.0" }}
@@ -437,7 +465,7 @@ resource "google_compute_instance" "vm" {{
   value = [ for i, v in google_compute_instance.vm : {{
     name = "${{var.name_prefix}}-${{i + 1}}"
     ip   = try(v.network_interface[0].access_config[0].nat_ip, "")
-    user = "{ssh_user}"
+    user = {_hcl(ssh_user)}
   }} ]
 }}
 '''
@@ -538,7 +566,7 @@ resource "azurerm_linux_virtual_machine" "vm" {{
   value = [ for i, v in azurerm_linux_virtual_machine.vm : {{
     name = "${{var.name_prefix}}-${{i + 1}}"
     ip   = try(v.public_ip_address, azurerm_public_ip.pip[i].ip_address, "")
-    user = "{ssh_user}"
+    user = {_hcl(ssh_user)}
   }} ]
 }}
 '''
@@ -555,7 +583,7 @@ def _vars(defs: dict) -> str:
     out = []
     for name, (typ, default) in defs.items():
         if typ == "string":
-            dv = f'"{default}"'
+            dv = _hcl(default)          # escaped — user values can't break out of the literal
         else:
             dv = str(default)
         out.append(f'variable "{name}" {{\n  type    = {typ}\n  default = {dv}\n}}\n')
@@ -567,7 +595,7 @@ def _outputs(resource: str, ip_attr: str, ssh_user: str) -> str:
             f'  value = [ for i, r in {resource} : {{\n'
             f'    name = "${{var.name_prefix}}-${{i + 1}}"\n'
             f'    ip   = r.{ip_attr}\n'
-            f'    user = "{ssh_user}"\n'
+            f'    user = {_hcl(ssh_user)}\n'
             f'  }} ]\n}}\n')
 
 

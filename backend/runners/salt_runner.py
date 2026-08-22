@@ -119,7 +119,9 @@ def launch(run_id: int) -> None:
             emit(f"-- roster: {len(hosts)} host(s); credential: "
                  f"{credential['name'] if credential else 'none'}"
                  f"{'; test mode (dry-run)' if dry else ''} --")
-            rc = _common.stream(cmd, workdir, dict(os.environ), log)
+            # Secret pillar/kwarg values must not be echoed into the viewer-readable log.
+            rc = _common.stream(cmd, workdir, dict(os.environ), log,
+                                redact=[str(v) for v in extra_vars.values() if str(v)])
             emit(f"\n== finished: exit code {rc} ==")
             db.set_run_status(run_id, "success" if rc == 0 else "failed",
                               exit_code=rc, finished=int(time.time()))
