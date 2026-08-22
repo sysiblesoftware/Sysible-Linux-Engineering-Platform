@@ -942,13 +942,31 @@ export function PipelineModal({ project, currentFile, initialSteps, initialName,
   const [invs, setInvs] = useState([]); const [creds, setCreds] = useState([])
   const [stopOnFail, setStopOnFail] = useState(stopDefault !== undefined ? stopDefault : true)
   const [name, setName] = useState(initialName || '')
-  const blank = (over) => ({ kind: 'ansible', target: currentFile || 'site.yml', inventory_id: '', credential_id: '', tool: 'terraform', ...over })
+  const blank = (over) => ({ kind: 'ansible', target: currentFile || 'site.yml', inventory_id: '', credential_id: '', tool: 'terraform',
+    vars: '', becomePw: '', limit: '', startAt: '', saltTest: false, ...over })
   const [steps, setSteps] = useState(initialSteps && initialSteps.length ? initialSteps.map((s) => blank(s)) : [blank()])
+  const [openSteps, setOpenSteps] = useState(new Set())   // steps whose ⚙ options panel is expanded
+  const toggleOpts = (i) => setOpenSteps((s) => { const n = new Set(s); n.has(i) ? n.delete(i) : n.add(i); return n })
+  // Parse a step's "KEY=value per line" box → object (→ -var / -e / pillar); salt
+  // test mode rides in as test=True.
+  const stepVars = (st) => {
+    const out = {}
+    for (const raw of (st.vars || '').split('\n')) {
+      const l = raw.trim(); if (!l || l.startsWith('#')) continue
+      const i = l.indexOf('='); if (i > 0) out[l.slice(0, i).trim()] = l.slice(i + 1).trim()
+    }
+    if (st.kind === 'salt' && st.saltTest) out.test = 'True'
+    return out
+  }
   const payloadOf = () => steps.map((st) => ({
     kind: st.kind, target: st.target,
     inventory_id: (st.kind === 'terraform' || st.kind === 'inventory') ? null : (st.inventory_id ? Number(st.inventory_id) : null),
     credential_id: st.kind === 'inventory' ? null : (st.credential_id ? Number(st.credential_id) : null),
     tool: st.kind === 'terraform' ? st.tool : '',
+    extra_vars: stepVars(st),
+    become_password: st.kind === 'ansible' ? (st.becomePw || '') : '',
+    limit: st.kind === 'ansible' ? (st.limit || '').trim() : '',
+    start_at_task: st.kind === 'ansible' ? (st.startAt || '').trim() : '',
   }))
   const { wrap, node } = useErr()
 
@@ -972,7 +990,8 @@ export function PipelineModal({ project, currentFile, initialSteps, initialName,
     <Modal title="Run sequence" onClose={onClose} wide>
       <div className="faint" style={{ fontSize: 12, marginBottom: 8 }}>Steps run one after another. The cadence is create (Terraform/OpenTofu) → configure (Ansible) → maintain (Salt).</div>
       {steps.map((st, i) => (
-        <div key={i} className="pipe-step">
+        <React.Fragment key={i}>
+        <div className="pipe-step">
           <span className="pipe-n">{i + 1}</span>
           <select value={st.kind} onChange={(e) => upd(i, { kind: e.target.value, target: defTarget(e.target.value) })} style={{ width: 130 }}>
             <option value="ansible">Ansible</option>
@@ -998,11 +1017,36 @@ export function PipelineModal({ project, currentFile, initialSteps, initialName,
                 </select>
               </>)}
           <div className="row" style={{ gap: 2 }}>
+            {st.kind !== 'inventory' && <button className={'ghost sm' + (openSteps.has(i) ? ' active' : '')} title="Variables & options" onClick={() => toggleOpts(i)}>⚙</button>}
             <button className="ghost sm" title="Move up" onClick={() => move(i, -1)} disabled={i === 0}>↑</button>
             <button className="ghost sm" title="Move down" onClick={() => move(i, 1)} disabled={i === steps.length - 1}>↓</button>
             <button className="danger ghost sm" title="Remove step" onClick={() => del(i)} disabled={steps.length === 1}>✕</button>
           </div>
         </div>
+        {openSteps.has(i) && st.kind !== 'inventory' && (
+          <div className="pipe-step-opts">
+            <Field label={st.kind === 'terraform' ? 'Variables — KEY=value per line (→ -var)'
+              : st.kind === 'salt' ? 'Pillar / kwargs — key=value per line' : 'Extra vars — KEY=value per line (→ -e)'}>
+              <textarea rows={2} value={st.vars} onChange={(e) => upd(i, { vars: e.target.value })}
+                placeholder={st.kind === 'terraform' ? 'network=homelab' : 'env=staging'}
+                style={{ fontFamily: 'ui-monospace,monospace', fontSize: 12, resize: 'vertical' }} />
+            </Field>
+            {st.kind === 'ansible' && (
+              <div className="row" style={{ gap: 8 }}>
+                <Field label="Limit (--limit)"><input value={st.limit} onChange={(e) => upd(i, { limit: e.target.value })} placeholder="web-01, db-*" /></Field>
+                <Field label="Start at task"><input value={st.startAt} onChange={(e) => upd(i, { startAt: e.target.value })} placeholder="exact task name" /></Field>
+                <Field label="Become (sudo) password"><input type="password" value={st.becomePw} autoComplete="off" onChange={(e) => upd(i, { becomePw: e.target.value })} /></Field>
+              </div>
+            )}
+            {st.kind === 'salt' && (
+              <label className="row" style={{ gap: 7, fontSize: 13, cursor: 'pointer' }}>
+                <input type="checkbox" checked={!!st.saltTest} onChange={(e) => upd(i, { saltTest: e.target.checked })} style={{ width: 'auto' }} />
+                Test mode (dry-run — <span className="mono">test=True</span>)
+              </label>
+            )}
+          </div>
+        )}
+        </React.Fragment>
       ))}
       <datalist id="pipe-files-ansible">{filesFor('ansible').map((p) => <option key={p} value={p} />)}</datalist>
       <datalist id="pipe-files-salt">{filesFor('salt').map((p) => <option key={p} value={p} />)}</datalist>
