@@ -808,6 +808,18 @@ def create_inventory(name, project_id=None, source="manual", bastion=""):
         return cur.lastrowid
 
 
+def find_inventory(project_id, source):
+    """First inventory for a project with a given source (e.g. 'infra') — lets the
+    'build inventory from applied VMs' action reuse/refresh one instead of piling
+    up duplicates on every apply."""
+    with _connect() as c:
+        r = c.execute(
+            "SELECT * FROM inventories WHERE project_id=? AND source=? ORDER BY id LIMIT 1",
+            (project_id, source),
+        ).fetchone()
+        return dict(r) if r else None
+
+
 def set_inventory_bastion(iid: int, bastion: str):
     with _connect() as c:
         c.execute("UPDATE inventories SET bastion=? WHERE id=?", (bastion, iid))

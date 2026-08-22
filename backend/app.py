@@ -1425,6 +1425,61 @@ def infra_create(body: dict = Body(...), user: str = Depends(require_operator)):
     return {"project_id": pid, "slug": slug, "files": list(files), "provider": provider}
 
 
+def _infra_applied_hosts(project_id: int):
+    """Read the created VMs from `terraform output` (the sysible_hosts list). Works
+    for either terraform or tofu state (both write the same output). Raises
+    HTTPException with a clear message when apply hasn't produced hosts yet."""
+    import shutil
+    workdir = db.project_dir(project_id)
+    engines.ensure_path()
+    tool = "terraform" if shutil.which("terraform") else ("tofu" if shutil.which("tofu") else "terraform")
+    try:
+        out = subprocess.run([tool, "output", "-json"], cwd=str(workdir),
+                             capture_output=True, text=True, timeout=60)
+    except FileNotFoundError:
+        raise HTTPException(status_code=400, detail="Terraform/OpenTofu isn't installed — install it, then apply first.")
+    if out.returncode != 0:
+        raise HTTPException(status_code=400,
+                            detail="No outputs yet — run apply first. " + (out.stderr or "").strip()[:200])
+    try:
+        data = json.loads(out.stdout or "{}")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Couldn't parse the Terraform/OpenTofu outputs.")
+    hosts = (data.get("sysible_hosts") or {}).get("value") or []
+    if not hosts:
+        raise HTTPException(status_code=400, detail="No hosts in the outputs (apply may not be complete).")
+    return hosts
+
+
+@app.post("/infra/{project_id}/inventory")
+def infra_to_inventory(project_id: int, user: str = Depends(require_operator)):
+    """After apply, read the created VMs (sysible_hosts) into a SLEP Ansible
+    inventory for this project (name → address = ip, ansible_user set, grouped by
+    the environment tag). Reuses/refreshes the project's infra inventory on re-run,
+    so the Configure (Ansible) step can immediately target the new machines."""
+    project = db.get_project(project_id)
+    meta = db.get_infra(project_id)
+    if not project or not meta:
+        raise HTTPException(status_code=404, detail="Not an infrastructure project.")
+    hosts = _infra_applied_hosts(project_id)
+    inv = db.find_inventory(project_id, "infra")
+    if inv:
+        iid = inv["id"]
+    else:
+        iid = db.create_inventory(f"{project['name']} (VMs)", project_id=project_id, source="infra")
+    group = ansible_runner._ansible_group(meta.get("environment", "")) if meta.get("environment") else ""
+    n = 0
+    for h in hosts:
+        nm, ip = str(h.get("name") or ""), str(h.get("ip") or "")
+        huser = str(h.get("user") or meta.get("ssh_user") or "root")
+        if not nm or not ip:
+            continue
+        db.upsert_host(iid, nm, ip, groups=group, variables={"ansible_user": huser}, source="infra")
+        n += 1
+    db.log_audit("infra_to_inventory", user, f"{n} host(s) into inventory #{iid}")
+    return {"inventory_id": iid, "name": db.get_inventory(iid)["name"], "hosts": n}
+
+
 @app.post("/infra/{project_id}/enroll")
 def infra_enroll(project_id: int, user: str = Depends(require_operator)):
     """After `terraform apply`, read the created VMs (the sysible_hosts output) and
@@ -1437,23 +1492,7 @@ def infra_enroll(project_id: int, user: str = Depends(require_operator)):
     ctrl = db.get_controller(meta["controller_id"], include_key=True)
     if not ctrl:
         raise HTTPException(status_code=400, detail="The connected Controller no longer exists.")
-    workdir = db.project_dir(project_id)
-    engines.ensure_path()
-    try:
-        out = subprocess.run(["terraform", "output", "-json"], cwd=str(workdir),
-                             capture_output=True, text=True, timeout=60)
-    except FileNotFoundError:
-        raise HTTPException(status_code=400, detail="Terraform isn't installed — install it, then apply first.")
-    if out.returncode != 0:
-        raise HTTPException(status_code=400,
-                            detail="No Terraform outputs yet — run apply first. " + (out.stderr or "").strip()[:200])
-    try:
-        data = json.loads(out.stdout or "{}")
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Couldn't parse Terraform outputs.")
-    hosts = (data.get("sysible_hosts") or {}).get("value") or []
-    if not hosts:
-        raise HTTPException(status_code=400, detail="No hosts in the Terraform output (apply may not be complete).")
+    hosts = _infra_applied_hosts(project_id)
 
     results, ok_n = [], 0
     for h in hosts:

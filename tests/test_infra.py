@@ -229,3 +229,31 @@ def test_saved_pipeline_needs_name(client):
     pid = client.post("/infra", json={"name": "svc2", "provider": "libvirt",
                                      "options": {"count": 1, "base_image": "x"}}).json()["project_id"]
     assert client.post("/pipelines", json={"project_id": pid, "steps": [{"kind": "ansible", "target": "x"}]}).status_code == 400
+
+
+def test_infra_to_inventory_builds_slep_inventory(client, monkeypatch):
+    """After apply, the created VMs are read into a SLEP Ansible inventory
+    (name→address, ansible_user, grouped by environment), reusable on re-run."""
+    import backend.app as appmod
+    pid = client.post("/infra", json={"name": "web", "provider": "libvirt",
+                                     "options": {"count": 2, "base_image": "x", "environment": "stage web"}}).json()["project_id"]
+
+    class Out:
+        returncode = 0
+        stdout = '{"sysible_hosts":{"value":[{"name":"web-1","ip":"10.0.0.11","user":"ubuntu"},{"name":"web-2","ip":"10.0.0.12","user":"ubuntu"}]}}'
+        stderr = ""
+    monkeypatch.setattr(appmod.subprocess, "run", lambda *a, **k: Out())
+
+    d = client.post(f"/infra/{pid}/inventory", json={}).json()
+    assert d["hosts"] == 2 and d["name"].endswith("(VMs)")
+    iid = d["inventory_id"]
+    hosts = client.get(f"/inventories/{iid}/hosts").json()["hosts"]
+    byname = {h["name"]: h for h in hosts}
+    assert set(byname) == {"web-1", "web-2"}
+    assert byname["web-1"]["address"] == "10.0.0.11"
+    assert byname["web-1"]["variables"].get("ansible_user") == "ubuntu"
+    assert byname["web-1"]["groups"] == "stage_web"        # sanitized for Ansible
+    # Re-run reuses the same inventory (no duplicate), refreshes hosts.
+    d2 = client.post(f"/infra/{pid}/inventory", json={}).json()
+    assert d2["inventory_id"] == iid
+    assert len(client.get(f"/inventories/{iid}/hosts").json()["hosts"]) == 2

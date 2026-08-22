@@ -25,6 +25,14 @@ export default function Infrastructure({ onOpenProject, onOpenRun }) {
       alert(`Enrolled ${d.enrolled}/${d.total} into ${d.controller}:\n\n${lines}`)
     } catch (e) { alert(e.message) }
   }
+  // Read the applied VMs (terraform/tofu output) into a SLEP Ansible inventory, so
+  // the Configure/Maintain (Ansible/Salt) steps can target them. Run after apply.
+  const toInventory = async (r) => {
+    try {
+      const d = await api(`infra/${r.project_id}/inventory`, { method: 'POST' })
+      alert(`Built inventory “${d.name}” with ${d.hosts} host(s).\nIt's now selectable in Ansible/Salt runs and pipelines.`)
+    } catch (e) { alert(e.message) }
+  }
   // Cadence steps 2 & 3: scaffold a starter Ansible playbook / Salt state into the
   // infra project and open it in the IDE, so Create flows into Configure → Maintain.
   const scaffold = async (r, stage) => {
@@ -73,6 +81,7 @@ export default function Infrastructure({ onOpenProject, onOpenRun }) {
                   {writable && <button className="ghost sm" title="Terraform/OpenTofu plan" onClick={() => run(r, 'plan')}>Plan</button>}
                   {writable && <button className="ghost sm" title="Terraform/OpenTofu apply — create the VMs" onClick={() => run(r, 'apply')}>Apply</button>}
                   {writable && <button className="danger ghost sm" onClick={() => run(r, 'destroy')}>Destroy</button>}
+                  {writable && <button className="ghost sm" title="Read the applied VMs into a SLEP Ansible inventory" onClick={() => toInventory(r)}>→ Inventory</button>}
                   {writable && r.controller_id ? <button className="primary sm" onClick={() => enroll(r)}>Enroll →</button> : null}
                   {writable && <button className="ghost sm" title="Scaffold an Ansible playbook and open it (Configure)" onClick={() => scaffold(r, 'configure')}>Configure</button>}
                   {writable && <button className="ghost sm" title="Scaffold a Salt state and open it (Maintain)" onClick={() => scaffold(r, 'maintain')}>Maintain</button>}
