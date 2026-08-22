@@ -1377,9 +1377,15 @@ def infra_providers(user: str = Depends(current_user)):
 def infra_test_hypervisor(body: dict = Body(...), user: str = Depends(current_user)):
     """Probe a libvirt (KVM/QEMU) hypervisor connection before applying — runs a
     read-only `virsh -c <uri> version` so the operator can confirm reachability
-    (local qemu:///system, or a remote qemu+ssh://host). Never mutates anything."""
+    (local qemu:///system, or a remote qemu+ssh://host). When `network`/`pool` are
+    given, also verifies those exist and are active — the two most common apply
+    blockers (`can't retrieve network 'default'`, missing storage pool) — so they're
+    caught in seconds instead of minutes into an apply. Never mutates anything."""
+    import re
     import shutil
     uri = str(body.get("uri") or "").strip()
+    network = str(body.get("network") or "").strip()
+    pool = str(body.get("pool") or "").strip()
     if not uri:
         raise HTTPException(status_code=400, detail="uri is required.")
     if not shutil.which("virsh"):
@@ -1397,9 +1403,43 @@ def infra_test_hypervisor(body: dict = Body(...), user: str = Depends(current_us
         )
         ok = p.returncode == 0
         out = (p.stdout + p.stderr).strip()
-        if ok and not out:
-            out = "connected."
-        return {"ok": ok, "output": out or "no output"}
+        if not ok:
+            return {"ok": False, "output": out or "connection failed"}
+        out = out or "connected."
+
+        def avail_names(listsub):
+            try:
+                r = subprocess.run(["virsh", "-c", uri, "--readonly", listsub, "--all", "--name"],
+                                   capture_output=True, text=True, timeout=20, env=env)
+                return [x.strip() for x in r.stdout.split("\n") if x.strip()]
+            except Exception:  # noqa: BLE001
+                return []
+
+        # Preflight the resources the apply needs: the named network + storage pool
+        # must exist and be active, or `libvirt_domain` / `libvirt_volume` fail. On a
+        # miss, list what IS available so the operator knows what to use (e.g. this
+        # host has 'homelab', not 'default').
+        for label, sub, listsub, name in (
+                ("network", "net-info", "net-list", network),
+                ("storage pool", "pool-info", "pool-list", pool)):
+            if not name:
+                continue
+            try:
+                c2 = subprocess.run(["virsh", "-c", uri, "--readonly", sub, name],
+                                    capture_output=True, text=True, timeout=20, env=env)
+            except subprocess.TimeoutExpired:
+                out += f"\n• {label} '{name}': check timed out"
+                continue
+            if c2.returncode != 0:
+                avail = avail_names(listsub)
+                out += f"\n• {label} '{name}': ✗ MISSING" + (f" — available: {', '.join(avail)}" if avail else " (none defined)")
+                ok = False
+            elif not re.search(r"Active:\s+yes", c2.stdout):
+                out += f"\n• {label} '{name}': ✗ defined but INACTIVE — start it (virsh {sub.split('-')[0]}-start {name})"
+                ok = False
+            else:
+                out += f"\n• {label} '{name}': ✓"
+        return {"ok": ok, "output": out}
     except subprocess.TimeoutExpired:
         return {"ok": False, "output":
                 "timed out after 25s — the hypervisor didn't respond. For qemu+ssh:// check SSH reachability "

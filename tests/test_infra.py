@@ -194,6 +194,37 @@ def test_scaffold_configure_and_maintain(client):
     assert client.post(f"/infra/{pid}/scaffold", json={"stage": "bogus"}).status_code == 400
 
 
+def test_test_hypervisor_preflights_network_and_pool(client, monkeypatch):
+    """When network/pool are given, the probe verifies they exist + are active and
+    fails (ok=False) on a missing one — catching 'can't retrieve network' before a
+    long apply."""
+    import shutil
+    import backend.app as appmod
+    monkeypatch.setattr(shutil, "which", lambda b: "/usr/bin/virsh")
+
+    class R:
+        def __init__(self, rc, out):
+            self.returncode, self.stdout, self.stderr = rc, out, ""
+
+    def fake_run(cmd, **k):
+        if "version" in cmd:
+            return R(0, "Compiled against library: libvirt 8.0.0")
+        if "net-info" in cmd:
+            return R(1, "error: failed to get network 'default'")     # missing
+        if "net-list" in cmd:
+            return R(0, "homelab\n")                                   # what IS available
+        if "pool-info" in cmd:
+            return R(0, "Name: default\nState: running\nActive:         yes\n")
+        return R(0, "")
+    monkeypatch.setattr(appmod.subprocess, "run", fake_run)
+
+    d = client.post("/infra/test-hypervisor", json={"uri": "qemu:///system", "network": "default", "pool": "default"}).json()
+    assert d["ok"] is False
+    assert "network 'default'" in d["output"] and "MISSING" in d["output"]
+    assert "available: homelab" in d["output"]                        # points at the real one
+    assert "storage pool 'default': ✓" in d["output"]
+
+
 def test_pipeline_runs_steps_in_sequence(client, monkeypatch):
     """A pipeline creates a run per step and executes them in order; a failing
     step cancels the rest when stop_on_failure is set."""

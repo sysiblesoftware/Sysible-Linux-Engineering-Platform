@@ -299,14 +299,14 @@ function LibvirtConnect({ values, set }) {
         <button className="ghost sm" disabled={hvTest === 'testing' || !values.uri}
           onClick={() => wrap(async () => {
             setHvTest('testing')
-            try { setHvTest(await api('infra/test-hypervisor', { method: 'POST', json: { uri: values.uri } })) }
+            try { setHvTest(await api('infra/test-hypervisor', { method: 'POST', json: { uri: values.uri, network: values.network, pool: values.pool } })) }
             catch (e) { setHvTest({ ok: false, output: String(e.message || e) }) }
           })}>
           {hvTest === 'testing' ? 'Testing…' : '⚡ Test hypervisor connection'}
         </button>
         {hvTest && hvTest !== 'testing' && (
           <span style={{ fontSize: 12.5, color: hvTest.ok ? 'var(--green-bright)' : 'var(--danger)' }}>
-            {hvTest.ok ? '✓ reachable' : '✗ failed'} — <span className="muted">{hvTest.output}</span>
+            {hvTest.ok ? '✓ reachable' : '✗ failed'} — <span className="muted" style={{ whiteSpace: 'pre-wrap' }}>{hvTest.output}</span>
           </span>
         )}
       </div>
