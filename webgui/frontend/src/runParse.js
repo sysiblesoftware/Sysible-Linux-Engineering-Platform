@@ -75,8 +75,13 @@ export function parseTerraform(text) {
     else if ((m = line.match(/^(\S+):\s*Creating\.\.\./))) { res(m[1]).action = 'create'; res(m[1]).status = 'in-progress' }
     else if ((m = line.match(/^(\S+):\s*Modifying\.\.\./))) { res(m[1]).action = 'update'; res(m[1]).status = 'in-progress' }
     else if ((m = line.match(/^(\S+):\s*Destroying\.\.\./))) { res(m[1]).action = 'destroy'; res(m[1]).status = 'in-progress' }
-    else if ((m = line.match(/^(\S+):\s*(Creation|Modifications|Destruction) complete/))) { res(m[1]).status = 'complete' }
-    else if ((m = line.match(/^Plan:\s*(\d+) to add,\s*(\d+) to change,\s*(\d+) to destroy/))) {
+    // "addr: Still creating... [1m20s elapsed]" — keep the live elapsed so the viz
+    // can show how long a slow resource (a volume pulling a base image) is taking.
+    else if ((m = line.match(/^(\S+):\s*Still (?:creating|modifying|destroying)\.\.\.\s*\[(.+?)(?:\s+elapsed)?\]/))) {
+      const r = res(m[1]); r.status = 'in-progress'; r.elapsed = m[2]
+    } else if ((m = line.match(/^(\S+):\s*(?:Creation|Modifications|Destruction) complete(?:\s+after\s+(\S+))?(?:\s*\[id=(.+?)\])?/))) {
+      const r = res(m[1]); r.status = 'complete'; r.elapsed = null; if (m[2]) r.took = m[2]; if (m[3]) r.id = m[3]
+    } else if ((m = line.match(/^Plan:\s*(\d+) to add,\s*(\d+) to change,\s*(\d+) to destroy/))) {
       plan = { add: +m[1], change: +m[2], destroy: +m[3] }
     } else if ((m = line.match(/Apply complete!\s*Resources:\s*(\d+) added,\s*(\d+) changed,\s*(\d+) destroyed/))) {
       applied = { add: +m[1], change: +m[2], destroy: +m[3] }

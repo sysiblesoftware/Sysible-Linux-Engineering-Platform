@@ -232,41 +232,171 @@ function ServerIcon({ cx, cy }) {
 }
 
 // ------------------------------------------------------------ Terraform
+// Terraform resources for a VM build come indexed per machine — libvirt_domain.vm[0],
+// libvirt_volume.disk[0], libvirt_cloudinit_disk.ci[0] — so we group by that [N]
+// index into "machines" and show each machine building (like the Ansible host grid):
+// a SLEP → machines flow up top, then a card per machine with its components' live
+// status + elapsed. Resources with no index (networks, resource groups) are shown
+// as shared infrastructure.
+const TF_STATUS_COLOR = { complete: 'var(--ok,#63c869)', 'in-progress': 'var(--warn,#e0a83b)', planned: '#7d8ca3', error: 'var(--err,#e5534b)' }
+
+// Friendly component label from a resource address.
+function compKind(addr) {
+  const type = (addr.split('.')[0] || '').toLowerCase()
+  if (type.includes('domain') || type.includes('instance') || type.includes('droplet') || (type.includes('virtual_machine') && !type.includes('interface'))) return 'machine'
+  if (type.includes('cloudinit') || type.includes('cloud_init')) return 'cloud-init'
+  if (type.includes('volume') || type.includes('disk')) return 'disk'
+  if (type.includes('network_interface') || type.includes('_nic')) return 'NIC'
+  if (type.includes('public_ip')) return 'public IP'
+  if (type.includes('network') || type.includes('subnet') || type.includes('vnet')) return 'network'
+  if (type.includes('resource_group')) return 'resource group'
+  return type.replace(/^[a-z]+_/, '').replace(/_/g, ' ')
+}
+const aggStatus = (rs) => rs.some((r) => r.status === 'error') ? 'error'
+  : rs.every((r) => r.status === 'complete') ? 'complete'
+    : rs.some((r) => r.status === 'in-progress') ? 'in-progress' : 'planned'
+
 function TerraformViz({ model }) {
   const sum = model.applied || model.plan
-  const label = model.applied ? 'Applied' : model.plan ? 'Planned' : 'Working…'
-  const list = Object.entries(model.resources).map(([addr, r]) => ({ addr, ...r }))
-  const ACT = { create: ['+', 'var(--ok,#63c869)'], update: ['~', 'var(--warn,#e0a83b)'], destroy: ['-', 'var(--err,#e5534b)'], replace: ['±', '#c678dd'], noop: ['·', '#7d8ca3'] }
+  const label = model.applied ? 'Applied' : model.errored ? 'Error' : model.plan ? (Object.values(model.resources).some((r) => r.status !== 'planned') ? 'Applying…' : 'Planned') : 'Working…'
+
+  // Group resources by their trailing [N] index → one machine each; the rest is
+  // shared infrastructure.
+  const machines = {}, loose = []
+  for (const [addr, r] of Object.entries(model.resources)) {
+    const idx = addr.match(/\[(\d+)\]\s*$/)
+    if (idx) { const k = idx[1]; (machines[k] || (machines[k] = { key: k, comps: [] })).comps.push({ addr, kind: compKind(addr), ...r }) }
+    else loose.push({ addr, kind: compKind(addr), ...r })
+  }
+  const mlist = Object.values(machines).sort((a, b) => Number(a.key) - Number(b.key))
+    .map((m) => ({ ...m, status: aggStatus(m.comps) }))
+  const compOrder = { disk: 0, 'cloud-init': 1, NIC: 2, machine: 3 }
+  const sortComps = (cs) => [...cs].sort((a, b) => (compOrder[a.kind] ?? 5) - (compOrder[b.kind] ?? 5))
 
   return (
     <div className="viz">
       <div className="viz-head">
-        <div style={{ fontWeight: 600 }}>{label}{model.errored ? ' · error' : ''}</div>
+        <div style={{ fontWeight: 600 }}>{label}</div>
+        <div className="spacer" />
+        {mlist.length > 0 && <span className="faint" style={{ fontSize: 12 }}>{mlist.length} machine(s)</span>}
         {sum && (
           <div className="row" style={{ gap: 10, fontSize: 13 }}>
-            <span style={{ color: 'var(--ok,#63c869)' }}>+{sum.add} add</span>
-            <span style={{ color: 'var(--warn,#e0a83b)' }}>~{sum.change} change</span>
-            <span style={{ color: 'var(--err,#e5534b)' }}>-{sum.destroy} destroy</span>
+            <span style={{ color: 'var(--ok,#63c869)' }}>+{sum.add}</span>
+            <span style={{ color: 'var(--warn,#e0a83b)' }}>~{sum.change}</span>
+            <span style={{ color: 'var(--err,#e5534b)' }}>-{sum.destroy}</span>
           </div>
         )}
       </div>
-      {list.length === 0 ? <div className="muted" style={{ padding: 8 }}>No resource changes detected yet.</div> : (
-        <div className="viz-grid">
-          {list.map((r) => {
-            const [sign, col] = ACT[r.action] || ACT.noop
-            return (
-              <div key={r.addr} className="viz-host" style={{ borderLeft: `3px solid ${col}` }}>
-                <div className="row" style={{ justifyContent: 'space-between' }}>
-                  <b className="mono" style={{ fontSize: 12.5 }}><span style={{ color: col }}>{sign}</span> {r.addr}</b>
-                  {r.status === 'in-progress' && <span className="dot pulse" style={{ background: col }} />}
-                  {r.status === 'complete' && <span className="dot" style={{ background: 'var(--ok,#63c869)' }} />}
+
+      {Object.keys(model.resources).length === 0
+        ? <div className="muted" style={{ padding: 8 }}>Planning… no resource changes detected yet.</div>
+        : (
+          <>
+            {mlist.length > 0 && (
+              <div className="viz-flow-box">
+                <div className="flow-legend faint">
+                  <span><i style={{ background: TF_STATUS_COLOR.complete }} />created</span>
+                  <span><i style={{ background: TF_STATUS_COLOR['in-progress'] }} />building</span>
+                  <span><i style={{ background: TF_STATUS_COLOR.planned }} />planned</span>
+                  <span><i style={{ background: TF_STATUS_COLOR.error }} />error</span>
                 </div>
-                <div className="faint" style={{ fontSize: 11.5, marginTop: 4 }}>{r.action} · {r.status}</div>
+                <div className="flow-resize"><MachineFlow machines={mlist} /></div>
               </div>
-            )
-          })}
-        </div>
-      )}
+            )}
+
+            <div className="viz-grid">
+              {mlist.map((m) => {
+                const col = TF_STATUS_COLOR[m.status]
+                const busy = m.comps.find((c) => c.status === 'in-progress')
+                return (
+                  <div key={m.key} className="viz-host" style={{ borderLeft: `3px solid ${col}` }}>
+                    <div className="row" style={{ justifyContent: 'space-between' }}>
+                      <b className="mono" style={{ fontSize: 13 }}>Machine {Number(m.key) + 1}</b>
+                      {m.status === 'in-progress'
+                        ? <span className="dot pulse" style={{ background: col }} />
+                        : <span className="dot" style={{ background: col }} />}
+                    </div>
+                    <div style={{ marginTop: 6, display: 'flex', flexDirection: 'column', gap: 3 }}>
+                      {sortComps(m.comps).map((c) => (
+                        <div key={c.addr} className="row" style={{ gap: 6, fontSize: 11.5 }}>
+                          <span className="dot" style={{ background: TF_STATUS_COLOR[c.status], width: 7, height: 7 }} />
+                          <span style={{ minWidth: 66 }}>{c.kind}</span>
+                          <span className="faint">
+                            {c.status === 'complete' ? (c.took ? `done in ${c.took}` : 'done')
+                              : c.status === 'in-progress' ? (c.elapsed ? `building… ${c.elapsed}` : 'building…')
+                                : c.status === 'error' ? 'error' : 'planned'}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                    {busy && busy.kind === 'disk' && <div className="faint" style={{ fontSize: 10.5, marginTop: 4 }}>disk is slow while the base image is copied</div>}
+                  </div>
+                )
+              })}
+            </div>
+
+            {loose.length > 0 && (
+              <>
+                <div className="pane-title" style={{ marginTop: 10 }}>Shared infrastructure</div>
+                <div className="viz-grid">
+                  {loose.map((r) => (
+                    <div key={r.addr} className="viz-host" style={{ borderLeft: `3px solid ${TF_STATUS_COLOR[r.status]}` }}>
+                      <div className="row" style={{ justifyContent: 'space-between' }}>
+                        <b className="mono" style={{ fontSize: 12 }}>{r.kind}</b>
+                        <span className={'dot' + (r.status === 'in-progress' ? ' pulse' : '')} style={{ background: TF_STATUS_COLOR[r.status] }} />
+                      </div>
+                      <div className="faint" style={{ fontSize: 11, marginTop: 3 }}>{r.addr}</div>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+          </>
+        )}
+    </div>
+  )
+}
+
+// SLEP → machines: the box fanning out to each machine being built, coloured by
+// status (green created · amber building · dim planned · red error), with a live
+// elapsed on whatever's still building — the Terraform analogue of the Ansible
+// host-reach flow.
+function MachineFlow({ machines }) {
+  const n = machines.length
+  const rowH = n > 12 ? 22 : 30
+  const H = Math.max(90, n * rowH + 16)
+  const cx = 40, cy = H / 2, ex = 150, nodeX = ex, nameX = ex + 16
+  const step = n > 1 ? (H - 30) / (n - 1) : 0
+  const rowY = (i) => (n > 1 ? 15 + i * step : cy)
+  const W = 460
+  return (
+    <div style={{ overflow: 'auto', height: '100%' }}>
+      <svg className="viz-flow" width={W} height={H} viewBox={`0 0 ${W} ${H}`}>
+        {machines.map((m, i) => {
+          const y = rowY(i)
+          const col = TF_STATUS_COLOR[m.status]
+          const active = m.status !== 'planned'
+          const busy = m.comps.find((c) => c.status === 'in-progress')
+          const done = m.comps.filter((c) => c.status === 'complete').length
+          return (
+            <g key={m.key}>
+              <path d={`M ${cx + 15} ${cy} C ${(cx + ex) / 2} ${cy}, ${(cx + ex) / 2} ${y}, ${nodeX - 8} ${y}`}
+                fill="none" stroke={col} strokeWidth={active ? 1.9 : 1} strokeOpacity={active ? 0.85 : 0.25} />
+              {m.status === 'in-progress'
+                ? <circle cx={nodeX} cy={y} r={5.5} fill="none" stroke={col} strokeWidth="2" className="pulse" />
+                : <circle cx={nodeX} cy={y} r={5} fill={col} fillOpacity={active ? 1 : 0.3} />}
+              <text x={nameX} y={y - 2} fontSize="12" fill="var(--text)" className="mono">Machine {Number(m.key) + 1}</text>
+              <text x={nameX} y={y + 11} fontSize="10.5" fill="var(--muted)">
+                {m.status === 'complete' ? 'created'
+                  : m.status === 'error' ? 'error'
+                    : busy ? `building ${busy.kind}${busy.elapsed ? ' · ' + busy.elapsed : ''} (${done}/${m.comps.length})`
+                      : 'planned'}
+              </text>
+            </g>
+          )
+        })}
+        <ServerIcon cx={cx} cy={cy} />
+      </svg>
     </div>
   )
 }
