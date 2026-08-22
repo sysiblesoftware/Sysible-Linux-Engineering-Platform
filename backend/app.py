@@ -910,19 +910,31 @@ def _dispatch_run(project, kind, target, inventory_id, credential_id, extra_vars
     return run_id
 
 
+def _validate_steps(steps):
+    if not steps:
+        raise HTTPException(status_code=400, detail="A pipeline needs at least one step.")
+    for i, s in enumerate(steps, 1):
+        if s.get("kind") not in RUNNERS:
+            raise HTTPException(status_code=400, detail=f"Step {i}: unknown engine '{s.get('kind')}'.")
+        if not str(s.get("target") or "").strip():
+            raise HTTPException(status_code=400, detail=f"Step {i}: a target is required.")
+
+
 def _dispatch_pipeline(project, steps, actor, stop_on_failure=True):
     """Run an ordered list of steps in succession. Every step becomes a normal run
-    row (queued up front so the whole sequence is visible immediately), then they
-    execute one after another on a single background thread. If a step doesn't
-    succeed and stop_on_failure is set, the remaining queued steps are canceled."""
+    row (queued up front so the whole sequence is visible immediately), sharing one
+    group_id so the visualizer can show the sequence. They execute one after another
+    on a single background thread; if a step doesn't succeed and stop_on_failure is
+    set, the remaining queued steps are canceled. Returns (run_ids, group_id)."""
     from .runners import ansible_runner
+    group_id = secrets.token_hex(8)
     prepared = []
     for s in steps:
         kind = s.get("kind")
         rid = db.create_run(
             project["id"], kind, str(s.get("target") or "").strip(),
             inventory_id=s.get("inventory_id"), credential_id=s.get("credential_id"),
-            extra_vars=s.get("extra_vars") or {}, created_by=actor,
+            extra_vars=s.get("extra_vars") or {}, created_by=actor, group_id=group_id,
         )
         if kind == "ansible":
             if s.get("become_password"):
@@ -945,27 +957,80 @@ def _dispatch_pipeline(project, steps, actor, stop_on_failure=True):
 
     db.log_audit("pipeline_launched", actor, f"{len(prepared)} steps on {project['name']}")
     threading.Thread(target=worker, daemon=True).start()
-    return [rid for rid, _ in prepared]
+    return [rid for rid, _ in prepared], group_id
 
 
-@app.post("/pipelines")
-def launch_pipeline(body: dict = Body(...), user: str = Depends(current_user)):
-    """Launch a sequence of runs (create → configure → maintain, or any order).
-    Steps run one after another; by default the sequence stops on the first
+@app.post("/pipelines/run")
+def run_pipeline_adhoc(body: dict = Body(...), user: str = Depends(current_user)):
+    """Launch an ad-hoc sequence of runs (create → configure → maintain, or any
+    order). Steps run one after another; by default the sequence stops on the first
     failure. Each step is the same shape as a /runs body."""
     project = db.get_project(body.get("project_id")) if body.get("project_id") else None
     if not project:
         raise HTTPException(status_code=404, detail="Project not found.")
     steps = body.get("steps") or []
-    if not steps:
-        raise HTTPException(status_code=400, detail="A pipeline needs at least one step.")
-    for i, s in enumerate(steps, 1):
-        if s.get("kind") not in RUNNERS:
-            raise HTTPException(status_code=400, detail=f"Step {i}: unknown engine '{s.get('kind')}'.")
-        if not str(s.get("target") or "").strip():
-            raise HTTPException(status_code=400, detail=f"Step {i}: a target is required.")
-    run_ids = _dispatch_pipeline(project, steps, user, stop_on_failure=bool(body.get("stop_on_failure", True)))
-    return {"status": "launched", "run_ids": run_ids}
+    _validate_steps(steps)
+    run_ids, group_id = _dispatch_pipeline(project, steps, user, stop_on_failure=bool(body.get("stop_on_failure", True)))
+    return {"status": "launched", "run_ids": run_ids, "group_id": group_id}
+
+
+@app.get("/pipelines/runs/{group_id}")
+def pipeline_group_runs(group_id: str, user: str = Depends(current_user)):
+    """The runs of one launched pipeline, in order — powers the sequence strip in
+    the run visualizer."""
+    return {"runs": db.runs_in_group(group_id)}
+
+
+# ---- saved pipelines (named, re-runnable sequences) ----
+@app.get("/pipelines")
+def list_saved_pipelines(user: str = Depends(current_user)):
+    return {"pipelines": db.list_pipelines()}
+
+
+@app.post("/pipelines")
+def create_saved_pipeline(body: dict = Body(...), user: str = Depends(current_user)):
+    project = db.get_project(body.get("project_id")) if body.get("project_id") else None
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    name = str(body.get("name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="A pipeline name is required.")
+    steps = body.get("steps") or []
+    _validate_steps(steps)
+    pid = db.create_pipeline(project["id"], name, steps, bool(body.get("stop_on_failure", True)))
+    db.log_audit("pipeline_saved", user, f"#{pid} '{name}' on {project['name']}")
+    return {"pipeline": db.get_pipeline(pid)}
+
+
+@app.put("/pipelines/{pipeline_id}")
+def edit_saved_pipeline(pipeline_id: int, body: dict = Body(...), user: str = Depends(current_user)):
+    if not db.get_pipeline(pipeline_id):
+        raise HTTPException(status_code=404, detail="Pipeline not found.")
+    steps = body.get("steps")
+    if steps is not None:
+        _validate_steps(steps)
+    db.update_pipeline(pipeline_id, name=(str(body["name"]).strip() if "name" in body else None),
+                       steps=steps, stop_on_failure=body.get("stop_on_failure"))
+    return {"pipeline": db.get_pipeline(pipeline_id)}
+
+
+@app.delete("/pipelines/{pipeline_id}")
+def remove_saved_pipeline(pipeline_id: int, user: str = Depends(current_user)):
+    db.delete_pipeline(pipeline_id)
+    return {"status": "deleted"}
+
+
+@app.post("/pipelines/{pipeline_id}/run")
+def run_saved_pipeline(pipeline_id: int, user: str = Depends(current_user)):
+    pl = db.get_pipeline(pipeline_id)
+    if not pl:
+        raise HTTPException(status_code=404, detail="Pipeline not found.")
+    project = db.get_project(pl["project_id"])
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    _validate_steps(pl["steps"])
+    run_ids, group_id = _dispatch_pipeline(project, pl["steps"], user, stop_on_failure=pl["stop_on_failure"])
+    return {"status": "launched", "run_ids": run_ids, "group_id": group_id}
 
 
 @app.post("/runs")

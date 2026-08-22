@@ -901,11 +901,18 @@ export function RunModal({ project, currentFile, onClose, onLaunched, initial })
 // Run several steps in succession — the "create → configure → maintain" pipeline
 // (or any order). Each step becomes a normal run; the sequence stops on the first
 // failure by default. Steps run one after another on the server.
-export function PipelineModal({ project, currentFile, initialSteps, onClose, onLaunched }) {
+export function PipelineModal({ project, currentFile, initialSteps, initialName, saveId, stopDefault, onClose, onLaunched, onSaved }) {
   const [invs, setInvs] = useState([]); const [creds, setCreds] = useState([])
-  const [stopOnFail, setStopOnFail] = useState(true)
+  const [stopOnFail, setStopOnFail] = useState(stopDefault !== undefined ? stopDefault : true)
+  const [name, setName] = useState(initialName || '')
   const blank = (over) => ({ kind: 'ansible', target: currentFile || 'site.yml', inventory_id: '', credential_id: '', tool: 'terraform', ...over })
   const [steps, setSteps] = useState(initialSteps && initialSteps.length ? initialSteps.map((s) => blank(s)) : [blank()])
+  const payloadOf = () => steps.map((st) => ({
+    kind: st.kind, target: st.target,
+    inventory_id: st.kind === 'terraform' ? null : (st.inventory_id ? Number(st.inventory_id) : null),
+    credential_id: st.credential_id ? Number(st.credential_id) : null,
+    tool: st.kind === 'terraform' ? st.tool : '',
+  }))
   const { wrap, node } = useErr()
 
   useEffect(() => { api('inventories').then((d) => { setInvs(d.inventories)
@@ -957,17 +964,28 @@ export function PipelineModal({ project, currentFile, initialSteps, onClose, onL
           Stop on first failure
         </label>
       </div>
+      {onSaved && (
+        <Field label="Save this sequence as (optional)">
+          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. web-tier full cadence" />
+        </Field>
+      )}
       {node}
-      <button className="primary" onClick={() => wrap(async () => {
-        const payload = steps.map((st) => ({
-          kind: st.kind, target: st.target,
-          inventory_id: st.kind === 'terraform' ? null : (st.inventory_id ? Number(st.inventory_id) : null),
-          credential_id: st.credential_id ? Number(st.credential_id) : null,
-          tool: st.kind === 'terraform' ? st.tool : '',
-        }))
-        const d = await api('pipelines', { method: 'POST', json: { project_id: project.id, steps: payload, stop_on_failure: stopOnFail } })
-        onClose(); onLaunched(d.run_ids[0])
-      })}>▶ Run {steps.length} step{steps.length > 1 ? 's' : ''} in sequence</button>
+      <div className="row">
+        {onSaved && (
+          <button className="ghost" disabled={!name.trim()} onClick={() => wrap(async () => {
+            const body = { project_id: project.id, name: name.trim(), steps: payloadOf(), stop_on_failure: stopOnFail }
+            const d = saveId
+              ? await api(`pipelines/${saveId}`, { method: 'PUT', json: body })
+              : await api('pipelines', { method: 'POST', json: body })
+            onClose(); onSaved(d.pipeline)
+          })}>💾 {saveId ? 'Update' : 'Save'}</button>
+        )}
+        <div className="spacer" />
+        <button className="primary" onClick={() => wrap(async () => {
+          const d = await api('pipelines/run', { method: 'POST', json: { project_id: project.id, steps: payloadOf(), stop_on_failure: stopOnFail } })
+          onClose(); onLaunched(d.run_ids[0])
+        })}>▶ Run {steps.length} step{steps.length > 1 ? 's' : ''} in sequence</button>
+      </div>
     </Modal>
   )
 }

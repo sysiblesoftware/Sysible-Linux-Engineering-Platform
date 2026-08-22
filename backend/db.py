@@ -199,6 +199,19 @@ def init_db() -> None:
                 FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
             );
 
+            -- Saved pipelines: a named, ordered list of run steps for a project,
+            -- so a create->configure->maintain (or any) sequence can be re-run.
+            CREATE TABLE IF NOT EXISTS pipelines (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                steps TEXT NOT NULL DEFAULT '[]',        -- JSON list of step dicts
+                stop_on_failure INTEGER NOT NULL DEFAULT 1,
+                created INTEGER NOT NULL,
+                updated INTEGER NOT NULL,
+                FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+            );
+
             -- Tamper-evident admin/activity audit log. Each row's entry_hash chains
             -- the previous one (SHA-256 over length-prefixed fields), so any edit,
             -- reorder, or deletion in the middle breaks the chain from that point on.
@@ -227,6 +240,11 @@ def init_db() -> None:
         proj_cols = [r["name"] for r in c.execute("PRAGMA table_info(projects)")]
         if "git_token" not in proj_cols:
             c.execute("ALTER TABLE projects ADD COLUMN git_token TEXT DEFAULT ''")
+        # group_id links the runs of one launched pipeline so the visualizer can
+        # show the whole sequence.
+        run_cols = [r["name"] for r in c.execute("PRAGMA table_info(runs)")]
+        if "group_id" not in run_cols:
+            c.execute("ALTER TABLE runs ADD COLUMN group_id TEXT DEFAULT ''")
     # The DB holds password hashes, session tokens, encrypted vault + Controller
     # keys — keep it owner-only so a stray world-read can't harvest them.
     _restrict_db_permissions()
@@ -854,15 +872,82 @@ def delete_host(hid: int):
 
 # ---------------------------------------------------------------- runs
 def create_run(project_id, kind, target, inventory_id=None, credential_id=None,
-               extra_vars=None, created_by=""):
+               extra_vars=None, created_by="", group_id=""):
     with _connect() as c:
         cur = c.execute(
             "INSERT INTO runs(project_id,kind,target,inventory_id,credential_id,extra_vars,"
-            "status,created_by,created) VALUES(?,?,?,?,?,?,?,?,?)",
+            "status,created_by,created,group_id) VALUES(?,?,?,?,?,?,?,?,?,?)",
             (project_id, kind, target, inventory_id, credential_id,
-             json.dumps(extra_vars or {}), "queued", created_by, _now()),
+             json.dumps(extra_vars or {}), "queued", created_by, _now(), group_id or ""),
         )
         return cur.lastrowid
+
+
+def runs_in_group(group_id: str):
+    """All runs of one launched pipeline, in launch order — for the sequence viz."""
+    if not group_id:
+        return []
+    with _connect() as c:
+        rows = c.execute("SELECT * FROM runs WHERE group_id=? ORDER BY id ASC", (group_id,)).fetchall()
+        return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------- saved pipelines
+def create_pipeline(project_id, name, steps, stop_on_failure=True):
+    ts = _now()
+    with _connect() as c:
+        cur = c.execute(
+            "INSERT INTO pipelines(project_id,name,steps,stop_on_failure,created,updated)"
+            " VALUES(?,?,?,?,?,?)",
+            (project_id, name, json.dumps(steps or []), 1 if stop_on_failure else 0, ts, ts),
+        )
+        return cur.lastrowid
+
+
+def update_pipeline(pipeline_id, name=None, steps=None, stop_on_failure=None):
+    sets, args = [], []
+    if name is not None:
+        sets.append("name=?"); args.append(name)
+    if steps is not None:
+        sets.append("steps=?"); args.append(json.dumps(steps))
+    if stop_on_failure is not None:
+        sets.append("stop_on_failure=?"); args.append(1 if stop_on_failure else 0)
+    if not sets:
+        return
+    sets.append("updated=?"); args.append(_now())
+    args.append(pipeline_id)
+    with _connect() as c:
+        c.execute(f"UPDATE pipelines SET {', '.join(sets)} WHERE id=?", args)
+
+
+def delete_pipeline(pipeline_id):
+    with _connect() as c:
+        c.execute("DELETE FROM pipelines WHERE id=?", (pipeline_id,))
+
+
+def _pipeline_row(r):
+    d = dict(r)
+    try:
+        d["steps"] = json.loads(d.get("steps") or "[]")
+    except (TypeError, ValueError):
+        d["steps"] = []
+    d["stop_on_failure"] = bool(d.get("stop_on_failure"))
+    return d
+
+
+def get_pipeline(pipeline_id):
+    with _connect() as c:
+        r = c.execute("SELECT * FROM pipelines WHERE id=?", (pipeline_id,)).fetchone()
+        return _pipeline_row(r) if r else None
+
+
+def list_pipelines():
+    with _connect() as c:
+        rows = c.execute(
+            "SELECT p.*, pr.name AS project_name, pr.slug AS project_slug FROM pipelines p"
+            " JOIN projects pr ON pr.id=p.project_id ORDER BY p.updated DESC"
+        ).fetchall()
+        return [_pipeline_row(r) for r in rows]
 
 
 def set_run_status(run_id, status, exit_code=None, started=None, finished=None):

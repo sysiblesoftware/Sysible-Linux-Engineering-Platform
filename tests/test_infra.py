@@ -167,7 +167,7 @@ def test_pipeline_runs_steps_in_sequence(client, monkeypatch):
         {"kind": "ansible", "target": "configure.yml", "inventory_id": inv},
         {"kind": "ansible", "target": "maintain-after-fail.yml", "inventory_id": inv},
     ]
-    d = client.post("/pipelines", json={"project_id": pid, "steps": steps, "stop_on_failure": True}).json()
+    d = client.post("/pipelines/run", json={"project_id": pid, "steps": steps, "stop_on_failure": True}).json()
     assert len(d["run_ids"]) == 3
     # The worker thread runs inline-ish; poll run statuses.
     import time as _t
@@ -183,6 +183,49 @@ def test_pipeline_runs_steps_in_sequence(client, monkeypatch):
 def test_pipeline_needs_steps_and_valid_engine(client):
     pid = client.post("/infra", json={"name": "seq2", "provider": "libvirt",
                                      "options": {"count": 1, "base_image": "x"}}).json()["project_id"]
-    assert client.post("/pipelines", json={"project_id": pid, "steps": []}).status_code == 400
-    assert client.post("/pipelines", json={"project_id": pid,
+    assert client.post("/pipelines/run", json={"project_id": pid, "steps": []}).status_code == 400
+    assert client.post("/pipelines/run", json={"project_id": pid,
                        "steps": [{"kind": "bogus", "target": "x"}]}).status_code == 400
+
+
+def test_saved_pipeline_crud_and_run(client, monkeypatch):
+    import backend.app as appmod, backend.db as db
+    pid = client.post("/infra", json={"name": "svc", "provider": "libvirt",
+                                     "options": {"count": 1, "base_image": "x"}}).json()["project_id"]
+    # stub runners so a run "completes"
+    def fake(kind):
+        def _launch(run_id):
+            db.set_run_status(run_id, "success")
+        return _launch
+    for k in ("ansible", "terraform", "salt"):
+        monkeypatch.setitem(appmod.RUNNERS, k, fake(k))
+
+    steps = [{"kind": "terraform", "target": "apply", "tool": "tofu"},
+             {"kind": "ansible", "target": "configure.yml"}]
+    # save
+    saved = client.post("/pipelines", json={"project_id": pid, "name": "full cadence", "steps": steps}).json()["pipeline"]
+    assert saved["name"] == "full cadence" and len(saved["steps"]) == 2
+    # list
+    assert any(p["id"] == saved["id"] and p["project_name"] == "svc" for p in client.get("/pipelines").json()["pipelines"])
+    # run it → grouped runs
+    d = client.post(f"/pipelines/{saved['id']}/run", json={}).json()
+    assert len(d["run_ids"]) == 2 and d["group_id"]
+    import time as _t
+    for _ in range(50):
+        grp = client.get(f"/pipelines/runs/{d['group_id']}").json()["runs"]
+        if grp and all(r["status"] == "success" for r in grp):
+            break
+        _t.sleep(0.02)
+    grp = client.get(f"/pipelines/runs/{d['group_id']}").json()["runs"]
+    assert len(grp) == 2 and all(r["group_id"] == d["group_id"] for r in grp)
+    # update + delete
+    client.put(f"/pipelines/{saved['id']}", json={"name": "renamed"})
+    assert client.get("/pipelines").json()["pipelines"][0]["name"] == "renamed"
+    client.delete(f"/pipelines/{saved['id']}")
+    assert not any(p["id"] == saved["id"] for p in client.get("/pipelines").json()["pipelines"])
+
+
+def test_saved_pipeline_needs_name(client):
+    pid = client.post("/infra", json={"name": "svc2", "provider": "libvirt",
+                                     "options": {"count": 1, "base_image": "x"}}).json()["project_id"]
+    assert client.post("/pipelines", json={"project_id": pid, "steps": [{"kind": "ansible", "target": "x"}]}).status_code == 400

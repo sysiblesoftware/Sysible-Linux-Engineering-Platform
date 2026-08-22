@@ -78,6 +78,8 @@ export function RunLog({ runId, onBack, onOpenRun }) {
   const [engine, setEngine] = useState('ansible')
   const [seedHosts, setSeedHosts] = useState([])
   const [leftPct, setLeftPct] = useState(50)   // Visualize/Log split, % of width
+  const [groupId, setGroupId] = useState('')   // pipeline group this run belongs to
+  const [seq, setSeq] = useState([])           // the sibling runs of that pipeline
   const boxRef = useRef(null)
   const splitRef = useRef(null)
 
@@ -105,6 +107,7 @@ export function RunLog({ runId, onBack, onOpenRun }) {
         const r = await api(`runs/${runId}`)
         if (!alive) return
         setEngine(r.kind || 'ansible')
+        setGroupId(r.group_id || '')
         if (r.inventory_id) {
           try {
             const h = await api(`inventories/${r.inventory_id}/hosts`)
@@ -115,6 +118,23 @@ export function RunLog({ runId, onBack, onOpenRun }) {
     })()
     return () => { alive = false }
   }, [runId])
+
+  // Part of a launched sequence? Poll the group's runs so the step strip shows the
+  // whole pipeline advancing (queued → running → success/failed/canceled).
+  useEffect(() => {
+    if (!groupId) { setSeq([]); return }
+    let alive = true
+    const tick = async () => {
+      try { const d = await api(`pipelines/runs/${groupId}`); if (alive) setSeq(d.runs || []) } catch { /* ignore */ }
+    }
+    tick()
+    const iv = setInterval(() => {
+      const done = seq.length && seq.every((s) => ['success', 'failed', 'canceled'].includes(s.status))
+      if (done) { clearInterval(iv); return }
+      tick()
+    }, 1500)
+    return () => { alive = false; clearInterval(iv) }
+  }, [groupId])
 
   useEffect(() => {
     let alive = true, offset = 0, acc = ''
@@ -163,6 +183,20 @@ export function RunLog({ runId, onBack, onOpenRun }) {
             onClick={openRerun}>↻ Re-run failed ({failedHosts.length})</button>
         )}
       </div>
+      {seq.length > 1 && (
+        <div className="seq-strip">
+          {seq.map((s, i) => (
+            <React.Fragment key={s.id}>
+              <button className={'seq-step pill ' + s.status + (s.id === runId ? ' current' : '')}
+                title={`${s.kind} · ${s.target} · ${s.status}`}
+                onClick={() => s.id !== runId && onOpenRun && onOpenRun(s.id)}>
+                <span className="seq-n">{i + 1}</span>{s.kind}<span className="muted"> · {s.target}</span>
+              </button>
+              {i < seq.length - 1 && <span className="seq-arrow" aria-hidden="true">→</span>}
+            </React.Fragment>
+          ))}
+        </div>
+      )}
       {/* Visualize and Log together, with a draggable divider to size them (they
           stack on narrow screens). Each pane scrolls on its own. */}
       <div className="run-split" ref={splitRef} style={{ gridTemplateColumns: `minmax(0,${leftPct}fr) 8px minmax(0,${100 - leftPct}fr)` }}>

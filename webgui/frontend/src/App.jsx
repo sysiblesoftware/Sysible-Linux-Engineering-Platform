@@ -14,6 +14,7 @@ import Schedules from './views/Schedules.jsx'
 import Activity from './views/Activity.jsx'
 import HealthBanner from './components/HealthBanner.jsx'
 import Runs, { RunLog } from './views/Runs.jsx'
+import Pipelines from './views/Pipelines.jsx'
 
 // Left-rail navigation — same shape as the Sysible Controller console.
 // `su: true` items are shown only to superusers.
@@ -25,6 +26,7 @@ const NAV = [
   { key: 'credentials', label: 'Credentials', icon: 'key' },
   { key: 'vault', label: 'Vault', icon: 'lock' },
   { key: 'runs', label: 'Runs', icon: 'play' },
+  { key: 'pipelines', label: 'Pipelines', icon: 'pipeline' },
   { key: 'schedules', label: 'Schedules', icon: 'clock' },
   { key: 'activity', label: 'Activity', icon: 'activity', su: true },
   { key: 'users', label: 'Users', icon: 'users', su: true },
@@ -38,6 +40,7 @@ const ICONS = {
   key: <><circle cx="8" cy="15" r="4" /><path d="M10.8 12.2 20 3M17 6l2 2M14 9l2 2" /></>,
   lock: <><rect x="4" y="11" width="16" height="10" rx="2" /><path d="M8 11V7a4 4 0 0 1 8 0v4" /></>,
   play: <path d="M7 5l12 7-12 7z" />,
+  pipeline: <><circle cx="5" cy="12" r="2.5" /><circle cx="19" cy="12" r="2.5" /><path d="M7.5 12h9" /></>,
   users: <><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" /><circle cx="9" cy="7" r="4" /><path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75" /></>,
   clock: <><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></>,
   activity: <path d="M3 12h4l3 8 4-16 3 8h4" />,
@@ -118,6 +121,7 @@ export default function App() {
             : view === 'projects' ? <Projects onOpen={setProject} />
               : view === 'inventories' ? <Inventories />
                 : view === 'infra' ? <Infrastructure onOpenProject={setProject} onOpenRun={setRunId} />
+                : view === 'pipelines' ? <Pipelines onOpenRun={setRunId} />
                 : view === 'controllers' ? <Controllers />
                   : view === 'credentials' ? <Credentials />
                     : view === 'vault' ? <Vault />
