@@ -225,6 +225,46 @@ def init_db() -> None:
                 prev_hash TEXT NOT NULL,
                 entry_hash TEXT NOT NULL
             );
+
+            -- Organizations (multi-tenancy): the top-level container that owns
+            -- projects, inventories, credentials and controllers. A user's
+            -- effective role in an org is the highest of their direct grant
+            -- (org_members) and any team they belong to (teams.org_role). The
+            -- global 'superuser' is the system admin and bypasses org checks.
+            CREATE TABLE IF NOT EXISTS organizations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                slug TEXT UNIQUE NOT NULL,
+                description TEXT DEFAULT '',
+                created INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS org_members (
+                org_id INTEGER NOT NULL,
+                username TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT 'viewer',   -- admin | operator | viewer
+                PRIMARY KEY (org_id, username),
+                FOREIGN KEY (org_id) REFERENCES organizations(id) ON DELETE CASCADE,
+                FOREIGN KEY (username) REFERENCES admins(username) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS teams (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                org_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                org_role TEXT NOT NULL DEFAULT 'viewer',  -- role the team confers in its org
+                created INTEGER NOT NULL,
+                UNIQUE (org_id, name),
+                FOREIGN KEY (org_id) REFERENCES organizations(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS team_members (
+                team_id INTEGER NOT NULL,
+                username TEXT NOT NULL,
+                PRIMARY KEY (team_id, username),
+                FOREIGN KEY (team_id) REFERENCES teams(id) ON DELETE CASCADE,
+                FOREIGN KEY (username) REFERENCES admins(username) ON DELETE CASCADE
+            );
             """
         )
         c.execute(
@@ -249,12 +289,47 @@ def init_db() -> None:
         infra_cols = [r["name"] for r in c.execute("PRAGMA table_info(infra)")]
         if "inventory_id" not in infra_cols:
             c.execute("ALTER TABLE infra ADD COLUMN inventory_id INTEGER")
+        # Multi-tenancy: every owned resource carries an org_id. Add the column
+        # where missing, then adopt any orphaned rows + existing users into a
+        # 'Default' organization so pre-tenancy installs keep working unchanged.
+        for tbl in ("projects", "inventories", "credentials", "controllers"):
+            cols = [r["name"] for r in c.execute(f"PRAGMA table_info({tbl})")]
+            if "org_id" not in cols:
+                c.execute(f"ALTER TABLE {tbl} ADD COLUMN org_id INTEGER")
+        _seed_default_org(c)
         # One-time: encrypt any credential/controller secrets still stored as
         # plaintext (rows written before at-rest encryption). Idempotent.
         _encrypt_legacy_secrets(c)
     # The DB holds password hashes, session tokens, encrypted vault + Controller
     # keys — keep it owner-only so a stray world-read can't harvest them.
     _restrict_db_permissions()
+
+
+def _seed_default_org(c) -> int:
+    """Ensure a 'Default' organization exists, and adopt any resources or users
+    that predate multi-tenancy into it. Idempotent — safe on every boot. Returns
+    the Default org's id."""
+    row = c.execute("SELECT id FROM organizations WHERE slug='default'").fetchone()
+    if row:
+        oid = row["id"]
+    else:
+        c.execute("INSERT INTO organizations(name, slug, description, created) "
+                  "VALUES('Default','default','Default organization',?)", (_now(),))
+        oid = c.execute("SELECT id FROM organizations WHERE slug='default'").fetchone()["id"]
+    # Adopt any resource rows written before org_id existed.
+    for tbl in ("projects", "inventories", "credentials", "controllers"):
+        c.execute(f"UPDATE {tbl} SET org_id=? WHERE org_id IS NULL", (oid,))
+    # Adopt existing admins as members of Default, mapping their global role:
+    # superuser/legacy-admin -> org admin, operator -> operator, viewer -> viewer.
+    for a in c.execute("SELECT username, role FROM admins").fetchall():
+        role = "operator"
+        if a["role"] in ("superuser", "admin"):
+            role = "admin"
+        elif a["role"] == "viewer":
+            role = "viewer"
+        c.execute("INSERT OR IGNORE INTO org_members(org_id, username, role) VALUES(?,?,?)",
+                  (oid, a["username"], role))
+    return oid
 
 
 def _encrypt_legacy_secrets(c) -> None:
@@ -603,9 +678,19 @@ def count_superusers():
 
 
 # ---------------------------------------------------------------- projects
-def list_projects():
+def list_projects(org_ids=None):
+    """All projects, or — when `org_ids` is a list — only those in the given
+    organizations (empty list → nothing). None means unscoped (system view)."""
     with _connect() as c:
-        rows = [dict(r) for r in c.execute("SELECT * FROM projects ORDER BY name").fetchall()]
+        if org_ids is None:
+            rows = c.execute("SELECT * FROM projects ORDER BY name").fetchall()
+        elif not org_ids:
+            return []
+        else:
+            ph = ",".join("?" * len(org_ids))
+            rows = c.execute(f"SELECT * FROM projects WHERE org_id IN ({ph}) ORDER BY name",
+                             tuple(org_ids)).fetchall()
+        rows = [dict(r) for r in rows]
     for d in rows:
         d["has_git_token"] = bool(d.get("git_token"))
         d.pop("git_token", None)
@@ -624,13 +709,15 @@ def get_project(pid: int, include_token=False):
     return d
 
 
-def create_project(name, slug, description="", scm_url="", scm_branch=""):
+def create_project(name, slug, description="", scm_url="", scm_branch="", org_id=None):
     ts = _now()
+    if org_id is None:
+        org_id = default_org_id()
     with _connect() as c:
         cur = c.execute(
-            "INSERT INTO projects(name,slug,description,scm_url,scm_branch,created,updated)"
-            " VALUES(?,?,?,?,?,?,?)",
-            (name, slug, description, scm_url, scm_branch, ts, ts),
+            "INSERT INTO projects(name,slug,description,scm_url,scm_branch,org_id,created,updated)"
+            " VALUES(?,?,?,?,?,?,?,?)",
+            (name, slug, description, scm_url, scm_branch, org_id, ts, ts),
         )
         pid = cur.lastrowid
     (PROJECTS_DIR / str(pid)).mkdir(parents=True, exist_ok=True)
@@ -706,9 +793,17 @@ def _dec_cred(d):
     return d
 
 
-def list_credentials(include_secret=False):
+def list_credentials(include_secret=False, org_ids=None):
     with _connect() as c:
-        rows = [dict(r) for r in c.execute("SELECT * FROM credentials ORDER BY name").fetchall()]
+        if org_ids is None:
+            rows = c.execute("SELECT * FROM credentials ORDER BY name").fetchall()
+        elif not org_ids:
+            return []
+        else:
+            ph = ",".join("?" * len(org_ids))
+            rows = c.execute(f"SELECT * FROM credentials WHERE org_id IN ({ph}) ORDER BY name",
+                             tuple(org_ids)).fetchall()
+        rows = [dict(r) for r in rows]
     if include_secret:
         return [_dec_cred(r) for r in rows]
     return [_strip_cred_secrets(r) for r in rows]
@@ -723,11 +818,13 @@ def get_credential(cid: int, include_secret=False):
     return _dec_cred(d) if include_secret else _strip_cred_secrets(d)
 
 
-def create_credential(name, kind="ssh", username="", secret="", become_secret=""):
+def create_credential(name, kind="ssh", username="", secret="", become_secret="", org_id=None):
+    if org_id is None:
+        org_id = default_org_id()
     with _connect() as c:
         cur = c.execute(
-            "INSERT INTO credentials(name,kind,username,secret,become_secret,created) VALUES(?,?,?,?,?,?)",
-            (name, kind, username, _enc(secret), _enc(become_secret), _now()),
+            "INSERT INTO credentials(name,kind,username,secret,become_secret,org_id,created) VALUES(?,?,?,?,?,?,?)",
+            (name, kind, username, _enc(secret), _enc(become_secret), org_id, _now()),
         )
         return cur.lastrowid
 
@@ -797,9 +894,17 @@ def all_secret_ciphertexts():
 
 
 # ---------------------------------------------------------------- controllers
-def list_controllers(include_key=False):
+def list_controllers(include_key=False, org_ids=None):
     with _connect() as c:
-        rows = [dict(r) for r in c.execute("SELECT * FROM controllers ORDER BY name").fetchall()]
+        if org_ids is None:
+            rows = c.execute("SELECT * FROM controllers ORDER BY name").fetchall()
+        elif not org_ids:
+            return []
+        else:
+            ph = ",".join("?" * len(org_ids))
+            rows = c.execute(f"SELECT * FROM controllers WHERE org_id IN ({ph}) ORDER BY name",
+                             tuple(org_ids)).fetchall()
+        rows = [dict(r) for r in rows]
     if not include_key:
         for r in rows:
             r.pop("api_key", None)
@@ -822,11 +927,13 @@ def get_controller(cid: int, include_key=False):
     return d
 
 
-def create_controller(name, base_url, api_key):
+def create_controller(name, base_url, api_key, org_id=None):
+    if org_id is None:
+        org_id = default_org_id()
     with _connect() as c:
         cur = c.execute(
-            "INSERT INTO controllers(name,base_url,api_key,created) VALUES(?,?,?,?)",
-            (name, base_url, _enc(api_key), _now()),   # api_key encrypted at rest
+            "INSERT INTO controllers(name,base_url,api_key,org_id,created) VALUES(?,?,?,?,?)",
+            (name, base_url, _enc(api_key), org_id, _now()),   # api_key encrypted at rest
         )
         return cur.lastrowid
 
@@ -842,14 +949,17 @@ def set_controller_last_import(cid: int):
 
 
 # ---------------------------------------------------------------- inventories & hosts
-def list_inventories(project_id=None):
+def list_inventories(project_id=None, org_ids=None):
     with _connect() as c:
-        if project_id is None:
-            rows = c.execute("SELECT * FROM inventories ORDER BY name").fetchall()
-        else:
-            rows = c.execute(
-                "SELECT * FROM inventories WHERE project_id=? ORDER BY name", (project_id,)
-            ).fetchall()
+        clauses, params = [], []
+        if project_id is not None:
+            clauses.append("project_id=?"); params.append(project_id)
+        if org_ids is not None:
+            if not org_ids:
+                return []
+            clauses.append(f"org_id IN ({','.join('?' * len(org_ids))})"); params.extend(org_ids)
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        rows = c.execute(f"SELECT * FROM inventories{where} ORDER BY name", tuple(params)).fetchall()
         return [dict(r) for r in rows]
 
 
@@ -859,11 +969,18 @@ def get_inventory(iid: int):
         return dict(r) if r else None
 
 
-def create_inventory(name, project_id=None, source="manual", bastion=""):
+def create_inventory(name, project_id=None, source="manual", bastion="", org_id=None):
+    if org_id is None:
+        # Inherit the project's org when attached, else the Default org.
+        if project_id is not None:
+            p = get_project(project_id)
+            org_id = (p or {}).get("org_id") or default_org_id()
+        else:
+            org_id = default_org_id()
     with _connect() as c:
         cur = c.execute(
-            "INSERT INTO inventories(project_id,name,source,bastion,created) VALUES(?,?,?,?,?)",
-            (project_id, name, source, bastion, _now()),
+            "INSERT INTO inventories(project_id,name,source,bastion,org_id,created) VALUES(?,?,?,?,?,?)",
+            (project_id, name, source, bastion, org_id, _now()),
         )
         return cur.lastrowid
 
@@ -1063,3 +1180,165 @@ def list_runs(project_id=None, limit=100):
 
 def run_log_path(run_id: int) -> Path:
     return RUNS_DIR / f"{run_id}.log"
+
+
+# =========================================================
+# ORGANIZATIONS / TEAMS / per-org RBAC
+# =========================================================
+# Org roles are the same three tiers as the global roles, ranked so the highest
+# grant wins when a user has several (direct + via teams).
+_ORG_RANK = {"viewer": 1, "operator": 2, "admin": 3}
+
+
+def default_org_id() -> int:
+    with _connect() as c:
+        r = c.execute("SELECT id FROM organizations WHERE slug='default'").fetchone()
+        return r["id"] if r else _seed_default_org(c)
+
+
+def list_orgs() -> list:
+    with _connect() as c:
+        return [dict(r) for r in c.execute("SELECT * FROM organizations ORDER BY name").fetchall()]
+
+
+def get_org(oid: int):
+    with _connect() as c:
+        r = c.execute("SELECT * FROM organizations WHERE id=?", (oid,)).fetchone()
+        return dict(r) if r else None
+
+
+def get_org_by_slug(slug: str):
+    with _connect() as c:
+        r = c.execute("SELECT * FROM organizations WHERE slug=?", (slug,)).fetchone()
+        return dict(r) if r else None
+
+
+def create_org(name: str, slug: str, description: str = "") -> int:
+    with _connect() as c:
+        c.execute("INSERT INTO organizations(name, slug, description, created) VALUES(?,?,?,?)",
+                  (name, slug, description, _now()))
+        return c.execute("SELECT id FROM organizations WHERE slug=?", (slug,)).fetchone()["id"]
+
+
+def update_org(oid: int, name=None, description=None) -> None:
+    sets, vals = [], []
+    if name is not None:
+        sets.append("name=?"); vals.append(name)
+    if description is not None:
+        sets.append("description=?"); vals.append(description)
+    if not sets:
+        return
+    vals.append(oid)
+    with _connect() as c:
+        c.execute(f"UPDATE organizations SET {', '.join(sets)} WHERE id=?", vals)
+
+
+def delete_org(oid: int) -> None:
+    with _connect() as c:
+        c.execute("DELETE FROM organizations WHERE id=?", (oid,))
+
+
+# ---- membership ----
+def list_org_members(org_id: int) -> list:
+    with _connect() as c:
+        return [dict(r) for r in c.execute(
+            "SELECT username, role FROM org_members WHERE org_id=? ORDER BY username", (org_id,)).fetchall()]
+
+
+def set_org_member(org_id: int, username: str, role: str) -> None:
+    with _connect() as c:
+        c.execute("INSERT INTO org_members(org_id, username, role) VALUES(?,?,?) "
+                  "ON CONFLICT(org_id, username) DO UPDATE SET role=excluded.role",
+                  (org_id, username, role))
+
+
+def remove_org_member(org_id: int, username: str) -> None:
+    with _connect() as c:
+        c.execute("DELETE FROM org_members WHERE org_id=? AND username=?", (org_id, username))
+
+
+# ---- teams ----
+def list_teams(org_id=None) -> list:
+    with _connect() as c:
+        if org_id is None:
+            rows = c.execute("SELECT * FROM teams ORDER BY name").fetchall()
+        else:
+            rows = c.execute("SELECT * FROM teams WHERE org_id=? ORDER BY name", (org_id,)).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_team(tid: int):
+    with _connect() as c:
+        r = c.execute("SELECT * FROM teams WHERE id=?", (tid,)).fetchone()
+        return dict(r) if r else None
+
+
+def create_team(org_id: int, name: str, org_role: str = "viewer") -> int:
+    with _connect() as c:
+        c.execute("INSERT INTO teams(org_id, name, org_role, created) VALUES(?,?,?,?)",
+                  (org_id, name, org_role, _now()))
+        return c.execute("SELECT id FROM teams WHERE org_id=? AND name=?", (org_id, name)).fetchone()["id"]
+
+
+def update_team(tid: int, name=None, org_role=None) -> None:
+    sets, vals = [], []
+    if name is not None:
+        sets.append("name=?"); vals.append(name)
+    if org_role is not None:
+        sets.append("org_role=?"); vals.append(org_role)
+    if not sets:
+        return
+    vals.append(tid)
+    with _connect() as c:
+        c.execute(f"UPDATE teams SET {', '.join(sets)} WHERE id=?", vals)
+
+
+def delete_team(tid: int) -> None:
+    with _connect() as c:
+        c.execute("DELETE FROM teams WHERE id=?", (tid,))
+
+
+def list_team_members(team_id: int) -> list:
+    with _connect() as c:
+        return [r["username"] for r in c.execute(
+            "SELECT username FROM team_members WHERE team_id=? ORDER BY username", (team_id,)).fetchall()]
+
+
+def add_team_member(team_id: int, username: str) -> None:
+    with _connect() as c:
+        c.execute("INSERT OR IGNORE INTO team_members(team_id, username) VALUES(?,?)", (team_id, username))
+
+
+def remove_team_member(team_id: int, username: str) -> None:
+    with _connect() as c:
+        c.execute("DELETE FROM team_members WHERE team_id=? AND username=?", (team_id, username))
+
+
+# ---- effective role resolution ----
+def effective_org_role(username: str, org_id: int):
+    """The user's highest role in an org, combining their direct grant and any
+    team they belong to in that org. Returns 'admin'|'operator'|'viewer' or None
+    when the user has no access to the org."""
+    best = 0
+    with _connect() as c:
+        r = c.execute("SELECT role FROM org_members WHERE org_id=? AND username=?",
+                      (org_id, username)).fetchone()
+        if r:
+            best = max(best, _ORG_RANK.get(r["role"], 0))
+        for t in c.execute(
+                "SELECT t.org_role AS role FROM teams t JOIN team_members m ON m.team_id=t.id "
+                "WHERE t.org_id=? AND m.username=?", (org_id, username)).fetchall():
+            best = max(best, _ORG_RANK.get(t["role"], 0))
+    if best <= 0:
+        return None
+    return {1: "viewer", 2: "operator", 3: "admin"}[best]
+
+
+def orgs_for_user(username: str) -> list:
+    """Org ids the user can access (direct membership or via a team)."""
+    with _connect() as c:
+        rows = c.execute(
+            "SELECT org_id FROM org_members WHERE username=? "
+            "UNION SELECT t.org_id FROM teams t JOIN team_members m ON m.team_id=t.id "
+            "WHERE m.username=?", (username, username)).fetchall()
+        return [r["org_id"] for r in rows]

@@ -174,6 +174,44 @@ def require_role(min_role: str):
 require_operator = require_role("operator")
 require_superuser = require_role("superuser")
 
+# Per-org RBAC. Org roles mirror the global tiers, ranked so the highest wins.
+_ORG_RANK = {"viewer": 1, "operator": 2, "admin": 3}
+
+
+def _is_system_admin(role: str) -> bool:
+    """The global superuser is the system administrator: full access to every
+    org, and the only role that manages orgs, teams and users."""
+    return role == "superuser"
+
+
+def _visible_org_ids(request: Request):
+    """Org ids the caller may see, or None for a system admin (meaning all)."""
+    s = _session_or_401(request)
+    if _is_system_admin(s["role"]):
+        return None
+    return db.orgs_for_user(s["user"])
+
+
+def _effective_org_role(request: Request, org_id: int):
+    """The caller's effective role in an org: 'admin' for a system admin,
+    otherwise their combined membership/team role, or None if no access."""
+    s = _session_or_401(request)
+    if _is_system_admin(s["role"]):
+        return "admin"
+    return db.effective_org_role(s["user"], org_id)
+
+
+def _require_org(request: Request, org_id, min_role: str = "operator") -> str:
+    """Ensure the caller has at least `min_role` in the org — 404 if the org is
+    unknown, 403 if they lack the role. Returns the acting username."""
+    if not org_id or not db.get_org(org_id):
+        raise HTTPException(status_code=404, detail="Organization not found.")
+    role = _effective_org_role(request, org_id)
+    if not role or _ORG_RANK[role] < _ORG_RANK[min_role]:
+        raise HTTPException(status_code=403,
+                            detail=f"Requires the {min_role} role in this organization.")
+    return _session_or_401(request)["user"]
+
 
 def _mask_extra_vars(row, role):
     """A run row's extra_vars may hold a secret an operator typed into the Variables
@@ -314,7 +352,192 @@ def logout(request: Request):
 @app.get("/me")
 def me(request: Request):
     s = _session_or_401(request)
-    return {"username": s["user"], "role": s.get("role", "operator")}
+    sysadmin = _is_system_admin(s["role"])
+    if sysadmin:
+        orgs = [{**o, "role": "admin"} for o in db.list_orgs()]
+    else:
+        orgs = []
+        for oid in db.orgs_for_user(s["user"]):
+            o = db.get_org(oid)
+            if o:
+                orgs.append({**o, "role": db.effective_org_role(s["user"], oid)})
+    return {"username": s["user"], "role": s.get("role", "operator"),
+            "system_admin": sysadmin, "organizations": orgs}
+
+
+# ---------------------------------------------------------------- Organizations
+def _valid_org_role(r: str) -> str:
+    if r not in ("admin", "operator", "viewer"):
+        raise HTTPException(status_code=422, detail="role must be admin, operator or viewer")
+    return r
+
+
+@app.get("/organizations")
+def organizations(request: Request):
+    """Orgs the caller can see (all for a system admin), each with their role."""
+    s = _session_or_401(request)
+    sysadmin = _is_system_admin(s["role"])
+    out = []
+    for o in db.list_orgs():
+        if sysadmin:
+            role = "admin"
+        else:
+            role = db.effective_org_role(s["user"], o["id"])
+            if not role:
+                continue
+        out.append({**o, "role": role,
+                    "members": len(db.list_org_members(o["id"])),
+                    "teams": len(db.list_teams(o["id"]))})
+    return {"organizations": out}
+
+
+@app.post("/organizations")
+def create_organization(request: Request, body: dict = Body(...),
+                        user: str = Depends(require_superuser)):
+    """Create an organization (system admin only)."""
+    name = str(body.get("name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=422, detail="name is required")
+    slug = _slugify(str(body.get("slug") or name))
+    if db.get_org_by_slug(slug):
+        raise HTTPException(status_code=409, detail="An organization with that slug already exists.")
+    oid = db.create_org(name, slug, str(body.get("description") or ""))
+    db.log_audit("org_created", user, f"{name} (#{oid})")
+    return {"id": oid, "name": name, "slug": slug}
+
+
+@app.get("/organizations/{oid}")
+def organization(oid: int, request: Request):
+    role = _effective_org_role(request, oid)
+    o = db.get_org(oid)
+    if not o or not role:
+        raise HTTPException(status_code=404, detail="Organization not found.")
+    return {**o, "role": role}
+
+
+@app.put("/organizations/{oid}")
+def update_organization(oid: int, request: Request, body: dict = Body(...)):
+    user = _require_org(request, oid, "admin")
+    db.update_org(oid, name=body.get("name"), description=body.get("description"))
+    db.log_audit("org_updated", user, f"#{oid}")
+    return {"ok": True}
+
+
+@app.delete("/organizations/{oid}")
+def delete_organization(oid: int, request: Request, user: str = Depends(require_superuser)):
+    o = db.get_org(oid)
+    if not o:
+        raise HTTPException(status_code=404, detail="Organization not found.")
+    if o["slug"] == "default":
+        raise HTTPException(status_code=400, detail="The Default organization can't be deleted.")
+    db.delete_org(oid)
+    db.log_audit("org_deleted", user, f"{o['name']} (#{oid})")
+    return {"ok": True}
+
+
+@app.get("/organizations/{oid}/members")
+def org_members(oid: int, request: Request):
+    _require_org(request, oid, "viewer")
+    return {"members": db.list_org_members(oid)}
+
+
+@app.post("/organizations/{oid}/members")
+def set_org_member(oid: int, request: Request, body: dict = Body(...)):
+    actor = _require_org(request, oid, "admin")
+    username = str(body.get("username") or "").strip()
+    if not username or not db.get_admin(username):
+        raise HTTPException(status_code=404, detail="No such user.")
+    role = _valid_org_role(str(body.get("role") or "viewer"))
+    db.set_org_member(oid, username, role)
+    db.log_audit("org_member_set", actor, f"{username}={role} in #{oid}")
+    return {"ok": True}
+
+
+@app.delete("/organizations/{oid}/members/{username}")
+def remove_org_member(oid: int, username: str, request: Request):
+    actor = _require_org(request, oid, "admin")
+    db.remove_org_member(oid, username)
+    db.log_audit("org_member_removed", actor, f"{username} from #{oid}")
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------- Teams
+@app.get("/organizations/{oid}/teams")
+def org_teams(oid: int, request: Request):
+    _require_org(request, oid, "viewer")
+    return {"teams": [{**t, "members": len(db.list_team_members(t["id"]))}
+                      for t in db.list_teams(oid)]}
+
+
+@app.post("/organizations/{oid}/teams")
+def create_org_team(oid: int, request: Request, body: dict = Body(...)):
+    actor = _require_org(request, oid, "admin")
+    name = str(body.get("name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=422, detail="name is required")
+    role = _valid_org_role(str(body.get("org_role") or "viewer"))
+    tid = db.create_team(oid, name, role)
+    db.log_audit("team_created", actor, f"{name} ({role}) in #{oid}")
+    return {"id": tid, "name": name, "org_role": role}
+
+
+@app.put("/teams/{tid}")
+def update_team_route(tid: int, request: Request, body: dict = Body(...)):
+    t = db.get_team(tid)
+    if not t:
+        raise HTTPException(status_code=404, detail="Team not found.")
+    actor = _require_org(request, t["org_id"], "admin")
+    role = body.get("org_role")
+    if role is not None:
+        _valid_org_role(role)
+    db.update_team(tid, name=body.get("name"), org_role=role)
+    db.log_audit("team_updated", actor, f"#{tid}")
+    return {"ok": True}
+
+
+@app.delete("/teams/{tid}")
+def delete_team_route(tid: int, request: Request):
+    t = db.get_team(tid)
+    if not t:
+        raise HTTPException(status_code=404, detail="Team not found.")
+    actor = _require_org(request, t["org_id"], "admin")
+    db.delete_team(tid)
+    db.log_audit("team_deleted", actor, f"{t['name']} (#{tid})")
+    return {"ok": True}
+
+
+@app.get("/teams/{tid}/members")
+def team_members(tid: int, request: Request):
+    t = db.get_team(tid)
+    if not t:
+        raise HTTPException(status_code=404, detail="Team not found.")
+    _require_org(request, t["org_id"], "viewer")
+    return {"members": db.list_team_members(tid)}
+
+
+@app.post("/teams/{tid}/members")
+def add_team_member_route(tid: int, request: Request, body: dict = Body(...)):
+    t = db.get_team(tid)
+    if not t:
+        raise HTTPException(status_code=404, detail="Team not found.")
+    actor = _require_org(request, t["org_id"], "admin")
+    username = str(body.get("username") or "").strip()
+    if not username or not db.get_admin(username):
+        raise HTTPException(status_code=404, detail="No such user.")
+    db.add_team_member(tid, username)
+    db.log_audit("team_member_added", actor, f"{username} to team #{tid}")
+    return {"ok": True}
+
+
+@app.delete("/teams/{tid}/members/{username}")
+def remove_team_member_route(tid: int, username: str, request: Request):
+    t = db.get_team(tid)
+    if not t:
+        raise HTTPException(status_code=404, detail="Team not found.")
+    actor = _require_org(request, t["org_id"], "admin")
+    db.remove_team_member(tid, username)
+    db.log_audit("team_member_removed", actor, f"{username} from team #{tid}")
+    return {"ok": True}
 
 
 @app.get("/audit")
@@ -338,22 +561,25 @@ def _slugify(name: str) -> str:
 
 
 @app.get("/projects")
-def projects(user: str = Depends(current_user)):
-    return {"projects": db.list_projects()}
+def projects(request: Request, user: str = Depends(current_user)):
+    return {"projects": db.list_projects(_visible_org_ids(request))}
 
 
 @app.post("/projects")
-def create_project(body: dict = Body(...), user: str = Depends(current_user)):
+def create_project(request: Request, body: dict = Body(...), user: str = Depends(current_user)):
     name = str(body.get("name") or "").strip()
     if not name:
         raise HTTPException(status_code=400, detail="Project name is required.")
+    org_id = body.get("org_id") or db.default_org_id()
+    _require_org(request, org_id, "operator")
     base = _slugify(name)
     slug, n = base, 1
-    while any(p["slug"] == slug for p in db.list_projects()):
+    while any(p["slug"] == slug for p in db.list_projects()):   # slug is globally unique
         n += 1
         slug = f"{base}-{n}"
     pid = db.create_project(name, slug, str(body.get("description") or ""),
-                            str(body.get("scm_url") or ""), str(body.get("scm_branch") or ""))
+                            str(body.get("scm_url") or ""), str(body.get("scm_branch") or ""),
+                            org_id=org_id)
     # Optionally seed the project by cloning a git repo into its (empty) workdir.
     clone_url = str(body.get("clone_url") or "").strip()
     if clone_url:
@@ -583,21 +809,23 @@ def delete_path(pid: int, path: str = Query(...), user: str = Depends(current_us
 
 # ------------------------------------------------------------------ credentials
 @app.get("/credentials")
-def credentials(user: str = Depends(current_user)):
-    return {"credentials": db.list_credentials()}
+def credentials(request: Request, user: str = Depends(current_user)):
+    return {"credentials": db.list_credentials(org_ids=_visible_org_ids(request))}
 
 
 @app.post("/credentials")
-def create_credential(body: dict = Body(...), user: str = Depends(current_user)):
+def create_credential(request: Request, body: dict = Body(...), user: str = Depends(current_user)):
     name = str(body.get("name") or "").strip()
     if not name:
         raise HTTPException(status_code=400, detail="Credential name is required.")
+    org_id = body.get("org_id") or db.default_org_id()
+    _require_org(request, org_id, "operator")
     # The SSH key / cloud secret and the sudo/become password are encrypted at rest
     # by the db layer — pass them as plaintext.
     cid = db.create_credential(
         name, kind=str(body.get("kind") or "ssh"),
         username=str(body.get("username") or ""), secret=str(body.get("secret") or ""),
-        become_secret=str(body.get("become_password") or ""),
+        become_secret=str(body.get("become_password") or ""), org_id=org_id,
     )
     return db.get_credential(cid)
 
@@ -673,6 +901,11 @@ def users_create(body: dict = Body(...), acting: str = Depends(require_superuser
         raise HTTPException(status_code=409, detail="That username already exists.")
     pw_hash, salt = _hash_password(pw)
     db.add_admin(name, pw_hash, salt, role=role)
+    # Enroll the new user in the Default org with the org-role matching their
+    # system role, so a fresh operator/viewer can work immediately (a superuser
+    # is a system admin and sees every org regardless).
+    org_role = "admin" if role == "superuser" else ("viewer" if role == "viewer" else "operator")
+    db.set_org_member(db.default_org_id(), name, org_role)
     db.log_audit("user_created", acting, f"{name} (role={role})")
     return {"status": "created", "username": name, "role": role}
 
@@ -726,8 +959,8 @@ def users_delete(username: str, acting: str = Depends(require_superuser)):
 
 # ------------------------------------------------------------------ inventories & hosts
 @app.get("/inventories")
-def inventories(project_id: int | None = None, user: str = Depends(current_user)):
-    return {"inventories": db.list_inventories(project_id)}
+def inventories(request: Request, project_id: int | None = None, user: str = Depends(current_user)):
+    return {"inventories": db.list_inventories(project_id, org_ids=_visible_org_ids(request))}
 
 
 def _validate_bastion(bastion: str) -> str:
@@ -751,13 +984,24 @@ def _validate_bastion(bastion: str) -> str:
 
 
 @app.post("/inventories")
-def create_inventory(body: dict = Body(...), user: str = Depends(current_user)):
+def create_inventory(request: Request, body: dict = Body(...), user: str = Depends(current_user)):
     name = str(body.get("name") or "").strip()
     if not name:
         raise HTTPException(status_code=400, detail="Inventory name is required.")
-    iid = db.create_inventory(name, project_id=body.get("project_id"),
+    # Inherit the project's org when attached, else the body's org_id / Default.
+    pid = body.get("project_id")
+    if pid:
+        proj = db.get_project(pid)
+        if not proj:
+            raise HTTPException(status_code=404, detail="Project not found.")
+        org_id = proj.get("org_id") or db.default_org_id()
+    else:
+        org_id = body.get("org_id") or db.default_org_id()
+    _require_org(request, org_id, "operator")
+    iid = db.create_inventory(name, project_id=pid,
                               source=str(body.get("source") or "manual"),
-                              bastion=_validate_bastion(str(body.get("bastion") or "")))
+                              bastion=_validate_bastion(str(body.get("bastion") or "")),
+                              org_id=org_id)
     return db.get_inventory(iid)
 
 
@@ -838,8 +1082,8 @@ def import_controller(iid: int, body: dict = Body(...), user: str = Depends(curr
 
 # ------------------------------------------------------------------ controllers (Connect to Controller)
 @app.get("/controllers")
-def controllers(user: str = Depends(current_user)):
-    return {"controllers": db.list_controllers()}
+def controllers(request: Request, user: str = Depends(current_user)):
+    return {"controllers": db.list_controllers(org_ids=_visible_org_ids(request))}
 
 
 @app.post("/controllers")
@@ -880,7 +1124,8 @@ def connect_controller(body: dict = Body(...), user: str = Depends(require_super
         probe = controller_import.test_connection(url, key)   # fails closed on a bad key/URL
     except controller_import.ControllerImportError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    cid = db.create_controller(name or url, url, key)
+    cid = db.create_controller(name or url, url, key,
+                               org_id=body.get("org_id") or db.default_org_id())
     return {"status": "connected", "controller": db.get_controller(cid), **probe}
 
 
