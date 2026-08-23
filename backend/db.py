@@ -620,6 +620,14 @@ def get_infra(project_id):
     return dict(r) if r else None
 
 
+def set_infra_inventory(project_id, inventory_id):
+    """Pin the infra project's inventory without disturbing its other fields — so
+    the first inventory the builder resolves becomes canonical and every later
+    apply/enroll/pipeline step reuses it instead of creating a second one."""
+    with _connect() as c:
+        c.execute("UPDATE infra SET inventory_id=? WHERE project_id=?", (inventory_id, project_id))
+
+
 def list_infra():
     """Infra projects joined with their project name/slug, for the Infrastructure view."""
     with _connect() as c:
@@ -1028,6 +1036,18 @@ def find_inventory(project_id, source):
         r = c.execute(
             "SELECT * FROM inventories WHERE project_id=? AND source=? ORDER BY id LIMIT 1",
             (project_id, source),
+        ).fetchone()
+        return dict(r) if r else None
+
+
+def find_inventory_by_name(project_id, name):
+    """First inventory in a project with an exact name — a second dedup axis so the
+    infra builder can get-or-create its canonical '<project> (VMs)' inventory and
+    never spawn a duplicate even if the source tag differs."""
+    with _connect() as c:
+        r = c.execute(
+            "SELECT * FROM inventories WHERE project_id=? AND name=? ORDER BY id LIMIT 1",
+            (project_id, name),
         ).fetchone()
         return dict(r) if r else None
 

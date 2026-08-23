@@ -1040,6 +1040,13 @@ def create_inventory(request: Request, body: dict = Body(...), user: str = Depen
     else:
         org_id = body.get("org_id") or db.default_org_id()
     _require_org(request, org_id, "operator")
+    # Get-or-create within a project: an inventory with this exact name already
+    # there is returned as-is, so a double-submit (or re-adding the same name)
+    # can't produce two identical inventories.
+    if pid:
+        dup = db.find_inventory_by_name(pid, name)
+        if dup:
+            return db.get_inventory(dup["id"])
     iid = db.create_inventory(name, project_id=pid,
                               source=str(body.get("source") or "manual"),
                               bastion=_validate_bastion(str(body.get("bastion") or "")),
@@ -2027,7 +2034,9 @@ def infra_create(body: dict = Body(...), user: str = Depends(require_operator)):
             raise HTTPException(status_code=404, detail="Target inventory not found.")
         inv_target = int(body["inventory_id"])
     elif str(body.get("inventory_name") or "").strip():
-        inv_target = db.create_inventory(str(body["inventory_name"]).strip(), project_id=pid, source="infra")
+        nm = str(body["inventory_name"]).strip()
+        dup = db.find_inventory_by_name(pid, nm)
+        inv_target = dup["id"] if dup else db.create_inventory(nm, project_id=pid, source="infra")
     db.set_infra(pid, provider, int(controller_id) if controller_id else None,
                  str(options.get("ssh_user", "")), str(options.get("environment", "")), inventory_id=inv_target)
     db.log_audit("infra_created", user, f"{provider} project '{name}'")
@@ -2072,13 +2081,26 @@ def _build_infra_inventory(project, meta, target_inventory_id=None):
     where the next step will look for them; otherwise the infra's configured
     inventory; otherwise a dedicated "<name> (VMs)" inventory for this project."""
     hosts = _infra_applied_hosts(project["id"])
+    # Resolve to exactly one inventory, deterministically, so no apply/enroll/
+    # pipeline path can ever spin up a second inventory for the same project:
+    #   explicit target → the project's pinned infra inventory → any existing
+    #   'infra'-sourced inventory → get-or-create the canonical "<name> (VMs)".
     target = target_inventory_id or meta.get("inventory_id")
     if target and db.get_inventory(target):
         iid = target
     else:
         inv = db.find_inventory(project["id"], "infra")
-        iid = inv["id"] if inv else db.create_inventory(
-            f"{project['name']} (VMs)", project_id=project["id"], source="infra")
+        if inv:
+            iid = inv["id"]
+        else:
+            canonical = f"{project['name']} (VMs)"
+            existing = db.find_inventory_by_name(project["id"], canonical)
+            iid = existing["id"] if existing else db.create_inventory(
+                canonical, project_id=project["id"], source="infra")
+    # Pin the resolved inventory to the infra project the first time, so subsequent
+    # builds go straight down the `target` branch above and never re-create.
+    if meta.get("inventory_id") != iid:
+        db.set_infra_inventory(project["id"], iid)
     group = ansible_runner._ansible_group(meta.get("environment", "")) if meta.get("environment") else ""
     n = 0
     for h in hosts:

@@ -501,6 +501,48 @@ def test_infra_new_named_inventory(client):
     assert any(v["name"] == "web-tier" for v in client.get("/inventories").json()["inventories"])
 
 
+def test_infra_inventory_never_duplicates_across_entry_points(client, monkeypatch):
+    """No path can leave a project with two infra inventories: the manual
+    '→ Inventory' action, the terraform runner's post-apply auto-build, and the
+    pipeline 'inventory' step must all resolve to the SAME single inventory —
+    including after the first build pins it to the infra meta."""
+    import backend.app as appmod
+    import backend.db as db
+    pid = client.post("/infra", json={"name": "dedup", "provider": "libvirt",
+                                      "options": {"count": 1, "base_image": "x", "environment": "prod"}}).json()["project_id"]
+
+    class Out:
+        returncode = 0
+        stdout = '{"sysible_hosts":{"value":[{"name":"d-1","ip":"10.0.0.3","user":"ubuntu"}]}}'
+        stderr = ""
+    monkeypatch.setattr(appmod.subprocess, "run", lambda *a, **k: Out())
+
+    # Hit every build entry point several times over.
+    first = client.post(f"/infra/{pid}/inventory", json={}).json()["inventory_id"]
+    appmod._autobuild_infra_inventory(pid)
+    appmod._autobuild_infra_inventory(pid)
+    client.post(f"/infra/{pid}/inventory", json={})
+    project = db.get_project(pid)
+    appmod._build_infra_inventory(project, db.get_infra(pid))
+
+    invs = [v for v in client.get("/inventories").json()["inventories"] if v["project_id"] == pid]
+    assert len(invs) == 1                       # exactly one, no duplicates
+    assert invs[0]["id"] == first
+    assert db.get_infra(pid)["inventory_id"] == first   # pinned to the project
+
+
+def test_manual_inventory_create_is_get_or_create(client):
+    """Creating an inventory with a name already used in the same project returns
+    the existing one instead of spawning a duplicate (guards double-submits)."""
+    p = client.post("/projects", json={"name": "dedup-proj"}).json()
+    a = client.post("/inventories", json={"name": "Shared", "project_id": p["id"]}).json()
+    b = client.post("/inventories", json={"name": "Shared", "project_id": p["id"]}).json()
+    assert a["id"] == b["id"]
+    invs = [v for v in client.get("/inventories").json()["inventories"]
+            if v["project_id"] == p["id"] and v["name"] == "Shared"]
+    assert len(invs) == 1
+
+
 def test_infra_project_vms_lists_domains(client, monkeypatch):
     """List VMs on a project's hypervisor: parse `virsh list --all` into name+state."""
     import shutil
