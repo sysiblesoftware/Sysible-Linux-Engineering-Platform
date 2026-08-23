@@ -17,9 +17,9 @@
   </defs>
   <!-- Dark rounded-square tile (family signature) -->
   <rect x="2" y="2" width="124" height="124" rx="28" ry="28" fill="url(#tile)"/>
-  <!-- Thin brand-green ring (family signature) -->
-  <rect x="3.5" y="3.5" width="121" height="121" rx="26.5" ry="26.5"
-        fill="none" stroke="#6ddb73" stroke-width="2"/>
+  <!-- Brand-green ring (family signature) -->
+  <rect x="4" y="4" width="120" height="120" rx="26" ry="26"
+        fill="none" stroke="#6ddb73" stroke-width="4"/>
   <!-- Code brackets — the "engineering / author" half, in brand blue. -->
   <g fill="none" stroke="#7aa2ff" stroke-width="6.5" stroke-linecap="round" stroke-linejoin="round">
     <polyline points="50,44 33,64 50,84"/>

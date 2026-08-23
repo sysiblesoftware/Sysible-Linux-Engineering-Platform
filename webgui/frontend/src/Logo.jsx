@@ -13,7 +13,7 @@ export default function Logo({ size = 24 }) {
         </linearGradient>
       </defs>
       <rect x="2" y="2" width="124" height="124" rx="28" ry="28" fill="url(#slep-tile)" />
-      <rect x="3.5" y="3.5" width="121" height="121" rx="26.5" ry="26.5" fill="none" stroke="#6ddb73" strokeWidth="2" />
+      <rect x="4" y="4" width="120" height="120" rx="26" ry="26" fill="none" stroke="#6ddb73" strokeWidth="4" />
       <g fill="none" stroke="#7aa2ff" strokeWidth="6.5" strokeLinecap="round" strokeLinejoin="round">
         <polyline points="50,44 33,64 50,84" />
         <polyline points="78,44 95,64 78,84" />
