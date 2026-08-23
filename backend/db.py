@@ -245,9 +245,34 @@ def init_db() -> None:
         run_cols = [r["name"] for r in c.execute("PRAGMA table_info(runs)")]
         if "group_id" not in run_cols:
             c.execute("ALTER TABLE runs ADD COLUMN group_id TEXT DEFAULT ''")
+        # One-time: encrypt any credential/controller secrets still stored as
+        # plaintext (rows written before at-rest encryption). Idempotent.
+        _encrypt_legacy_secrets(c)
     # The DB holds password hashes, session tokens, encrypted vault + Controller
     # keys — keep it owner-only so a stray world-read can't harvest them.
     _restrict_db_permissions()
+
+
+def _encrypt_legacy_secrets(c) -> None:
+    """Encrypt credential/controller secrets that are still stored as plaintext
+    (rows written before at-rest encryption landed). A value that already decrypts
+    is left as-is, so this is safe to run on every startup."""
+    from . import vault
+
+    def _needs_enc(v):
+        if not v:
+            return False
+        try:
+            vault.decrypt(v)
+            return False            # already ciphertext
+        except Exception:  # noqa: BLE001
+            return True             # legacy plaintext
+    for tbl, cols in (("credentials", ("secret", "become_secret")), ("controllers", ("api_key",))):
+        for r in c.execute(f"SELECT id, {', '.join(cols)} FROM {tbl}").fetchall():
+            updates = {col: vault.encrypt(r[col]) for col in cols if _needs_enc(r[col])}
+            if updates:
+                sets = ", ".join(f"{k}=?" for k in updates)
+                c.execute(f"UPDATE {tbl} SET {sets} WHERE id=?", (*updates.values(), r["id"]))
 
 
 def _restrict_db_permissions() -> None:

@@ -130,6 +130,24 @@ def test_controller_api_key_encrypted_at_rest_with_legacy_fallback(client):
     assert db.get_controller(cid, include_key=True)["api_key"] == "legacyplain"
 
 
+def test_legacy_plaintext_secrets_get_encrypted(client):
+    """The at-rest backfill encrypts pre-existing plaintext secrets and is
+    idempotent (a value that already decrypts is left alone)."""
+    import backend.db as db
+    import backend.vault as vault
+    with db._connect() as c:
+        c.execute("INSERT INTO credentials(name,kind,username,secret,become_secret,created) "
+                  "VALUES('legacy','ssh','u','PLAINKEY','PLAINSUDO',0)")
+        cid = c.execute("SELECT id FROM credentials WHERE name='legacy'").fetchone()["id"]
+        db._encrypt_legacy_secrets(c)
+        row = c.execute("SELECT secret, become_secret FROM credentials WHERE id=?", (cid,)).fetchone()
+        assert row["secret"] != "PLAINKEY" and vault.decrypt(row["secret"]) == "PLAINKEY"
+        assert vault.decrypt(row["become_secret"]) == "PLAINSUDO"
+        db._encrypt_legacy_secrets(c)          # idempotent — no double-encrypt
+        again = c.execute("SELECT secret FROM credentials WHERE id=?", (cid,)).fetchone()
+        assert vault.decrypt(again["secret"]) == "PLAINKEY"
+
+
 def test_unknown_engine_rejected(client, project):
     r = client.post("/runs", json={"project_id": project["id"], "kind": "puppet", "target": "x"})
     assert r.status_code == 400
