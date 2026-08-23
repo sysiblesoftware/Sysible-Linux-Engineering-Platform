@@ -989,6 +989,14 @@ export function PipelineModal({ project, currentFile, initialSteps, initialName,
   return (
     <Modal title="Run sequence" onClose={onClose} wide>
       <div className="faint" style={{ fontSize: 12, marginBottom: 8 }}>Steps run one after another. The cadence is create (Terraform/OpenTofu) → configure (Ansible) → maintain (Salt).</div>
+      <div className="pipe-head">
+        <span className="pipe-n-spacer" />
+        <span style={{ width: 130 }}>Engine</span>
+        <span style={{ flex: 1 }}>Target</span>
+        <span style={{ width: 150 }}>Inventory / tool</span>
+        <span style={{ width: 130 }}>Credential</span>
+        <span className="pipe-actions-spacer" />
+      </div>
       {steps.map((st, i) => (
         <React.Fragment key={i}>
         <div className="pipe-step">
@@ -1003,15 +1011,15 @@ export function PipelineModal({ project, currentFile, initialSteps, initialName,
             ? <span className="muted" style={{ flex: 1, fontSize: 12.5 }}>Reads the applied VMs into this project’s inventory, then points the Ansible/Salt steps below at it.</span>
             : (<>
                 {st.kind === 'terraform'
-                  ? <select value={st.target} onChange={(e) => upd(i, { target: e.target.value })} style={{ width: 120 }}><option>plan</option><option>apply</option><option>destroy</option></select>
-                  : <input value={st.target} onChange={(e) => upd(i, { target: e.target.value })} list={st.kind === 'salt' ? 'pipe-files-salt' : 'pipe-files-ansible'} placeholder={st.kind === 'salt' ? 'state / highstate' : 'playbook.yml'} />}
+                  ? <select value={st.target} onChange={(e) => upd(i, { target: e.target.value })} title="Action" style={{ flex: '1 1 auto', minWidth: 0 }}><option>plan</option><option>apply</option><option>destroy</option></select>
+                  : <input value={st.target} onChange={(e) => upd(i, { target: e.target.value })} list={st.kind === 'salt' ? 'pipe-files-salt' : 'pipe-files-ansible'} title="Playbook / state to run" placeholder={st.kind === 'salt' ? 'state / highstate' : 'playbook.yml'} />}
                 {st.kind === 'terraform'
-                  ? <select value={st.tool} onChange={(e) => upd(i, { tool: e.target.value })} style={{ width: 120 }}><option value="terraform">Terraform</option><option value="tofu">OpenTofu</option></select>
-                  : <select value={st.inventory_id} onChange={(e) => upd(i, { inventory_id: e.target.value })} title="Inventory">
+                  ? <select value={st.tool} onChange={(e) => upd(i, { tool: e.target.value })} title="Tool" style={{ width: 150 }}><option value="terraform">Terraform</option><option value="tofu">OpenTofu</option></select>
+                  : <select value={st.inventory_id} onChange={(e) => upd(i, { inventory_id: e.target.value })} title="Inventory (hosts to target)" style={{ width: 150 }}>
                     {invs.length === 0 && <option value="">(no inventory)</option>}
                     {invs.map((v) => <option key={v.id} value={v.id}>{v.name}</option>)}
                   </select>}
-                <select value={st.credential_id} onChange={(e) => upd(i, { credential_id: e.target.value })} title="Credential" style={{ width: 130 }}>
+                <select value={st.credential_id} onChange={(e) => upd(i, { credential_id: e.target.value })} title="SSH / cloud credential" style={{ width: 130 }}>
                   <option value="">(no cred)</option>
                   {creds.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
                 </select>

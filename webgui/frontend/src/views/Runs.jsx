@@ -136,6 +136,22 @@ export function RunLog({ runId, onBack, onOpenRun }) {
     return () => { alive = false; clearInterval(iv) }
   }, [groupId])
 
+  // Auto-advance a sequence: when this step finishes successfully, follow the
+  // pipeline to the next step's run (e.g. Terraform apply → the Ansible configure
+  // screen) so the whole cadence plays out without clicking each pill. Reset the
+  // one-shot guard whenever we land on a new run.
+  const advancedRef = useRef(false)
+  useEffect(() => { advancedRef.current = false }, [runId])
+  useEffect(() => {
+    if (advancedRef.current || status !== 'success' || !groupId || seq.length < 2 || !onOpenRun) return
+    const idx = seq.findIndex((s) => s.id === runId)
+    const next = idx >= 0 ? seq[idx + 1] : null
+    if (next && ['running', 'queued'].includes(next.status)) {
+      advancedRef.current = true
+      onOpenRun(next.id)
+    }
+  }, [status, seq, runId, groupId, onOpenRun])
+
   useEffect(() => {
     let alive = true, offset = 0, acc = ''
     ;(async () => {

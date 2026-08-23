@@ -243,6 +243,11 @@ label.fld{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--
 .cad-arrow{display:flex;align-items:center;color:var(--faint);font-size:16px}
 
 /* Run-sequence (pipeline) builder: one row per step. */
+.pipe-head{display:flex;align-items:center;gap:6px;margin:2px 0 5px;padding:0 2px;
+  font-size:10px;text-transform:uppercase;letter-spacing:.07em;color:var(--muted)}
+.pipe-head .pipe-n-spacer{flex:0 0 20px;width:20px}
+.pipe-head .pipe-actions-spacer{flex:0 0 118px}
+.pipe-head > span{overflow:hidden;white-space:nowrap}
 .pipe-step{display:flex;align-items:center;gap:6px;margin-bottom:6px}
 .pipe-step > select,.pipe-step > input{width:auto;flex:0 0 auto}
 .pipe-step > input{flex:1 1 auto;min-width:120px}
