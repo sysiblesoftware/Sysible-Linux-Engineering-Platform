@@ -819,24 +819,27 @@ function NameModal({ title, label, placeholder, onClose, onSubmit }) {
 
 // Target picker for Ansible/Salt: a real dropdown that always lists every
 // matching file in the project (a bare <datalist> filters its options by the
-// text already in the box, so a pre-filled "main.yml" hides the rest). Choosing
-// "✎ Custom path…" — or a value that isn't one of the files — swaps to a free
-// text input so an arbitrary path is still typeable.
+// text already in the box, so a pre-filled "main.yml" hides the rest). The
+// dropdown shows the full list whenever the project has files — even when the
+// current value isn't one of them (it appears as the selected option, with every
+// project file listed below it). "✎ Custom path…" swaps to a free text input for
+// an arbitrary path; the ▾ button switches back to the list.
 function FileTarget({ value, onChange, files, placeholder }) {
+  const [custom, setCustom] = useState(false)
   const inList = files.includes(value)
-  const [custom, setCustom] = useState(!inList && !!value)
   if (custom || files.length === 0) {
     return (
       <span className="row" style={{ gap: 4, flex: 1 }}>
-        <input value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} style={{ flex: 1 }} />
-        {files.length > 0 && <button type="button" className="ghost sm" title="Pick from project files" onClick={() => setCustom(false)}>▾</button>}
+        <input value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} style={{ flex: 1 }} autoFocus />
+        {files.length > 0 && <button type="button" className="ghost sm" title="Pick from the project's files" onClick={() => setCustom(false)}>▾ list</button>}
       </span>
     )
   }
   return (
-    <select value={inList ? value : ''} title="Playbook / state to run"
+    <select value={value} title="Playbook / state to run"
       onChange={(e) => { if (e.target.value === '__custom') setCustom(true); else onChange(e.target.value) }}>
-      {!inList && <option value="">Select a file…</option>}
+      {!value && <option value="">Select a file…</option>}
+      {!inList && value && <option value={value}>{value}</option>}
       {files.map((p) => <option key={p} value={p}>{p}</option>)}
       <option value="__custom">✎ Custom path…</option>
     </select>
