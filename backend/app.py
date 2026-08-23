@@ -175,6 +175,22 @@ require_operator = require_role("operator")
 require_superuser = require_role("superuser")
 
 
+def _mask_extra_vars(row, role):
+    """A run row's extra_vars may hold a secret an operator typed into the Variables
+    box. Viewers see the var KEYS but masked VALUES; operator+ see them in full.
+    (The designated secret channel is the vault — {{ vault.NAME }} — not extra_vars.)"""
+    if not row or ROLE_RANK.get(role, 1) >= ROLE_RANK["operator"]:
+        return row
+    r = dict(row)
+    try:
+        ev = json.loads(r.get("extra_vars") or "{}")
+        if isinstance(ev, dict) and ev:
+            r["extra_vars"] = json.dumps({k: "***" for k in ev})
+    except (TypeError, ValueError):
+        r["extra_vars"] = "{}"
+    return r
+
+
 # Blanket read-only guard for viewers: they may only issue GETs. Superuser/operator
 # distinctions are enforced per-route with require_superuser above. Auth endpoints
 # are exempt so a viewer can still log in/out.
@@ -576,12 +592,12 @@ def create_credential(body: dict = Body(...), user: str = Depends(current_user))
     name = str(body.get("name") or "").strip()
     if not name:
         raise HTTPException(status_code=400, detail="Credential name is required.")
-    # Optional sudo/become password, stored encrypted at rest.
-    become = str(body.get("become_password") or "")
+    # The SSH key / cloud secret and the sudo/become password are encrypted at rest
+    # by the db layer — pass them as plaintext.
     cid = db.create_credential(
         name, kind=str(body.get("kind") or "ssh"),
         username=str(body.get("username") or ""), secret=str(body.get("secret") or ""),
-        become_secret=vault.encrypt(become) if become else "",
+        become_secret=str(body.get("become_password") or ""),
     )
     return db.get_credential(cid)
 
@@ -593,8 +609,7 @@ def update_credential(cid: int, body: dict = Body(...), user: str = Depends(curr
     if not db.get_credential(cid):
         raise HTTPException(status_code=404, detail="Credential not found.")
     if "become_password" in body:
-        become = str(body.get("become_password") or "")
-        db.set_credential_become(cid, vault.encrypt(become) if become else "")
+        db.set_credential_become(cid, str(body.get("become_password") or ""))   # encrypted at rest by db
     return db.get_credential(cid)
 
 
@@ -1031,10 +1046,11 @@ def run_pipeline_adhoc(body: dict = Body(...), user: str = Depends(current_user)
 
 
 @app.get("/pipelines/runs/{group_id}")
-def pipeline_group_runs(group_id: str, user: str = Depends(current_user)):
+def pipeline_group_runs(group_id: str, request: Request, user: str = Depends(current_user)):
     """The runs of one launched pipeline, in order — powers the sequence strip in
     the run visualizer."""
-    return {"runs": db.runs_in_group(group_id)}
+    role = _session_or_401(request)["role"]
+    return {"runs": [_mask_extra_vars(r, role) for r in db.runs_in_group(group_id)]}
 
 
 # ---- saved pipelines (named, re-runnable sequences) ----
@@ -1116,16 +1132,17 @@ def launch_run(body: dict = Body(...), user: str = Depends(current_user)):
 
 
 @app.get("/runs")
-def runs(project_id: int | None = None, user: str = Depends(current_user)):
-    return {"runs": db.list_runs(project_id)}
+def runs(request: Request, project_id: int | None = None, user: str = Depends(current_user)):
+    role = _session_or_401(request)["role"]
+    return {"runs": [_mask_extra_vars(r, role) for r in db.list_runs(project_id)]}
 
 
 @app.get("/runs/{run_id}")
-def get_run(run_id: int, user: str = Depends(current_user)):
+def get_run(run_id: int, request: Request, user: str = Depends(current_user)):
     r = db.get_run(run_id)
     if not r:
         raise HTTPException(status_code=404, detail="Run not found.")
-    return r
+    return _mask_extra_vars(r, _session_or_401(request)["role"])
 
 
 @app.get("/runs/{run_id}/log", response_class=PlainTextResponse)
@@ -1384,6 +1401,32 @@ def infra_providers(user: str = Depends(current_user)):
     return {"providers": infra.provider_schema()}
 
 
+# Libvirt connection URIs are operator-supplied and handed to virsh / the terraform
+# provider. The ssh transport honours params that run an arbitrary local/remote
+# binary (command=, netcat=), and an arbitrary scheme/host is an SSRF vector. Allow
+# only known qemu transports and reject the exec-capable params (keyfile/no_verify —
+# which SLEP itself sets — stay allowed).
+_LIBVIRT_URI_SCHEMES = {"qemu", "qemu+ssh", "qemu+tls", "qemu+tcp", "qemu+unix", "qemu+libssh", "qemu+libssh2"}
+_LIBVIRT_URI_DENY_PARAMS = {"command", "netcat", "proxy"}
+
+
+def _validate_libvirt_uri(uri: str) -> str:
+    import urllib.parse
+    u = str(uri or "").strip()
+    if not u:
+        raise HTTPException(status_code=400, detail="A hypervisor connection URI is required.")
+    scheme = u.split("://", 1)[0].split(":", 1)[0].lower() if "://" in u else u.split(":", 1)[0].lower()
+    if scheme not in _LIBVIRT_URI_SCHEMES:
+        raise HTTPException(status_code=400,
+                            detail=f"Unsupported hypervisor URI scheme '{scheme}'. Use qemu:///system or qemu+ssh:// / qemu+tls:// / qemu+tcp://.")
+    params = {k.lower() for k, _ in urllib.parse.parse_qsl(urllib.parse.urlsplit(u).query)}
+    bad = sorted(params & _LIBVIRT_URI_DENY_PARAMS)
+    if bad:
+        raise HTTPException(status_code=400,
+                            detail=f"Hypervisor URI parameter(s) not allowed (they can run arbitrary commands): {', '.join(bad)}.")
+    return u
+
+
 @app.post("/infra/test-hypervisor")
 def infra_test_hypervisor(body: dict = Body(...), user: str = Depends(current_user)):
     """Probe a libvirt (KVM/QEMU) hypervisor connection before applying — runs a
@@ -1394,11 +1437,9 @@ def infra_test_hypervisor(body: dict = Body(...), user: str = Depends(current_us
     caught in seconds instead of minutes into an apply. Never mutates anything."""
     import re
     import shutil
-    uri = str(body.get("uri") or "").strip()
+    uri = _validate_libvirt_uri(body.get("uri"))
     network = str(body.get("network") or "").strip()
     pool = str(body.get("pool") or "").strip()
-    if not uri:
-        raise HTTPException(status_code=400, detail="uri is required.")
     if not shutil.which("virsh"):
         return {"ok": False, "output":
                 "`virsh` (libvirt-clients) isn't installed on the SLEP host, so the connection can't be "
@@ -1553,6 +1594,10 @@ def infra_create(body: dict = Body(...), user: str = Depends(require_operator)):
         raise HTTPException(status_code=400, detail="A name is required.")
     if provider not in infra.PROVIDERS:
         raise HTTPException(status_code=400, detail=f"Unknown provider '{provider}'.")
+    # The libvirt connection URI is baked into the generated Terraform; validate it
+    # (scheme allowlist + reject exec-capable params) at the boundary.
+    if provider == "libvirt" and str(options.get("uri") or "").strip():
+        _validate_libvirt_uri(options.get("uri"))
 
     controller_key = ""
     if controller_id:

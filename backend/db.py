@@ -642,6 +642,27 @@ def project_dir(pid: int) -> Path:
 
 
 # ---------------------------------------------------------------- credentials
+# Secrets are encrypted at rest (the DB only ever holds ciphertext) via the vault
+# key. Callers pass/consume PLAINTEXT — encryption happens on write, decryption on
+# an include_secret/include_key read. Legacy rows written before at-rest encryption
+# are plaintext; _dec returns those as-is (no migration needed).
+def _enc(s) -> str:
+    if not s:
+        return ""
+    from . import vault
+    return vault.encrypt(str(s))
+
+
+def _dec(s) -> str:
+    if not s:
+        return ""
+    from . import vault
+    try:
+        return vault.decrypt(str(s))
+    except Exception:  # noqa: BLE001 — legacy plaintext (pre-encryption) or wrong key
+        return str(s)
+
+
 def _strip_cred_secrets(d):
     d.pop("secret", None)
     # Never leak the ciphertext; expose only whether a become password is set.
@@ -649,12 +670,19 @@ def _strip_cred_secrets(d):
     return d
 
 
+def _dec_cred(d):
+    """Decrypt a credential's stored secrets in place (for include_secret reads)."""
+    d["secret"] = _dec(d.get("secret", ""))
+    d["become_secret"] = _dec(d.get("become_secret", ""))
+    return d
+
+
 def list_credentials(include_secret=False):
     with _connect() as c:
         rows = [dict(r) for r in c.execute("SELECT * FROM credentials ORDER BY name").fetchall()]
-    if not include_secret:
-        rows = [_strip_cred_secrets(r) for r in rows]
-    return rows
+    if include_secret:
+        return [_dec_cred(r) for r in rows]
+    return [_strip_cred_secrets(r) for r in rows]
 
 
 def get_credential(cid: int, include_secret=False):
@@ -663,24 +691,22 @@ def get_credential(cid: int, include_secret=False):
     if not r:
         return None
     d = dict(r)
-    if not include_secret:
-        d = _strip_cred_secrets(d)
-    return d
+    return _dec_cred(d) if include_secret else _strip_cred_secrets(d)
 
 
 def create_credential(name, kind="ssh", username="", secret="", become_secret=""):
     with _connect() as c:
         cur = c.execute(
             "INSERT INTO credentials(name,kind,username,secret,become_secret,created) VALUES(?,?,?,?,?,?)",
-            (name, kind, username, secret, become_secret, _now()),
+            (name, kind, username, _enc(secret), _enc(become_secret), _now()),
         )
         return cur.lastrowid
 
 
 def set_credential_become(cid: int, become_secret: str):
-    """Set (or clear, with '') a credential's encrypted sudo/become password."""
+    """Set (or clear, with '') a credential's sudo/become password (encrypted at rest)."""
     with _connect() as c:
-        c.execute("UPDATE credentials SET become_secret=? WHERE id=?", (become_secret, cid))
+        c.execute("UPDATE credentials SET become_secret=? WHERE id=?", (_enc(become_secret), cid))
 
 
 def upsert_credential(name, kind="ssh", username="", secret="", become_secret=None):
@@ -693,14 +719,14 @@ def upsert_credential(name, kind="ssh", username="", secret="", become_secret=No
         if row:
             if become_secret is None:
                 c.execute("UPDATE credentials SET kind=?, username=?, secret=? WHERE id=?",
-                          (kind, username, secret, row["id"]))
+                          (kind, username, _enc(secret), row["id"]))
             else:
                 c.execute("UPDATE credentials SET kind=?, username=?, secret=?, become_secret=? WHERE id=?",
-                          (kind, username, secret, become_secret, row["id"]))
+                          (kind, username, _enc(secret), _enc(become_secret), row["id"]))
             return row["id"]
         cur = c.execute(
             "INSERT INTO credentials(name,kind,username,secret,become_secret,created) VALUES(?,?,?,?,?,?)",
-            (name, kind, username, secret, become_secret or "", _now()),
+            (name, kind, username, _enc(secret), _enc(become_secret or ""), _now()),
         )
         return cur.lastrowid
 
@@ -748,6 +774,9 @@ def list_controllers(include_key=False):
     if not include_key:
         for r in rows:
             r.pop("api_key", None)
+        return rows
+    for r in rows:
+        r["api_key"] = _dec(r.get("api_key", ""))
     return rows
 
 
@@ -759,6 +788,8 @@ def get_controller(cid: int, include_key=False):
     d = dict(r)
     if not include_key:
         d.pop("api_key", None)
+    else:
+        d["api_key"] = _dec(d.get("api_key", ""))
     return d
 
 
@@ -766,7 +797,7 @@ def create_controller(name, base_url, api_key):
     with _connect() as c:
         cur = c.execute(
             "INSERT INTO controllers(name,base_url,api_key,created) VALUES(?,?,?,?)",
-            (name, base_url, api_key, _now()),
+            (name, base_url, _enc(api_key), _now()),   # api_key encrypted at rest
         )
         return cur.lastrowid
 

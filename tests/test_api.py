@@ -97,15 +97,37 @@ def test_credential_become_password_encrypted_and_flagged(client):
     # The listing flags that a sudo password is set, but never returns it.
     c = [x for x in client.get("/credentials").json()["credentials"] if x["id"] == cid][0]
     assert c["has_become"] is True and "become_secret" not in c and "secret" not in c
-    # Stored encrypted at rest, not plaintext; decrypts back to the original.
+    # Stored encrypted at rest: the RAW db row holds ciphertext for BOTH the SSH
+    # key/secret and the become password; the include_secret read returns plaintext
+    # for the runner to consume.
     import backend.vault as vault
+    with db._connect() as conn:
+        raw = conn.execute("SELECT secret, become_secret FROM credentials WHERE id=?", (cid,)).fetchone()
+    assert raw["become_secret"] != "s3cret" and vault.decrypt(raw["become_secret"]) == "s3cret"
+    assert raw["secret"] != "KEY" and vault.decrypt(raw["secret"]) == "KEY"
     full = db.get_credential(cid, include_secret=True)
-    assert full["become_secret"] and full["become_secret"] != "s3cret"
-    assert vault.decrypt(full["become_secret"]) == "s3cret"
+    assert full["become_secret"] == "s3cret" and full["secret"] == "KEY"
     # PATCH can clear it.
     client.patch(f"/credentials/{cid}", json={"become_password": ""})
     c2 = [x for x in client.get("/credentials").json()["credentials"] if x["id"] == cid][0]
     assert c2["has_become"] is False
+
+
+def test_controller_api_key_encrypted_at_rest_with_legacy_fallback(client):
+    """Controller API keys are encrypted at rest; include_key returns plaintext;
+    rows written before encryption (plaintext) still read back via the fallback."""
+    import backend.db as db
+    import backend.vault as vault
+    cid = db.create_controller("c1", "https://ctrl", "APIKEY123")
+    with db._connect() as conn:
+        raw = conn.execute("SELECT api_key FROM controllers WHERE id=?", (cid,)).fetchone()["api_key"]
+    assert raw != "APIKEY123" and vault.decrypt(raw) == "APIKEY123"          # ciphertext at rest
+    assert db.get_controller(cid, include_key=True)["api_key"] == "APIKEY123"  # plaintext for use
+    assert "api_key" not in db.get_controller(cid)                            # stripped by default
+    # Simulate a legacy plaintext row → still readable (no migration needed).
+    with db._connect() as conn:
+        conn.execute("UPDATE controllers SET api_key=? WHERE id=?", ("legacyplain", cid))
+    assert db.get_controller(cid, include_key=True)["api_key"] == "legacyplain"
 
 
 def test_unknown_engine_rejected(client, project):

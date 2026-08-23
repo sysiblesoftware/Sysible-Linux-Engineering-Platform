@@ -453,6 +453,34 @@ def test_cloudinit_no_directive_injection():
     assert not any(ln.startswith("runcmd") for ln in lines)   # no column-0 injected directive
 
 
+def test_libvirt_uri_allowlist():
+    """Security: reject non-qemu schemes (SSRF) and exec-capable URI params
+    (command=/netcat=); allow the qemu transports + keyfile/no_verify SLEP sets."""
+    import backend.app as appmod
+    import fastapi
+    assert appmod._validate_libvirt_uri("qemu:///system")
+    assert appmod._validate_libvirt_uri("qemu+ssh://admin@h/system?keyfile=/data/k&no_verify=1")
+    for bad in ("http://evil/x", "file:///etc/passwd",
+                "qemu+ssh://h/system?command=/bin/sh", "qemu+ssh://h/system?netcat=nc",
+                "qemu+ssh://h/system?proxy=netcat"):
+        try:
+            appmod._validate_libvirt_uri(bad)
+            assert False, f"should have rejected {bad}"
+        except fastapi.HTTPException as e:
+            assert e.status_code == 400
+
+
+def test_run_extra_vars_masked_for_viewers():
+    """Security: a run row's extra_vars values are masked for viewers (may hold a
+    secret typed into the Variables box); operator+ see them in full."""
+    import json as _json
+    import backend.app as appmod
+    row = {"extra_vars": '{"db_password": "hunter2secret", "network": "homelab"}'}
+    masked = appmod._mask_extra_vars(dict(row), "viewer")
+    assert _json.loads(masked["extra_vars"]) == {"db_password": "***", "network": "***"}
+    assert appmod._mask_extra_vars(dict(row), "operator")["extra_vars"] == row["extra_vars"]
+
+
 def test_pipeline_inventory_step_allows_empty_target(client):
     """The inventory pseudo-step needs no target (validation must not reject it)."""
     pid = client.post("/infra", json={"name": "invonly", "provider": "libvirt",

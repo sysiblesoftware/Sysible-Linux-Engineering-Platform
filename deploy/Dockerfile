@@ -31,10 +31,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Terraform (arch-aware via buildx's TARGETARCH: amd64 / arm64).
 ARG TARGETARCH=amd64
 ARG TERRAFORM_VERSION=1.9.8
-RUN curl -fsSL -o /tmp/tf.zip \
-      "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_${TARGETARCH}.zip" \
-    && unzip -o /tmp/tf.zip -d /usr/local/bin \
-    && rm /tmp/tf.zip \
+# Download the pinned Terraform and verify its SHA-256 against HashiCorp's
+# published SHA256SUMS before unzipping (so a corrupted/substituted artifact from
+# a mirror/MITM is rejected, not installed).
+RUN TFZIP="terraform_${TERRAFORM_VERSION}_linux_${TARGETARCH}.zip" \
+    && curl -fsSL -o "/tmp/${TFZIP}" \
+         "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/${TFZIP}" \
+    && curl -fsSL -o /tmp/tf.sums \
+         "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_SHA256SUMS" \
+    && (cd /tmp && grep " ${TFZIP}\$" tf.sums | sha256sum -c -) \
+    && unzip -o "/tmp/${TFZIP}" -d /usr/local/bin \
+    && rm -f "/tmp/${TFZIP}" /tmp/tf.sums \
     && terraform version
 
 WORKDIR /app

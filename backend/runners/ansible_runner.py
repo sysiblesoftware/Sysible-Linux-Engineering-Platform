@@ -255,12 +255,9 @@ def launch(run_id: int) -> None:
             # stored (encrypted) on the credential. Passed via a 0600 vars file so
             # it never lands in the process list. Lets a key credential run `become`
             # tasks against password-sudo hosts (e.g. an admin account).
-            become_pw = pop_become(run_id)
-            if not become_pw and credential and credential.get("become_secret"):
-                try:
-                    become_pw = vault.decrypt(credential["become_secret"])
-                except Exception:  # noqa: BLE001 — a bad ciphertext shouldn't crash the run
-                    become_pw = ""
+            # Per-run override (transient), else the credential's stored become
+            # password (db returns it decrypted on the include_secret read).
+            become_pw = pop_become(run_id) or (credential.get("become_secret") if credential else "") or ""
             if become_pw:
                 bfile = tmp / "become.json"
                 fd = os.open(str(bfile), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
