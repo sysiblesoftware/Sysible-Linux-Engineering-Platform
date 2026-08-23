@@ -79,3 +79,17 @@ def test_no_bastion_section_when_unset(tmp_path):
     dest = tmp_path / "inv.ini"
     _render_inventory(hosts, {"username": "admin"}, dest)
     assert "[all:vars]" not in dest.read_text()
+
+
+def test_wait_for_ssh_short_circuits(monkeypatch):
+    """The boot-readiness wait must never delay or hang when there's nothing to
+    probe: a configured jump host (probe path differs) or hosts without an address
+    both return immediately, emitting nothing."""
+    import backend.runners.ansible_runner as ar
+    lines = []
+    emit = lines.append
+    # Jump host set → skip (return at once).
+    ar._wait_for_ssh([{"name": "a", "address": "10.0.0.1"}], emit, timeout=1, bastion="user@jump")
+    # No usable addresses → skip.
+    ar._wait_for_ssh([{"name": "a", "address": ""}], emit, timeout=1)
+    assert lines == []

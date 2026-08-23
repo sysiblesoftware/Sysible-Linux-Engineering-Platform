@@ -19,6 +19,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import tempfile
 import time
@@ -151,8 +152,16 @@ def _emit_unreachable_help(emit, has_bastion: bool, proxy_hop_closed: bool,
         emit("       – the bastion can't route to the target's subnet / a firewall blocks it, or")
         emit("       – the bastion's sshd has 'AllowTcpForwarding no'.")
     if timed_out:
-        emit("   • The connection timed out — the host/port is unreachable from SLEP")
-        emit("     (wrong address, host down, or firewalled).")
+        emit("   • The connection TIMED OUT — SSH never reached the host's port 22. This is")
+        emit("     NOT a wrong key/user (that would say 'Permission denied'). It means one of:")
+        emit("       – the VMs were still booting when this ran. Freshly-applied cloud-init VMs")
+        emit("         take ~30–90s before sshd answers — just re-run the Ansible step, or run")
+        emit("         the whole cadence again; SLEP now waits for :22 before configuring.")
+        emit("       – SLEP has no network route to the VMs' subnet. libvirt VMs sit on a NAT")
+        emit("         network (e.g. 192.168.x) that a SLEP *container* can't reach unless it")
+        emit("         shares the host network or a route is added. Verify from the SLEP host:")
+        emit("           nc -vz <target-ip> 22     (or)   ssh <user>@<target-ip>")
+        emit("         If that also hangs, it's routing/firewall — not SLEP or the playbook.")
     if not (auth_denied or proxy_hop_closed or timed_out):
         emit("   • The target isn't accepting SSH: sshd not running (Sysible Linux ships SSH")
         emit("     OFF by default), wrong port, or a firewall in the way.")
@@ -163,6 +172,49 @@ def _emit_unreachable_help(emit, has_bastion: bool, proxy_hop_closed: bool,
         emit("   • Verify SSH manually from the SLEP host:  ssh <user>@<target>")
     emit("   Note: agent-enrolled hosts are managed by the Controller's agent (outbound")
     emit("   poll) — Ansible needs INBOUND SSH to them, which is a separate path.")
+
+
+def _wait_for_ssh(hosts, emit, timeout: int = 120, bastion: str = "") -> None:
+    """Give freshly-applied VMs a chance to finish booting before handing off to
+    Ansible, so a still-booting host is a short wait instead of an instant
+    UNREACHABLE. TCP-probes each host's port 22 directly; if all answer on the
+    first pass there's no delay at all. Skipped when a jump host is configured —
+    the real path then runs through the bastion, which this direct probe can't
+    model. Never fails the run: after the deadline it just proceeds (Ansible then
+    reports the real outcome, and the UNREACHABLE help explains a persistent one)."""
+    if bastion:
+        return
+    pending = [(h["name"], h["address"]) for h in hosts if h.get("address")]
+    if not pending:
+        return
+    deadline = time.time() + timeout
+    waited = False
+    while pending and time.time() < deadline:
+        still = []
+        for nm, addr in pending:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(3)
+            try:
+                s.connect((addr, 22))
+            except OSError:
+                still.append((nm, addr))
+            finally:
+                try:
+                    s.close()
+                except OSError:
+                    pass
+        if not still:
+            break
+        pending = still
+        waited = True
+        emit(f"-- waiting for SSH (:22) on {len(pending)} host(s) to come up: "
+             f"{', '.join(a for _, a in pending)} …")
+        time.sleep(6)
+    if waited and not pending:
+        emit("-- all hosts now answer on :22 — proceeding.\n")
+    elif pending:
+        emit(f"-- {len(pending)} host(s) still silent on :22 after {timeout}s: "
+             f"{', '.join(a for _, a in pending)}. Proceeding — Ansible will report the outcome.\n")
 
 
 def _write_key(secret: str, dest: Path) -> None:
@@ -222,6 +274,11 @@ def launch(run_id: int) -> None:
             # bastion by 'Prepare jump host' / 'Distribute SSH key').
             _render_inventory(hosts, credential, inv_file, bastion=bastion,
                               bastion_key=keydist.managed_key_path())
+
+            # Freshly-applied VMs may still be booting — wait for :22 so the cadence
+            # (apply → inventory → configure) doesn't race the boot. No-op delay when
+            # hosts are already up, or when reached through a jump host.
+            _wait_for_ssh(hosts, emit, bastion=bastion)
 
             cmd = ["ansible-playbook", "-i", str(inv_file), str(playbook)]
             if credential and credential.get("kind") == "ssh" and credential.get("secret"):

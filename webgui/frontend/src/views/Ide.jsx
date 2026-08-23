@@ -817,6 +817,32 @@ function NameModal({ title, label, placeholder, onClose, onSubmit }) {
   )
 }
 
+// Target picker for Ansible/Salt: a real dropdown that always lists every
+// matching file in the project (a bare <datalist> filters its options by the
+// text already in the box, so a pre-filled "main.yml" hides the rest). Choosing
+// "✎ Custom path…" — or a value that isn't one of the files — swaps to a free
+// text input so an arbitrary path is still typeable.
+function FileTarget({ value, onChange, files, placeholder }) {
+  const inList = files.includes(value)
+  const [custom, setCustom] = useState(!inList && !!value)
+  if (custom || files.length === 0) {
+    return (
+      <span className="row" style={{ gap: 4, flex: 1 }}>
+        <input value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} style={{ flex: 1 }} />
+        {files.length > 0 && <button type="button" className="ghost sm" title="Pick from project files" onClick={() => setCustom(false)}>▾</button>}
+      </span>
+    )
+  }
+  return (
+    <select value={inList ? value : ''} title="Playbook / state to run"
+      onChange={(e) => { if (e.target.value === '__custom') setCustom(true); else onChange(e.target.value) }}>
+      {!inList && <option value="">Select a file…</option>}
+      {files.map((p) => <option key={p} value={p}>{p}</option>)}
+      <option value="__custom">✎ Custom path…</option>
+    </select>
+  )
+}
+
 export function RunModal({ project, currentFile, onClose, onLaunched, initial }) {
   const ini = initial || {}
   const [engine, setEngine] = useState(ini.engine || 'ansible')
@@ -881,9 +907,8 @@ export function RunModal({ project, currentFile, onClose, onLaunched, initial })
       <Field label={engine === 'ansible' ? 'Playbook path' : engine === 'terraform' ? 'Action' : 'State (or “highstate”)'}>
         {engine === 'terraform'
           ? <select value={target} onChange={(e) => setTarget(e.target.value)}><option>plan</option><option>apply</option><option>destroy</option></select>
-          : <><input value={target} onChange={(e) => setTarget(e.target.value)} list="run-target-files"
-                     placeholder={engine === 'salt' ? 'state.sls / highstate' : 'playbook.yml'} />
-              <datalist id="run-target-files">{targetFiles.map((p) => <option key={p} value={p} />)}</datalist></>}
+          : <FileTarget value={target} onChange={setTarget} files={targetFiles}
+                        placeholder={engine === 'salt' ? 'state.sls / highstate' : 'playbook.yml'} />}
       </Field>
       {needsInv && (
         <Field label="Inventory">
@@ -1044,7 +1069,8 @@ export function PipelineModal({ project, currentFile, initialSteps, initialName,
             : (<>
                 {st.kind === 'terraform'
                   ? <select value={st.target} onChange={(e) => upd(i, { target: e.target.value })} title="Action" style={{ flex: '1 1 auto', minWidth: 0 }}><option>plan</option><option>apply</option><option>destroy</option></select>
-                  : <input value={st.target} onChange={(e) => upd(i, { target: e.target.value })} list={st.kind === 'salt' ? 'pipe-files-salt' : 'pipe-files-ansible'} title="Playbook / state to run" placeholder={st.kind === 'salt' ? 'state / highstate' : 'playbook.yml'} />}
+                  : <FileTarget value={st.target} onChange={(v) => upd(i, { target: v })} files={filesFor(st.kind)}
+                                placeholder={st.kind === 'salt' ? 'state / highstate' : 'playbook.yml'} />}
                 {st.kind === 'terraform'
                   ? <select value={st.tool} onChange={(e) => upd(i, { tool: e.target.value })} title="Tool" style={{ width: 150 }}><option value="terraform">Terraform</option><option value="tofu">OpenTofu</option></select>
                   : <select value={st.inventory_id} onChange={(e) => invChange(i, e.target.value)} title="Inventory (hosts to target)" style={{ width: 150 }}>
@@ -1089,8 +1115,6 @@ export function PipelineModal({ project, currentFile, initialSteps, initialName,
         )}
         </React.Fragment>
       ))}
-      <datalist id="pipe-files-ansible">{filesFor('ansible').map((p) => <option key={p} value={p} />)}</datalist>
-      <datalist id="pipe-files-salt">{filesFor('salt').map((p) => <option key={p} value={p} />)}</datalist>
       {newInvStep != null && <NameModal title="New inventory" label="Inventory name" placeholder="prod-web"
         onClose={() => setNewInvStep(null)} onSubmit={createInv} />}
       <div className="row" style={{ margin: '8px 0' }}>
