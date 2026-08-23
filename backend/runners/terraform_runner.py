@@ -194,11 +194,21 @@ def launch(run_id: int) -> None:
         if action == "apply" and rc == 0:
             try:
                 from .. import app as _app
-                built = _app._autobuild_infra_inventory(run["project_id"])
+                built = _app._autobuild_infra_inventory(run["project_id"], run=run)
                 if built:
                     iid, iname, n = built
-                    emit(f"\n-- SLEP: added {n} VM(s) to inventory “{iname}” (#{iid}) — "
-                         f"select it in your Ansible/Salt step to configure them.")
+                    if n > 0:
+                        emit(f"\n-- SLEP: added {n} VM(s) to inventory “{iname}” (#{iid}) — "
+                             f"the next Ansible/Salt step will target them.")
+                    else:
+                        # VMs exist in the output but none had a usable address —
+                        # almost always libvirt IPs not assigned yet (DHCP / guest
+                        # agent). Say so, since an empty inventory otherwise fails
+                        # the next step with a confusing "nothing to target".
+                        emit(f"\n-- SLEP: inventory “{iname}” (#{iid}) got 0 hosts — the VMs "
+                             f"applied but have no IP yet (libvirt assigns addresses via "
+                             f"DHCP/guest-agent after boot). Wait for them to come up, then "
+                             f"re-run the Ansible/Salt step (or the '→ Inventory' action).")
             except Exception:  # noqa: BLE001 — never fail the apply over this
                 pass
 

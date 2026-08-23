@@ -1740,17 +1740,19 @@ def _infra_applied_hosts(project_id: int):
     return hosts
 
 
-def _build_infra_inventory(project, meta):
-    """Read the applied VMs (sysible_hosts) into the project's 'infra' inventory
-    (created once, refreshed on re-run): name → address = ip, ansible_user set,
-    grouped by the environment tag. Returns (inventory_id, name, host_count).
-    Raises HTTPException (via _infra_applied_hosts) when apply hasn't produced
-    hosts yet. Shared by the manual '→ Inventory' action and the pipeline's
-    auto-inventory step."""
+def _build_infra_inventory(project, meta, target_inventory_id=None):
+    """Read the applied VMs (sysible_hosts) into an Ansible inventory (created once,
+    refreshed on re-run): name → address = ip, ansible_user set, grouped by the
+    environment tag. Returns (inventory_id, name, host_count). Raises HTTPException
+    (via _infra_applied_hosts) when apply hasn't produced hosts yet. Shared by the
+    manual '→ Inventory' action and the pipeline's auto-inventory step.
+
+    Inventory target precedence: an explicit `target_inventory_id` (e.g. the one a
+    pipeline's Ansible/Salt step already selected) wins, so the VMs land exactly
+    where the next step will look for them; otherwise the infra's configured
+    inventory; otherwise a dedicated "<name> (VMs)" inventory for this project."""
     hosts = _infra_applied_hosts(project["id"])
-    # Target the operator's chosen inventory (e.g. "Dev") if set; otherwise a
-    # dedicated "<name> (VMs)" inventory for this project.
-    target = meta.get("inventory_id")
+    target = target_inventory_id or meta.get("inventory_id")
     if target and db.get_inventory(target):
         iid = target
     else:
@@ -1769,20 +1771,43 @@ def _build_infra_inventory(project, meta):
     return iid, db.get_inventory(iid)["name"], n
 
 
-def _autobuild_infra_inventory(project_id: int):
-    """Best-effort: read a project's applied VMs into its own '<name> (VMs)'
-    inventory. Returns (inventory_id, name, host_count), or None when it's not an
-    infra project or apply hasn't produced hosts yet. Called automatically by the
-    terraform runner after a successful apply so new VMs land in an inventory with
-    no manual step."""
+def _autobuild_infra_inventory(project_id: int, run=None):
+    """Best-effort: read a project's applied VMs into an inventory. Returns
+    (inventory_id, name, host_count), or None when it's not an infra project or
+    apply hasn't produced hosts yet. Called automatically by the terraform runner
+    after a successful apply so new VMs land in an inventory with no manual step.
+
+    When `run` is part of a pipeline (has a group_id), the VMs are written into the
+    inventory the *next* Ansible/Salt step already selected — so "I picked an
+    inventory for the Configure step" just works — and any following Ansible/Salt
+    steps that didn't name one are back-filled to the same inventory."""
     project = db.get_project(project_id)
     meta = db.get_infra(project_id)
     if not project or not meta:
         return None
+
+    # Downstream steps of this run's pipeline (in order), if any.
+    later_steps = []
+    if run and run.get("group_id"):
+        later_steps = [r for r in db.runs_in_group(run["group_id"])
+                       if r.get("id", 0) > run.get("id", 0)
+                       and r.get("kind") in ("ansible", "salt")]
+
+    # If a downstream step already names an inventory, that's where the operator
+    # expects the machines — target it directly instead of the default.
+    target = next((r.get("inventory_id") for r in later_steps if r.get("inventory_id")), None)
+
     try:
-        return _build_infra_inventory(project, meta)
+        iid, name, n = _build_infra_inventory(project, meta, target_inventory_id=target)
     except HTTPException:
         return None
+
+    # Point any downstream Ansible/Salt steps that didn't pick an inventory at the
+    # one we just populated, so the whole sequence configures these VMs.
+    for r in later_steps:
+        if not r.get("inventory_id"):
+            db.set_run_inventory(r["id"], iid)
+    return iid, name, n
 
 
 @app.post("/infra/{project_id}/inventory")
