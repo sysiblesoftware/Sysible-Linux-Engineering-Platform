@@ -20,7 +20,6 @@ import Pipelines from './views/Pipelines.jsx'
 // Left-rail navigation — same shape as the Sysible Controller console.
 // `su: true` items are shown only to superusers.
 const NAV = [
-  { key: 'organizations', label: 'Organizations', icon: 'org' },
   { key: 'projects', label: 'Projects', icon: 'folder' },
   { key: 'inventories', label: 'Inventories', icon: 'server' },
   { key: 'infra', label: 'Infrastructure', icon: 'cloud' },
@@ -30,6 +29,7 @@ const NAV = [
   { key: 'runs', label: 'Runs', icon: 'play' },
   { key: 'pipelines', label: 'Pipelines', icon: 'pipeline' },
   { key: 'schedules', label: 'Schedules', icon: 'clock' },
+  { key: 'organizations', label: 'Organizations', icon: 'org', su: true },
   { key: 'activity', label: 'Activity', icon: 'activity', su: true },
   { key: 'users', label: 'Users', icon: 'users', su: true },
 ]

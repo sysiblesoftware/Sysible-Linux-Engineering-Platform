@@ -570,7 +570,15 @@ def create_project(request: Request, body: dict = Body(...), user: str = Depends
     name = str(body.get("name") or "").strip()
     if not name:
         raise HTTPException(status_code=400, detail="Project name is required.")
-    org_id = body.get("org_id") or db.default_org_id()
+    # A sub-project inherits its parent's org; a top-level project takes org_id.
+    parent_id = body.get("parent_id")
+    if parent_id:
+        parent = db.get_project(parent_id)
+        if not parent:
+            raise HTTPException(status_code=404, detail="Parent project not found.")
+        org_id = parent.get("org_id") or db.default_org_id()
+    else:
+        org_id = body.get("org_id") or db.default_org_id()
     _require_org(request, org_id, "operator")
     base = _slugify(name)
     slug, n = base, 1
@@ -579,7 +587,7 @@ def create_project(request: Request, body: dict = Body(...), user: str = Depends
         slug = f"{base}-{n}"
     pid = db.create_project(name, slug, str(body.get("description") or ""),
                             str(body.get("scm_url") or ""), str(body.get("scm_branch") or ""),
-                            org_id=org_id)
+                            org_id=org_id, parent_id=parent_id or None)
     # Optionally seed the project by cloning a git repo into its (empty) workdir.
     clone_url = str(body.get("clone_url") or "").strip()
     if clone_url:
@@ -600,6 +608,30 @@ def get_project(pid: int, user: str = Depends(current_user)):
     if not p:
         raise HTTPException(status_code=404, detail="Project not found.")
     return p
+
+
+@app.patch("/projects/{pid}")
+def move_project(pid: int, request: Request, body: dict = Body(...), user: str = Depends(current_user)):
+    """Re-parent a project (organize it into a folder / sub-project tree).
+    parent_id null makes it top-level. The new parent must be in the same org."""
+    p = db.get_project(pid)
+    if not p:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    _require_org(request, p.get("org_id") or db.default_org_id(), "operator")
+    if "parent_id" in body:
+        new_parent = body.get("parent_id")
+        if new_parent:
+            parent = db.get_project(new_parent)
+            if not parent:
+                raise HTTPException(status_code=404, detail="Parent project not found.")
+            if (parent.get("org_id") or db.default_org_id()) != (p.get("org_id") or db.default_org_id()):
+                raise HTTPException(status_code=400, detail="A project can only nest under one in the same organization.")
+        try:
+            db.set_project_parent(pid, new_parent or None)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        db.log_audit("project_moved", user, f"#{pid} → parent {new_parent or 'top-level'}")
+    return db.get_project(pid)
 
 
 @app.delete("/projects/{pid}")

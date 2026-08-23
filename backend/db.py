@@ -297,6 +297,11 @@ def init_db() -> None:
             if "org_id" not in cols:
                 c.execute(f"ALTER TABLE {tbl} ADD COLUMN org_id INTEGER")
         _seed_default_org(c)
+        # Project hierarchy: a project may nest under a parent project (folders /
+        # sub-projects). NULL parent_id = a top-level project.
+        proj_cols2 = [r["name"] for r in c.execute("PRAGMA table_info(projects)")]
+        if "parent_id" not in proj_cols2:
+            c.execute("ALTER TABLE projects ADD COLUMN parent_id INTEGER")
         # One-time: encrypt any credential/controller secrets still stored as
         # plaintext (rows written before at-rest encryption). Idempotent.
         _encrypt_legacy_secrets(c)
@@ -709,19 +714,44 @@ def get_project(pid: int, include_token=False):
     return d
 
 
-def create_project(name, slug, description="", scm_url="", scm_branch="", org_id=None):
+def create_project(name, slug, description="", scm_url="", scm_branch="", org_id=None, parent_id=None):
     ts = _now()
+    # A sub-project lives in the same org as its parent; only a top-level project
+    # takes an explicit (or Default) org.
+    if parent_id is not None:
+        parent = get_project(parent_id)
+        org_id = (parent or {}).get("org_id") or org_id
     if org_id is None:
         org_id = default_org_id()
     with _connect() as c:
         cur = c.execute(
-            "INSERT INTO projects(name,slug,description,scm_url,scm_branch,org_id,created,updated)"
-            " VALUES(?,?,?,?,?,?,?,?)",
-            (name, slug, description, scm_url, scm_branch, org_id, ts, ts),
+            "INSERT INTO projects(name,slug,description,scm_url,scm_branch,org_id,parent_id,created,updated)"
+            " VALUES(?,?,?,?,?,?,?,?,?)",
+            (name, slug, description, scm_url, scm_branch, org_id, parent_id, ts, ts),
         )
         pid = cur.lastrowid
     (PROJECTS_DIR / str(pid)).mkdir(parents=True, exist_ok=True)
     return pid
+
+
+def set_project_parent(pid: int, parent_id):
+    """Move a project under a new parent (None = make it top-level). Refuses to
+    create a cycle (a project can't become its own ancestor)."""
+    if parent_id is not None:
+        if int(parent_id) == int(pid):
+            raise ValueError("A project can't be its own parent.")
+        # Walk up from the proposed parent; if we reach pid, this would loop.
+        seen, cur_id = set(), parent_id
+        while cur_id is not None and cur_id not in seen:
+            seen.add(cur_id)
+            row = get_project(cur_id)
+            if not row:
+                break
+            if row.get("parent_id") == pid:
+                raise ValueError("That move would create a project cycle.")
+            cur_id = row.get("parent_id")
+    with _connect() as c:
+        c.execute("UPDATE projects SET parent_id=?, updated=? WHERE id=?", (parent_id, _now(), pid))
 
 
 def touch_project(pid: int):
@@ -748,6 +778,11 @@ def set_project_scm(pid: int, scm_url=None, scm_branch=None, git_token=None):
 
 def delete_project(pid: int):
     with _connect() as c:
+        # Promote any sub-projects up to this project's parent so they aren't
+        # orphaned (deleting a folder shouldn't silently delete its contents).
+        row = c.execute("SELECT parent_id FROM projects WHERE id=?", (pid,)).fetchone()
+        new_parent = row["parent_id"] if row else None
+        c.execute("UPDATE projects SET parent_id=? WHERE parent_id=?", (new_parent, pid))
         c.execute("DELETE FROM projects WHERE id=?", (pid,))
 
 
