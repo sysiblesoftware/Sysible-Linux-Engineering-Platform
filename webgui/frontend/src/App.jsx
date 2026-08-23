@@ -146,14 +146,15 @@ function Auth({ needSetup, onAuthed }) {
   })
   return (
     <div className="center">
-      <div className="card col" style={{ width: 'min(380px,92vw)' }}>
-        <div className="brand" style={{ gap: 12 }}>
-          <Logo size={40} />
-          <div className="col" style={{ gap: 2 }}>
-            <div style={{ fontSize: 17, lineHeight: 1.15 }}>Sysible Linux<br />Engineering Platform</div>
-          </div>
+      <div className="card col login-card" style={{ width: 'min(400px,92vw)' }}>
+        <div className="login-lockup">
+          <Logo size={58} />
+          <div className="lockup-word"><b>Sysible</b><span>Linux Engineering Platform</span></div>
+          <div className="lockup-tag">Author · Run · Maintain</div>
         </div>
-        <div className="muted">{needSetup ? 'Create the first administrator' : 'Sign in'}</div>
+        <div className="muted" style={{ textAlign: 'center', marginTop: 2 }}>
+          {needSetup ? 'Create the first administrator account.' : 'Sign in with your administrator account.'}
+        </div>
         <Field label="Username"><input value={u} autoComplete="username" onChange={(e) => setU(e.target.value)} /></Field>
         <Field label="Password"><input type="password" value={p} autoComplete={needSetup ? 'new-password' : 'current-password'}
           onChange={(e) => setP(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && submit()} /></Field>
