@@ -3,6 +3,7 @@ import { api, tail, getTheme } from '../api.js'
 import { parseRun } from '../runParse.js'
 import RunViz from './RunViz.jsx'
 import { RunModal } from './Ide.jsx'
+import { Modal, Field } from '../ui.jsx'
 
 // Render ANSI-coloured tool output (ansible-playbook et al. emit SGR codes) as
 // coloured spans, so the run log reads like a real terminal instead of showing
@@ -80,6 +81,11 @@ export function RunLog({ runId, onBack, onOpenRun }) {
   const [leftPct, setLeftPct] = useState(50)   // Visualize/Log split, % of width
   const [groupId, setGroupId] = useState('')   // pipeline group this run belongs to
   const [seq, setSeq] = useState([])           // the sibling runs of that pipeline
+  const [projectId, setProjectId] = useState(null)  // this run's project (for enroll)
+  const [controllers, setControllers] = useState([])
+  const [enrollBusy, setEnrollBusy] = useState(false)
+  const [enrollPick, setEnrollPick] = useState(false)   // Controller picker open?
+  const [pickedCtrl, setPickedCtrl] = useState('')
   const boxRef = useRef(null)
   const splitRef = useRef(null)
 
@@ -108,6 +114,7 @@ export function RunLog({ runId, onBack, onOpenRun }) {
         if (!alive) return
         setEngine(r.kind || 'ansible')
         setGroupId(r.group_id || '')
+        setProjectId(r.project_id ?? null)
         if (r.inventory_id) {
           try {
             const h = await api(`inventories/${r.inventory_id}/hosts`)
@@ -118,6 +125,31 @@ export function RunLog({ runId, onBack, onOpenRun }) {
     })()
     return () => { alive = false }
   }, [runId])
+
+  // Connected Controllers, for the "Enroll → Controller" action on infra runs.
+  useEffect(() => {
+    api('controllers').then((d) => setControllers(d.controllers || [])).catch(() => {})
+  }, [])
+
+  // Register this run's project VMs into a Controller. Uses the project's chosen
+  // Controller; if none is set the backend says so and we open the picker.
+  const doEnroll = async (cid) => {
+    if (!projectId) return
+    setEnrollBusy(true)
+    try {
+      const body = cid ? { controller_id: Number(cid) } : {}
+      const d = await api(`infra/${projectId}/enroll`, { method: 'POST', json: body })
+      setEnrollPick(false)
+      const lines = (d.results || []).map((h) => `${h.ok ? '✓' : '✗'} ${h.name} ${h.ip} — ${h.detail}`).join('\n')
+      alert(`Enrolled ${d.enrolled}/${d.total} into ${d.controller}:\n\n${lines}`)
+    } catch (e) {
+      if (/no controller was chosen/i.test(e.message) && controllers.length) {
+        setPickedCtrl(String(controllers[0].id)); setEnrollPick(true)
+      } else {
+        alert(e.message + (/no controller/i.test(e.message) ? '\n\nConnect one under Controllers first.' : ''))
+      }
+    } finally { setEnrollBusy(false) }
+  }
 
   // Part of a launched sequence? Poll the group's runs so the step strip shows the
   // whole pipeline advancing (queued → running → success/failed/canceled).
@@ -198,7 +230,29 @@ export function RunLog({ runId, onBack, onOpenRun }) {
           <button className="ghost sm" title={`Re-run the playbook against just: ${failedHosts.join(', ')}`}
             onClick={openRerun}>↻ Re-run failed ({failedHosts.length})</button>
         )}
+        {projectId && (engine === 'terraform' || seq.some((s) => s.kind === 'terraform')) && (
+          <button className="primary sm" disabled={enrollBusy}
+            title="Register this project's applied VMs into a connected Controller"
+            onClick={() => doEnroll(null)}>{enrollBusy ? 'Enrolling…' : 'Enroll → Controller'}</button>
+        )}
       </div>
+      {enrollPick && (
+        <Modal title="Enroll VMs into a Controller" onClose={() => setEnrollPick(false)}>
+          <p className="muted" style={{ marginTop: 0 }}>
+            This project has no Controller set. Pick one to register the applied VMs into.
+          </p>
+          <Field label="Controller">
+            <select value={pickedCtrl} onChange={(e) => setPickedCtrl(e.target.value)}>
+              {controllers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+            </select>
+          </Field>
+          <div className="row" style={{ marginTop: 12, justifyContent: 'flex-end' }}>
+            <button className="ghost sm" onClick={() => setEnrollPick(false)}>Cancel</button>
+            <button className="primary sm" disabled={enrollBusy || !pickedCtrl}
+              onClick={() => doEnroll(pickedCtrl)}>{enrollBusy ? 'Enrolling…' : 'Enroll →'}</button>
+          </div>
+        </Modal>
+      )}
       {seq.length > 1 && (
         <div className="seq-strip">
           {seq.map((s, i) => (

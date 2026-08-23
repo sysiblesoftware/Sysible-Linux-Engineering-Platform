@@ -1825,18 +1825,29 @@ def infra_to_inventory(project_id: int, user: str = Depends(require_operator)):
     return {"inventory_id": iid, "name": name, "hosts": n}
 
 
-@app.post("/infra/{project_id}/enroll")
-def infra_enroll(project_id: int, user: str = Depends(require_operator)):
-    """After `terraform apply`, read the created VMs (the sysible_hosts output) and
-    register each into the project's connected Controller as an SSH host."""
+def _enroll_infra_hosts(project_id: int, controller_id=None):
+    """Register a project's applied VMs (the sysible_hosts output) into a
+    Controller as SSH hosts. Returns {results, enrolled, total, controller}.
+    `controller_id` overrides the infra's configured Controller (so the operator
+    can enroll on demand into any connected Controller); when it's given and the
+    infra had none stored, it's persisted so key-baking and later enrolls reuse
+    it. Raises HTTPException when the project isn't infra, no Controller is chosen
+    or found, or apply produced no hosts yet."""
     meta = db.get_infra(project_id)
     if not meta:
         raise HTTPException(status_code=404, detail="Not an infrastructure project.")
-    if not meta.get("controller_id"):
+    cid = controller_id or meta.get("controller_id")
+    if not cid:
         raise HTTPException(status_code=400, detail="No Controller was chosen for this infrastructure.")
-    ctrl = db.get_controller(meta["controller_id"], include_key=True)
+    ctrl = db.get_controller(cid, include_key=True)
     if not ctrl:
-        raise HTTPException(status_code=400, detail="The connected Controller no longer exists.")
+        raise HTTPException(status_code=400, detail="The chosen Controller no longer exists.")
+    # Persist an operator-picked Controller when the infra didn't have one, so the
+    # choice sticks for future enrolls (and the SSH-key bake on the next apply).
+    if controller_id and not meta.get("controller_id"):
+        db.set_infra(project_id, meta["provider"], controller_id=cid,
+                     ssh_user=meta.get("ssh_user", ""), environment=meta.get("environment", ""),
+                     inventory_id=meta.get("inventory_id"))
     hosts = _infra_applied_hosts(project_id)
 
     results, ok_n = [], 0
@@ -1850,5 +1861,18 @@ def infra_enroll(project_id: int, user: str = Depends(require_operator)):
             ctrl["base_url"], ctrl["api_key"], nm, ip, huser, meta.get("environment", ""))
         ok_n += 1 if ok else 0
         results.append({"name": nm, "ip": ip, "ok": ok, "detail": detail})
-    db.log_audit("infra_enrolled", user, f"{ok_n}/{len(hosts)} into Controller '{ctrl['name']}'")
     return {"results": results, "enrolled": ok_n, "total": len(hosts), "controller": ctrl["name"]}
+
+
+@app.post("/infra/{project_id}/enroll")
+def infra_enroll(project_id: int, body: dict = Body(default=None),
+                 user: str = Depends(require_operator)):
+    """After `terraform apply`, read the created VMs (the sysible_hosts output) and
+    register each into a Controller as an SSH host. Uses the infra's configured
+    Controller, or an optional `controller_id` in the body to pick one on demand
+    (which is then remembered for the project)."""
+    cid = (body or {}).get("controller_id")
+    out = _enroll_infra_hosts(project_id, controller_id=int(cid) if cid else None)
+    db.log_audit("infra_enrolled", user,
+                 f"{out['enrolled']}/{out['total']} into Controller '{out['controller']}'")
+    return out
