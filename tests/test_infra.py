@@ -445,12 +445,32 @@ def test_generated_hcl_escapes_user_values():
 
 
 def test_cloudinit_no_directive_injection():
-    """Security: a newline in an SSH key / user can't inject a top-level cloud-init
-    directive (e.g. runcmd) that would run as root on the VM."""
+    """Security: a newline in an SSH key / user can't inject its OWN top-level
+    cloud-init directive that would run as root on the VM. (SLEP's own hardcoded
+    runcmd — which enables sshd — is expected; the point is the attacker's payload
+    is stripped by single-lining the key.)"""
     files = infra.generate("libvirt", {"count": 1, "base_image": "x", "ssh_user": "ubuntu",
                                        "ssh_public_key": "ssh-ed25519 AAAA\nruncmd:\n  - [sh, -c, id]"})
-    lines = files["cloudinit.cfg"].split("\n")
-    assert not any(ln.startswith("runcmd") for ln in lines)   # no column-0 injected directive
+    ci = files["cloudinit.cfg"]
+    assert "ssh-ed25519 AAAA" in ci                 # the key's first line survives
+    assert "[sh, -c, id]" not in ci                 # the injected payload does NOT
+    # The key line is single-lined, so nothing after the newline reaches the file.
+    assert "\nruncmd:\n  - [sh, -c, id]" not in ci
+
+
+def test_cloudinit_enables_ssh_by_default():
+    """Every generated VM turns its SSH server on by default (install if missing +
+    enable the service), so SLEP can reach a host even if the base image ships SSH
+    off — without the operator configuring anything."""
+    for provider in infra.PROVIDERS:
+        files = infra.generate(provider, {"count": 1, "base_image": "x", "ssh_user": "ubuntu"})
+        ci = files.get("cloudinit.cfg")
+        if ci is None:
+            continue          # proxmox/gcp provision keys via template/metadata, not cloudinit.cfg
+        assert "runcmd:" in ci
+        assert "openssh-server" in ci
+        assert "systemctl enable --now ssh" in ci
+        assert "ssh_pwauth: false" in ci
 
 
 def test_autobuild_infra_inventory_on_apply(client, monkeypatch):

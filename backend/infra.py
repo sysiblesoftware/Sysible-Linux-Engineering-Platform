@@ -172,6 +172,24 @@ def _cloudinit(ssh_user: str, keys: list[str]) -> str:
     else:
         lines.append("      []")
     lines.append("package_update: true")
+    lines.append("ssh_pwauth: false")            # key-based auth only
+    # Guarantee an SSH server is installed, enabled, and running BY DEFAULT — so
+    # SLEP's Ansible/Salt can reach the VM even when the base image ships sshd off
+    # or absent (a minimal cloud image, or a Sysible Linux image, which defaults
+    # SSH off). These commands are hardcoded (never derived from user input, so no
+    # injection risk) and best-effort/cross-distro: install openssh-server only if
+    # no sshd binary exists (apt → dnf → yum), then enable the Debian ('ssh') or
+    # RHEL ('sshd') unit.
+    lines += [
+        "runcmd:",
+        "  - [ sh, -c, \"command -v sshd >/dev/null 2>&1 || "
+        "{ command -v apt-get >/dev/null 2>&1 && apt-get update && "
+        "DEBIAN_FRONTEND=noninteractive apt-get install -y openssh-server; } || "
+        "{ command -v dnf >/dev/null 2>&1 && dnf install -y openssh-server; } || "
+        "{ command -v yum >/dev/null 2>&1 && yum install -y openssh-server; } || true\" ]",
+        "  - [ sh, -c, \"systemctl enable --now ssh 2>/dev/null || "
+        "systemctl enable --now sshd 2>/dev/null || true\" ]",
+    ]
     return "\n".join(lines) + "\n"
 
 
