@@ -289,24 +289,39 @@ def launch(run_id: int) -> None:
                  f"{'; jump host: ' + bastion if bastion else ''} --\n")
             log.flush()
 
+            if _common.is_stopped(run_id):
+                _common.clear_stop(run_id)
+                emit("\n== canceled by operator ==")
+                db.set_run_status(run_id, "canceled", exit_code=130, finished=int(time.time()))
+                return
             proc = subprocess.Popen(
                 cmd, cwd=str(workdir), env=env,
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
+                start_new_session=True,
             )
+            _common.register(run_id, proc)
             unreachable = proxy_hop_closed = auth_denied = timed_out = False
-            for line in proc.stdout:      # live stream
-                log.write(line)
-                log.flush()
-                if "UNREACHABLE!" in line:
-                    unreachable = True
-                if "Connection closed by UNKNOWN" in line:
-                    proxy_hop_closed = True
-                if "Permission denied" in line or "Authentication failed" in line:
-                    auth_denied = True
-                if "Connection timed out" in line or "Operation timed out" in line:
-                    timed_out = True
-            rc = proc.wait()
+            try:
+                for line in proc.stdout:      # live stream
+                    log.write(line)
+                    log.flush()
+                    if "UNREACHABLE!" in line:
+                        unreachable = True
+                    if "Connection closed by UNKNOWN" in line:
+                        proxy_hop_closed = True
+                    if "Permission denied" in line or "Authentication failed" in line:
+                        auth_denied = True
+                    if "Connection timed out" in line or "Operation timed out" in line:
+                        timed_out = True
+                rc = proc.wait()
+            finally:
+                _common.unregister(run_id)
 
+            if _common.is_stopped(run_id):
+                _common.clear_stop(run_id)
+                emit("\n== canceled by operator ==")
+                db.set_run_status(run_id, "canceled", exit_code=rc or 130, finished=int(time.time()))
+                return
             emit(f"\n== finished: exit code {rc} ==")
             if unreachable:
                 _emit_unreachable_help(emit, bool(bastion), proxy_hop_closed, auth_denied, timed_out)

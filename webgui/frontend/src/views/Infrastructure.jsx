@@ -11,19 +11,31 @@ export default function Infrastructure({ onOpenProject, onOpenRun }) {
   const [open, setOpen] = useState(false)
   const [pipe, setPipe] = useState(null)   // {project, steps} → opens the pipeline builder
   const [vms, setVms] = useState(null)     // {name, loading?|list?|error?} → VMs-on-hypervisor modal
+  const [controllers, setControllers] = useState([])
+  const [enrollFor, setEnrollFor] = useState(null)   // {r} → Controller picker when none set
   const load = () => api('infra').then((d) => setRows(d.infra))
-  useEffect(() => { load() }, [])
+  useEffect(() => { load(); api('controllers').then((d) => setControllers(d.controllers || [])).catch(() => {}) }, [])
   const writable = canWrite()
 
   const run = async (r, target) => {
     const d = await api('runs', { method: 'POST', json: { project_id: r.project_id, kind: 'terraform', target } })
     onOpenRun(d.run_id)
   }
-  const enroll = async (r) => {
+  // Register this project's applied VMs into a Controller. Uses the project's set
+  // Controller if it has one; otherwise opens a picker so you can choose on demand
+  // (the choice is remembered for next time). This is the "enroll the new VMs"
+  // button — always available on infra projects, no need to hunt for a run.
+  const enroll = async (r, controllerId) => {
+    if (!r.controller_id && !controllerId) {
+      if (!controllers.length) { alert('Connect a Controller first (Controllers tab).'); return }
+      setEnrollFor(r); return
+    }
     try {
-      const d = await api(`infra/${r.project_id}/enroll`, { method: 'POST' })
+      const body = controllerId ? { controller_id: Number(controllerId) } : {}
+      const d = await api(`infra/${r.project_id}/enroll`, { method: 'POST', json: body })
+      setEnrollFor(null); load()
       const lines = d.results.map((h) => `${h.ok ? '✓' : '✗'} ${h.name} ${h.ip} — ${h.detail}`).join('\n')
-      alert(`Enrolled ${d.enrolled}/${d.total} into ${d.controller}:\n\n${lines}`)
+      alert(`Enrolled ${d.enrolled}/${d.total} into ${d.controller}:\n\n${lines || '(no hosts yet — apply the VMs first)'}`)
     } catch (e) { alert(e.message) }
   }
   // Read the applied VMs (terraform/tofu output) into a SLEP Ansible inventory, so
@@ -97,7 +109,7 @@ export default function Infrastructure({ onOpenProject, onOpenRun }) {
                   {writable && <button className="danger ghost sm" onClick={() => run(r, 'destroy')}>Destroy</button>}
                   {writable && <button className="ghost sm" title="List the VMs actually on this project's hypervisor" onClick={() => listVms(r)}>🖥 VMs</button>}
                   {writable && <button className="ghost sm" title="Read the applied VMs into a SLEP Ansible inventory" onClick={() => toInventory(r)}>→ Inventory</button>}
-                  {writable && r.controller_id ? <button className="primary sm" onClick={() => enroll(r)}>Enroll →</button> : null}
+                  {writable && <button className="primary sm" title="Register the applied VMs into a connected Controller (agent enroll)" onClick={() => enroll(r)}>Enroll → Controller</button>}
                   {writable && <button className="ghost sm" title="Scaffold an Ansible playbook and open it (Configure)" onClick={() => scaffold(r, 'configure')}>Configure</button>}
                   {writable && <button className="ghost sm" title="Scaffold a Salt state and open it (Maintain)" onClick={() => scaffold(r, 'maintain')}>Maintain</button>}
                   {writable && <button className="primary sm" title="Run the whole cadence in sequence: apply → configure → maintain" onClick={() => cadence(r)}>▶ Cadence</button>}
@@ -112,7 +124,31 @@ export default function Infrastructure({ onOpenProject, onOpenRun }) {
       {pipe && <PipelineModal project={pipe.project} initialSteps={pipe.steps}
         onClose={() => setPipe(null)} onLaunched={(id) => { setPipe(null); onOpenRun(id) }} />}
       {vms && <VmsModal data={vms} onClose={() => setVms(null)} />}
+      {enrollFor && <EnrollPicker r={enrollFor} controllers={controllers}
+        onClose={() => setEnrollFor(null)} onPick={(cid) => enroll(enrollFor, cid)} />}
     </>
+  )
+}
+
+// Pick a Controller to enroll a project's VMs into, when the project has none set.
+// The choice is remembered by the backend for future enrolls.
+function EnrollPicker({ r, controllers, onClose, onPick }) {
+  const [cid, setCid] = useState(controllers[0] ? String(controllers[0].id) : '')
+  const [busy, setBusy] = useState(false)
+  return (
+    <Modal title={`Enroll “${r.project_name}” VMs into a Controller`} onClose={onClose}>
+      <p className="muted" style={{ marginTop: 0 }}>Register the VMs this project applied as SSH hosts in a connected Controller.</p>
+      <Field label="Controller">
+        <select value={cid} onChange={(e) => setCid(e.target.value)}>
+          {controllers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+        </select>
+      </Field>
+      <div className="row" style={{ marginTop: 12, justifyContent: 'flex-end' }}>
+        <button className="ghost sm" onClick={onClose}>Cancel</button>
+        <button className="primary sm" disabled={busy || !cid}
+          onClick={() => { setBusy(true); onPick(cid) }}>{busy ? 'Enrolling…' : 'Enroll →'}</button>
+      </div>
+    </Modal>
   )
 }
 

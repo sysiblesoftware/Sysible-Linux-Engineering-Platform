@@ -86,6 +86,7 @@ export function RunLog({ runId, onBack, onOpenRun }) {
   const [enrollBusy, setEnrollBusy] = useState(false)
   const [enrollPick, setEnrollPick] = useState(false)   // Controller picker open?
   const [pickedCtrl, setPickedCtrl] = useState('')
+  const [stopping, setStopping] = useState(false)
   const boxRef = useRef(null)
   const splitRef = useRef(null)
 
@@ -213,6 +214,14 @@ export function RunLog({ runId, onBack, onOpenRun }) {
   const startAt = firstFail < Infinity ? (model.taskList?.[firstFail]?.name || '') : ''
   const done = ['success', 'failed', 'canceled'].includes(status)
 
+  // Stop an in-flight run — kills the engine's process and marks it canceled.
+  const stopRun = async () => {
+    if (!confirm(`Stop run #${runId}? The engine process is terminated and the run is marked canceled.`)) return
+    setStopping(true)
+    try { await api(`runs/${runId}/cancel`, { method: 'POST' }); setStatus('canceled') }
+    catch (e) { alert(e.message) } finally { setStopping(false) }
+  }
+
   const openRerun = async () => {
     const run = await api(`runs/${runId}`)
     setRerun({ run, limit: failedHosts.join(','), startAt, tasks: (model.taskList || []).map((t) => t.name) })
@@ -226,12 +235,16 @@ export function RunLog({ runId, onBack, onOpenRun }) {
         <span className="muted">{engine}</span>
         <span className={'pill ' + status}>{status}</span>
         <div className="spacer" />
+        {!done && (
+          <button className="danger sm" disabled={stopping} title="Terminate this run"
+            onClick={stopRun}>{stopping ? 'Stopping…' : '■ Stop'}</button>
+        )}
         {done && failedHosts.length > 0 && (
           <button className="ghost sm" title={`Re-run the playbook against just: ${failedHosts.join(', ')}`}
             onClick={openRerun}>↻ Re-run failed ({failedHosts.length})</button>
         )}
-        {projectId && ((engine === 'terraform' && status === 'success') ||
-                       seq.some((s) => s.kind === 'terraform' && s.status === 'success')) && (
+        {projectId && ((engine === 'terraform' && done) ||
+                       seq.some((s) => s.kind === 'terraform' && ['success', 'failed'].includes(s.status))) && (
           <button className="primary sm" disabled={enrollBusy}
             title="Register the VMs this apply created into a connected Controller"
             onClick={() => doEnroll(null)}>{enrollBusy ? 'Enrolling…' : 'Enroll hosts → Controller'}</button>

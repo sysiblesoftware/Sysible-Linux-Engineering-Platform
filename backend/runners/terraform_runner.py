@@ -137,7 +137,7 @@ def launch(run_id: int) -> None:
             init = [tool, "init", "-input=false", "-no-color"]
             if upgrade:
                 init.append("-upgrade")
-            rc = _common.stream(init, workdir, env, log)
+            rc = _common.stream(init, workdir, env, log, run_id=run_id)
             if rc != 0:
                 emit(f"\n== {tool} init failed: exit {rc} ==")
                 return rc
@@ -147,7 +147,7 @@ def launch(run_id: int) -> None:
                 cmd = [tool, "apply", "-input=false", "-auto-approve", "-no-color", *var_args]
             else:  # destroy
                 cmd = [tool, "destroy", "-input=false", "-auto-approve", "-no-color", *var_args]
-            return _common.stream(cmd, workdir, env, log, redact=redact)
+            return _common.stream(cmd, workdir, env, log, redact=redact, run_id=run_id)
 
         def _mismatch() -> bool:
             try:
@@ -191,6 +191,14 @@ def launch(run_id: int) -> None:
         # VMs into the project's own inventory automatically — so they're immediately
         # targetable by Ansible/Salt with no manual "→ Inventory" step. Best-effort:
         # a non-infra project or a not-yet-ready output just skips silently.
+        # Stopped by an operator (POST /runs/{id}/cancel killed the child): record
+        # the run as canceled, not failed, and skip the post-apply inventory build.
+        if _common.is_stopped(run_id):
+            _common.clear_stop(run_id)
+            emit("\n== canceled by operator ==")
+            db.set_run_status(run_id, "canceled", exit_code=rc or 130, finished=int(time.time()))
+            return
+
         if action == "apply" and rc == 0:
             try:
                 from .. import app as _app

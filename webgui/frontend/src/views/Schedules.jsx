@@ -7,13 +7,19 @@ const when = (s) => s.cadence === 'hourly' ? `hourly at :${(s.at || '00:00').sli
   : s.cadence === 'weekly' ? `${WEEKDAYS[s.weekday] || 'Mon'} ${s.at}`
     : `daily ${s.at}`
 
-// Recurring runs — a saved run spec fired on a cadence by the backend scheduler.
+// Recurring runs — a saved run spec (single engine, or a whole pipeline) fired on
+// a cadence by the backend scheduler.
 export default function Schedules() {
   const [rows, setRows] = useState([])
+  const [pipelines, setPipelines] = useState([])
   const [open, setOpen] = useState(false)
   const load = () => api('schedules').then((d) => setRows(d.schedules))
-  useEffect(() => { load() }, [])
+  useEffect(() => { load(); api('pipelines').then((d) => setPipelines(d.pipelines || [])).catch(() => {}) }, [])
   const writable = canWrite()
+  // A pipeline schedule stores the pipeline id in `target`; show its name instead.
+  const targetLabel = (s) => s.kind === 'pipeline'
+    ? ((pipelines.find((p) => String(p.id) === String(s.target)) || {}).name || `pipeline #${s.target}`)
+    : s.target
 
   const toggle = async (s) => { await api(`schedules/${s.id}`, { method: 'PATCH', json: { enabled: s.enabled ? 0 : 1 } }); load() }
   const remove = async (s) => { if (confirm(`Delete schedule "${s.name || s.id}"?`)) { await api(`schedules/${s.id}`, { method: 'DELETE' }); load() } }
@@ -31,7 +37,7 @@ export default function Schedules() {
               <tr key={s.id} style={{ opacity: s.enabled ? 1 : 0.55 }}>
                 <td>{s.name || `#${s.id}`}</td>
                 <td>{s.kind}</td>
-                <td className="muted mono" style={{ fontSize: 12 }}>{s.target}</td>
+                <td className="muted mono" style={{ fontSize: 12 }}>{targetLabel(s)}</td>
                 <td className="muted">{when(s)}</td>
                 <td className="muted">{s.enabled && s.next_run ? new Date(s.next_run * 1000).toLocaleString() : '—'}</td>
                 <td>{s.last_status ? <span className={'pill ' + (s.last_status === 'error' ? 'failed' : 'ok')}>{s.last_status}</span> : <span className="muted">—</span>}</td>
@@ -51,8 +57,10 @@ export default function Schedules() {
 
 function NewSchedule({ onClose, onDone }) {
   const [projects, setProjects] = useState([]); const [invs, setInvs] = useState([]); const [creds, setCreds] = useState([])
+  const [pipelines, setPipelines] = useState([])
   const [name, setName] = useState(''); const [pid, setPid] = useState('')
   const [engine, setEngine] = useState('ansible'); const [target, setTarget] = useState('site.yml')
+  const [pipelineId, setPipelineId] = useState('')
   const [inv, setInv] = useState(''); const [cred, setCred] = useState('')
   const [cadence, setCadence] = useState('daily'); const [at, setAt] = useState('02:00'); const [weekday, setWeekday] = useState(0)
   const { wrap, node } = useErr()
@@ -60,8 +68,13 @@ function NewSchedule({ onClose, onDone }) {
   useEffect(() => { api('projects').then((d) => { setProjects(d.projects); if (d.projects[0]) setPid(String(d.projects[0].id)) }) }, [])
   useEffect(() => { api('inventories').then((d) => { setInvs(d.inventories); if (d.inventories[0]) setInv(String(d.inventories[0].id)) }) }, [])
   useEffect(() => { api('credentials').then((d) => setCreds(d.credentials)) }, [])
-  useEffect(() => { if (engine === 'terraform') setTarget('plan'); else if (engine === 'salt') setTarget('highstate'); else setTarget('site.yml') }, [engine])
-  const needsInv = engine !== 'terraform'
+  useEffect(() => { api('pipelines').then((d) => setPipelines(d.pipelines || [])).catch(() => {}) }, [])
+  useEffect(() => { if (engine === 'terraform') setTarget('plan'); else if (engine === 'salt') setTarget('highstate'); else if (engine === 'ansible') setTarget('site.yml') }, [engine])
+  const isPipeline = engine === 'pipeline'
+  const needsInv = engine !== 'terraform' && !isPipeline
+  // Pipelines belong to a project — offer only the ones for the chosen project.
+  const projPipelines = pipelines.filter((p) => String(p.project_id) === String(pid))
+  useEffect(() => { setPipelineId(projPipelines[0] ? String(projPipelines[0].id) : '') }, [pid, engine, pipelines.length])
 
   return (
     <Modal title="New schedule" onClose={onClose}>
@@ -77,13 +90,23 @@ function NewSchedule({ onClose, onDone }) {
           <option value="ansible">Ansible — playbook</option>
           <option value="terraform">Terraform — plan / apply / destroy</option>
           <option value="salt">Salt — state.apply</option>
+          <option value="pipeline">Pipeline — saved sequence</option>
         </select>
       </Field>
-      <Field label={engine === 'ansible' ? 'Playbook path' : engine === 'terraform' ? 'Action' : 'State'}>
-        {engine === 'terraform'
-          ? <select value={target} onChange={(e) => setTarget(e.target.value)}><option>plan</option><option>apply</option><option>destroy</option></select>
-          : <input value={target} onChange={(e) => setTarget(e.target.value)} />}
-      </Field>
+      {isPipeline ? (
+        <Field label="Pipeline">
+          <select value={pipelineId} onChange={(e) => setPipelineId(e.target.value)}>
+            {projPipelines.length === 0 && <option value="">(no pipelines for this project — build one first)</option>}
+            {projPipelines.map((p) => <option key={p.id} value={p.id}>{p.name} — {p.steps.map((s) => `${s.kind}:${s.target}`).join(' → ')}</option>)}
+          </select>
+        </Field>
+      ) : (
+        <Field label={engine === 'ansible' ? 'Playbook path' : engine === 'terraform' ? 'Action' : 'State'}>
+          {engine === 'terraform'
+            ? <select value={target} onChange={(e) => setTarget(e.target.value)}><option>plan</option><option>apply</option><option>destroy</option></select>
+            : <input value={target} onChange={(e) => setTarget(e.target.value)} />}
+        </Field>
+      )}
       {needsInv && (
         <Field label="Inventory">
           <select value={inv} onChange={(e) => setInv(e.target.value)}>
@@ -92,12 +115,15 @@ function NewSchedule({ onClose, onDone }) {
           </select>
         </Field>
       )}
-      <Field label={engine === 'terraform' ? 'Cloud/env credential' : 'SSH credential'}>
-        <select value={cred} onChange={(e) => setCred(e.target.value)}>
-          <option value="">(none)</option>
-          {creds.map((c) => <option key={c.id} value={c.id}>{c.name} ({c.kind})</option>)}
-        </select>
-      </Field>
+      {!isPipeline && (
+        <Field label={engine === 'terraform' ? 'Cloud/env credential' : 'SSH credential'}>
+          <select value={cred} onChange={(e) => setCred(e.target.value)}>
+            <option value="">(none)</option>
+            {creds.map((c) => <option key={c.id} value={c.id}>{c.name} ({c.kind})</option>)}
+          </select>
+        </Field>
+      )}
+      {isPipeline && <div className="faint" style={{ fontSize: 12, marginBottom: 6 }}>Each firing runs the whole saved sequence; inventory and credentials come from the pipeline's steps.</div>}
       <Field label="Cadence">
         <select value={cadence} onChange={(e) => setCadence(e.target.value)}>
           <option value="hourly">Hourly</option><option value="daily">Daily</option><option value="weekly">Weekly</option>
@@ -116,10 +142,13 @@ function NewSchedule({ onClose, onDone }) {
       {node}
       <button className="primary" onClick={() => wrap(async () => {
         if (!pid) throw new Error('Pick a project (create one first).')
+        if (isPipeline && !pipelineId) throw new Error('Pick a pipeline (build one for this project first).')
         if (needsInv && !inv) throw new Error('Pick an inventory (create one first).')
         await api('schedules', { method: 'POST', json: {
-          name, project_id: Number(pid), kind: engine, target,
-          inventory_id: needsInv ? Number(inv) : null, credential_id: cred ? Number(cred) : null,
+          name, project_id: Number(pid), kind: engine,
+          target: isPipeline ? String(pipelineId) : target,
+          inventory_id: needsInv ? Number(inv) : null,
+          credential_id: (!isPipeline && cred) ? Number(cred) : null,
           cadence, at, weekday,
         } })
         onDone()

@@ -53,9 +53,19 @@ def _scheduler_loop():
                     if not project:
                         db.delete_schedule(s["id"])
                         continue
-                    run_id = _dispatch_run(project, s["kind"], s["target"], s.get("inventory_id"),
-                                           s.get("credential_id"), s.get("extra_vars") or {},
-                                           f"schedule:{s.get('name') or s['id']}")
+                    actor = f"schedule:{s.get('name') or s['id']}"
+                    if s["kind"] == "pipeline":
+                        # target holds the saved pipeline id — fire the whole sequence.
+                        pl = db.get_pipeline(int(s["target"]))
+                        if not pl:
+                            db.mark_schedule_fired(s["id"], 0, status="error")
+                            continue
+                        run_ids, _gid = _dispatch_pipeline(project, pl["steps"], actor,
+                                                           stop_on_failure=pl["stop_on_failure"])
+                        run_id = run_ids[0] if run_ids else 0
+                    else:
+                        run_id = _dispatch_run(project, s["kind"], s["target"], s.get("inventory_id"),
+                                               s.get("credential_id"), s.get("extra_vars") or {}, actor)
                     db.mark_schedule_fired(s["id"], run_id)
                     db.log_audit("schedule_fired", "system",
                                  f"schedule '{s.get('name') or s['id']}' → run #{run_id}")
@@ -1439,6 +1449,28 @@ def run_log(run_id: int, offset: int = 0, user: str = Depends(current_user)):
     )
 
 
+@app.post("/runs/{run_id}/cancel")
+def cancel_run(run_id: int, user: str = Depends(require_operator)):
+    """Stop an in-flight run. Kills the engine's child process (its process group,
+    so terraform provider / ssh grandchildren go too) and records the run as
+    canceled. A run that hasn't started a child yet (queued, or between pipeline
+    steps) is flagged and marked canceled directly."""
+    r = db.get_run(run_id)
+    if not r:
+        raise HTTPException(status_code=404, detail="Run not found.")
+    if r.get("status") in ("success", "failed", "canceled"):
+        return {"status": r["status"]}   # already finished — nothing to stop
+    from .runners import _common
+    live = _common.request_stop(run_id)
+    if not live:
+        # Nothing streaming yet (queued step): mark it canceled so the sequence
+        # and the console reflect it immediately; the runner sees the flag and
+        # skips it if it was about to start.
+        db.set_run_status(run_id, "canceled", finished=int(time.time()))
+    db.log_audit("run_canceled", user, f"#{run_id} {r.get('kind')} '{r.get('target')}'")
+    return {"status": "canceling"}
+
+
 # ------------------------------------------------------------------ schedules
 _CADENCES = {"hourly", "daily", "weekly"}
 
@@ -1455,11 +1487,22 @@ def schedules_create(body: dict = Body(...), user: str = Depends(require_operato
     if not project:
         raise HTTPException(status_code=404, detail="Project not found.")
     kind = str(body.get("kind") or "ansible")
-    if kind not in RUNNERS:
+    if kind not in RUNNERS and kind != "pipeline":
         raise HTTPException(status_code=400, detail=f"Unknown engine '{kind}'.")
     target = str(body.get("target") or "").strip()
     if not target:
         raise HTTPException(status_code=400, detail="target is required.")
+    # A pipeline schedule stores the saved-pipeline id as its target — check it
+    # exists and belongs to the chosen project so the scheduler can fire it.
+    if kind == "pipeline":
+        try:
+            pl = db.get_pipeline(int(target))
+        except (TypeError, ValueError):
+            pl = None
+        if not pl:
+            raise HTTPException(status_code=400, detail="Pick a saved pipeline to schedule.")
+        if pl["project_id"] != pid:
+            raise HTTPException(status_code=400, detail="That pipeline belongs to a different project.")
     cadence = str(body.get("cadence") or "daily")
     if cadence not in _CADENCES:
         raise HTTPException(status_code=400, detail=f"cadence must be one of: {', '.join(_CADENCES)}.")

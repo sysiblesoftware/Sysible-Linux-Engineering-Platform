@@ -121,7 +121,12 @@ def launch(run_id: int) -> None:
                  f"{'; test mode (dry-run)' if dry else ''} --")
             # Secret pillar/kwarg values must not be echoed into the viewer-readable log.
             rc = _common.stream(cmd, workdir, dict(os.environ), log,
-                                redact=[str(v) for v in extra_vars.values() if str(v)])
+                                redact=[str(v) for v in extra_vars.values() if str(v)], run_id=run_id)
+            if _common.is_stopped(run_id):
+                _common.clear_stop(run_id)
+                emit("\n== canceled by operator ==")
+                db.set_run_status(run_id, "canceled", exit_code=rc or 130, finished=int(time.time()))
+                return
             emit(f"\n== finished: exit code {rc} ==")
             db.set_run_status(run_id, "success" if rc == 0 else "failed",
                               exit_code=rc, finished=int(time.time()))

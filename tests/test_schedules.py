@@ -57,6 +57,40 @@ def test_due_and_fire_advances_next_run(client, project):
     assert sid not in [x["id"] for x in db.due_schedules()]
 
 
+def test_schedule_a_saved_pipeline(client, project):
+    # A pipeline schedule stores the saved-pipeline id in `target` and fires the
+    # whole sequence; it needs neither an inventory nor a credential.
+    pl = client.post("/pipelines", json={
+        "project_id": project["id"], "name": "cadence",
+        "steps": [{"kind": "terraform", "target": "apply"},
+                  {"kind": "ansible", "target": "site.yml"}]}).json()["pipeline"]
+    r = client.post("/schedules", json={
+        "name": "Nightly cadence", "project_id": project["id"], "kind": "pipeline",
+        "target": str(pl["id"]), "cadence": "daily", "at": "01:00"})
+    assert r.status_code == 200, r.text
+    assert r.json()["kind"] == "pipeline" and r.json()["target"] == str(pl["id"])
+
+    # A non-existent pipeline id is refused.
+    assert client.post("/schedules", json={
+        "project_id": project["id"], "kind": "pipeline", "target": "999999",
+        "cadence": "daily", "at": "01:00"}).status_code == 400
+
+
+def test_cancel_a_finished_run_is_a_noop(client, project):
+    # Cancelling a run that never started a real engine still resolves cleanly:
+    # a terraform run with no .tf fails fast, and cancel then reports its status.
+    rid = client.post("/runs", json={
+        "project_id": project["id"], "kind": "terraform", "target": "plan"}).json()["run_id"]
+    for _ in range(50):
+        if client.get(f"/runs/{rid}").json()["status"] in ("success", "failed", "canceled"):
+            break
+        time.sleep(0.1)
+    # Already finished → cancel is a no-op that echoes the terminal status.
+    assert client.post(f"/runs/{rid}/cancel").json()["status"] in ("failed", "success", "canceled")
+    # Unknown run → 404.
+    assert client.post("/runs/999999/cancel").status_code == 404
+
+
 def test_health_warnings_shape(client):
     d = client.get("/health-warnings").json()
     assert "warnings" in d and isinstance(d["warnings"], list)
