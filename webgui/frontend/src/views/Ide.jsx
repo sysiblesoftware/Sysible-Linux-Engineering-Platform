@@ -801,12 +801,29 @@ function TaskPalette({ groups: SNIPPET_GROUPS, verb = 'Task', onClose, onInsert 
   )
 }
 
+// Small name-only dialog — used for the inline "＋ New inventory…" in the Run and
+// pipeline inventory pickers, so you can make one without leaving the flow.
+function NameModal({ title, label, placeholder, onClose, onSubmit }) {
+  const [v, setV] = useState('')
+  const { wrap, node } = useErr()
+  const go = () => wrap(async () => { await onSubmit(v) })
+  return (
+    <Modal title={title} onClose={onClose}>
+      <Field label={label}><input autoFocus value={v} placeholder={placeholder}
+        onChange={(e) => setV(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && v.trim()) go() }} /></Field>
+      {node}
+      <button className="primary" disabled={!v.trim()} onClick={go}>Create</button>
+    </Modal>
+  )
+}
+
 export function RunModal({ project, currentFile, onClose, onLaunched, initial }) {
   const ini = initial || {}
   const [engine, setEngine] = useState(ini.engine || 'ansible')
   const [target, setTarget] = useState(ini.target || currentFile || 'site.yml')
   const [invs, setInvs] = useState([]); const [creds, setCreds] = useState([])
   const [inv, setInv] = useState(ini.inventory_id ? String(ini.inventory_id) : '')
+  const [newInvOpen, setNewInvOpen] = useState(false)
   const [cred, setCred] = useState(ini.credential_id ? String(ini.credential_id) : '')
   const [vars, setVars] = useState('')       // KEY=value per line
   const [saltTest, setSaltTest] = useState(false)
@@ -870,9 +887,10 @@ export function RunModal({ project, currentFile, onClose, onLaunched, initial })
       </Field>
       {needsInv && (
         <Field label="Inventory">
-          <select value={inv} onChange={(e) => setInv(e.target.value)}>
+          <select value={inv} onChange={(e) => { if (e.target.value === '__new') setNewInvOpen(true); else setInv(e.target.value) }}>
             {invs.length === 0 && <option value="">(no inventories — create one first)</option>}
             {invs.map((i) => <option key={i.id} value={i.id}>{i.name}</option>)}
+            <option value="__new">＋ New inventory…</option>
           </select>
         </Field>
       )}
@@ -931,6 +949,12 @@ export function RunModal({ project, currentFile, onClose, onLaunched, initial })
         } })
         onClose(); onLaunched(d.run_id)
       })}>▶ Launch</button>
+      {newInvOpen && <NameModal title="New inventory" label="Inventory name" placeholder="prod-web"
+        onClose={() => setNewInvOpen(false)}
+        onSubmit={async (nm) => {
+          const d = await api('inventories', { method: 'POST', json: { name: nm.trim(), project_id: project.id } })
+          setInvs((s) => [...s, { id: d.id, name: d.name }]); setInv(String(d.id)); setNewInvOpen(false)
+        }} />}
     </Modal>
   )
 }
@@ -980,6 +1004,14 @@ export function PipelineModal({ project, currentFile, initialSteps, initialName,
   // state files for Salt — offered as a datalist so the target is picked, not typed.
   const filesFor = (kind) => files.filter((p) => (kind === 'salt' ? p.endsWith('.sls') : (p.endsWith('.yml') || p.endsWith('.yaml'))))
 
+  const [newInvStep, setNewInvStep] = useState(null)   // step index awaiting a new inventory
+  const invChange = (i, val) => { if (val === '__new') setNewInvStep(i); else upd(i, { inventory_id: val }) }
+  const createInv = async (name) => {
+    const d = await api('inventories', { method: 'POST', json: { name: name.trim(), project_id: project.id } })
+    setInvs((s) => [...s, { id: d.id, name: d.name }])
+    if (newInvStep != null) upd(newInvStep, { inventory_id: String(d.id) })
+    setNewInvStep(null)
+  }
   const upd = (i, patch) => setSteps((s) => s.map((st, j) => (j === i ? { ...st, ...patch } : st)))
   const add = () => setSteps((s) => [...s, blank({ inventory_id: invs[0] ? String(invs[0].id) : '' })])
   const del = (i) => setSteps((s) => (s.length > 1 ? s.filter((_, j) => j !== i) : s))
@@ -1015,9 +1047,10 @@ export function PipelineModal({ project, currentFile, initialSteps, initialName,
                   : <input value={st.target} onChange={(e) => upd(i, { target: e.target.value })} list={st.kind === 'salt' ? 'pipe-files-salt' : 'pipe-files-ansible'} title="Playbook / state to run" placeholder={st.kind === 'salt' ? 'state / highstate' : 'playbook.yml'} />}
                 {st.kind === 'terraform'
                   ? <select value={st.tool} onChange={(e) => upd(i, { tool: e.target.value })} title="Tool" style={{ width: 150 }}><option value="terraform">Terraform</option><option value="tofu">OpenTofu</option></select>
-                  : <select value={st.inventory_id} onChange={(e) => upd(i, { inventory_id: e.target.value })} title="Inventory (hosts to target)" style={{ width: 150 }}>
+                  : <select value={st.inventory_id} onChange={(e) => invChange(i, e.target.value)} title="Inventory (hosts to target)" style={{ width: 150 }}>
                     {invs.length === 0 && <option value="">(no inventory)</option>}
                     {invs.map((v) => <option key={v.id} value={v.id}>{v.name}</option>)}
+                    <option value="__new">＋ New inventory…</option>
                   </select>}
                 <select value={st.credential_id} onChange={(e) => upd(i, { credential_id: e.target.value })} title="SSH / cloud credential" style={{ width: 130 }}>
                   <option value="">(no cred)</option>
@@ -1058,6 +1091,8 @@ export function PipelineModal({ project, currentFile, initialSteps, initialName,
       ))}
       <datalist id="pipe-files-ansible">{filesFor('ansible').map((p) => <option key={p} value={p} />)}</datalist>
       <datalist id="pipe-files-salt">{filesFor('salt').map((p) => <option key={p} value={p} />)}</datalist>
+      {newInvStep != null && <NameModal title="New inventory" label="Inventory name" placeholder="prod-web"
+        onClose={() => setNewInvStep(null)} onSubmit={createInv} />}
       <div className="row" style={{ margin: '8px 0' }}>
         <button className="ghost sm" onClick={add}>＋ Add step</button>
         <div className="spacer" />

@@ -472,6 +472,35 @@ def test_autobuild_infra_inventory_on_apply(client, monkeypatch):
     assert appmod._autobuild_infra_inventory(10_000_000) is None      # not a project
 
 
+def test_infra_target_inventory_receives_vms(client, monkeypatch):
+    """Creating infra with a chosen target inventory (e.g. Dev) makes the applied
+    VMs land in THAT inventory, not a dedicated one."""
+    import backend.app as appmod
+    dev = client.post("/inventories", json={"name": "Dev"}).json()
+    pid = client.post("/infra", json={"name": "tgt", "provider": "libvirt",
+                                      "options": {"count": 1, "base_image": "x"},
+                                      "inventory_id": dev["id"]}).json()["project_id"]
+
+    class Out:
+        returncode = 0
+        stdout = '{"sysible_hosts":{"value":[{"name":"m-1","ip":"10.0.0.7","user":"ubuntu"}]}}'
+        stderr = ""
+    monkeypatch.setattr(appmod.subprocess, "run", lambda *a, **k: Out())
+    iid, name, n = appmod._autobuild_infra_inventory(pid)
+    assert iid == dev["id"] and n == 1                       # went into Dev, not a dedicated inventory
+    hosts = client.get(f"/inventories/{dev['id']}/hosts").json()["hosts"]
+    assert any(h["name"] == "m-1" for h in hosts)
+
+
+def test_infra_new_named_inventory(client):
+    """inventory_name creates a fresh inventory and records it as the project's target."""
+    d = client.post("/infra", json={"name": "newinv", "provider": "libvirt",
+                                    "options": {"count": 1, "base_image": "x"},
+                                    "inventory_name": "web-tier"}).json()
+    assert d["inventory_id"]
+    assert any(v["name"] == "web-tier" for v in client.get("/inventories").json()["inventories"])
+
+
 def test_infra_project_vms_lists_domains(client, monkeypatch):
     """List VMs on a project's hypervisor: parse `virsh list --all` into name+state."""
     import shutil

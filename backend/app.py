@@ -1699,10 +1699,19 @@ def infra_create(body: dict = Body(...), user: str = Depends(require_operator)):
     workdir.mkdir(parents=True, exist_ok=True)
     for fn, content in files.items():
         (workdir / fn).write_text(content)
+    # Target inventory for the applied VMs: an existing one (inventory_id, e.g. Dev),
+    # a new one (inventory_name), or None → a dedicated "<name> (VMs)" is built.
+    inv_target = None
+    if body.get("inventory_id"):
+        if not db.get_inventory(int(body["inventory_id"])):
+            raise HTTPException(status_code=404, detail="Target inventory not found.")
+        inv_target = int(body["inventory_id"])
+    elif str(body.get("inventory_name") or "").strip():
+        inv_target = db.create_inventory(str(body["inventory_name"]).strip(), project_id=pid, source="infra")
     db.set_infra(pid, provider, int(controller_id) if controller_id else None,
-                 str(options.get("ssh_user", "")), str(options.get("environment", "")))
+                 str(options.get("ssh_user", "")), str(options.get("environment", "")), inventory_id=inv_target)
     db.log_audit("infra_created", user, f"{provider} project '{name}'")
-    return {"project_id": pid, "slug": slug, "files": list(files), "provider": provider}
+    return {"project_id": pid, "slug": slug, "files": list(files), "provider": provider, "inventory_id": inv_target}
 
 
 def _infra_applied_hosts(project_id: int):
@@ -1739,9 +1748,15 @@ def _build_infra_inventory(project, meta):
     hosts yet. Shared by the manual '→ Inventory' action and the pipeline's
     auto-inventory step."""
     hosts = _infra_applied_hosts(project["id"])
-    inv = db.find_inventory(project["id"], "infra")
-    iid = inv["id"] if inv else db.create_inventory(
-        f"{project['name']} (VMs)", project_id=project["id"], source="infra")
+    # Target the operator's chosen inventory (e.g. "Dev") if set; otherwise a
+    # dedicated "<name> (VMs)" inventory for this project.
+    target = meta.get("inventory_id")
+    if target and db.get_inventory(target):
+        iid = target
+    else:
+        inv = db.find_inventory(project["id"], "infra")
+        iid = inv["id"] if inv else db.create_inventory(
+            f"{project['name']} (VMs)", project_id=project["id"], source="infra")
     group = ansible_runner._ansible_group(meta.get("environment", "")) if meta.get("environment") else ""
     n = 0
     for h in hosts:

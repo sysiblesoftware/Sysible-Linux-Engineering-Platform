@@ -179,6 +179,9 @@ function CreateWizard({ onClose, onDone }) {
   const [controllerId, setControllerId] = useState('')
   const [creds, setCreds] = useState([])
   const [deployCredId, setDeployCredId] = useState('')
+  const [invs, setInvs] = useState([])
+  const [invTarget, setInvTarget] = useState('')   // '' = dedicated, <id> = existing, '__new'
+  const [invName, setInvName] = useState('')
   const { wrap, node } = useErr()
 
   useEffect(() => { api('infra/providers').then((d) => {
@@ -190,6 +193,7 @@ function CreateWizard({ onClose, onDone }) {
   // SSH key credentials only — those are the ones we can derive a public key from
   // and bake into the VMs so SLEP's Ansible/Salt can log in.
   useEffect(() => { api('credentials').then((d) => setCreds((d.credentials || []).filter((c) => c.kind === 'ssh'))) }, [])
+  useEffect(() => { api('inventories').then((d) => setInvs(d.inventories || [])) }, [])
 
   const seed = (providers, p) => {
     const v = {}
@@ -242,6 +246,16 @@ function CreateWizard({ onClose, onDone }) {
         {creds.length === 0 && <> No SSH key credentials yet — add one under <b>Credentials</b> first.</>}
       </div>
 
+      <Field label="Add the new VMs to inventory">
+        <select value={invTarget} onChange={(e) => setInvTarget(e.target.value)}>
+          <option value="">A dedicated inventory — “{name || 'name'} (VMs)”</option>
+          {invs.map((v) => <option key={v.id} value={v.id}>{v.name}</option>)}
+          <option value="__new">＋ New inventory…</option>
+        </select>
+      </Field>
+      {invTarget === '__new' && <Field label="New inventory name"><input value={invName} onChange={(e) => setInvName(e.target.value)} placeholder="prod-web" /></Field>}
+      <div className="faint" style={{ fontSize: 12 }}>On apply, the created VMs are read into this inventory automatically, and the cadence’s Ansible/Salt steps default to it.</div>
+
       <Field label="Auto-enroll new VMs into Controller (optional)">
         <select value={controllerId} onChange={(e) => setControllerId(e.target.value)}>
           <option value="">Don’t enroll</option>
@@ -255,6 +269,8 @@ function CreateWizard({ onClose, onDone }) {
         const d = await api('infra', { method: 'POST', json: {
           name, provider, options: values, controller_id: controllerId ? Number(controllerId) : null,
           deploy_credential_id: deployCredId ? Number(deployCredId) : null,
+          inventory_id: (invTarget && invTarget !== '__new') ? Number(invTarget) : null,
+          inventory_name: invTarget === '__new' ? invName.trim() : '',
         } })
         onDone(d.project_id, name, d.slug)
       })}>Generate Terraform</button>

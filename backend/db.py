@@ -195,6 +195,7 @@ def init_db() -> None:
                 controller_id INTEGER,
                 ssh_user TEXT DEFAULT '',
                 environment TEXT DEFAULT '',
+                inventory_id INTEGER,          -- target inventory for applied VMs (NULL = a dedicated '<name> (VMs)')
                 created INTEGER NOT NULL,
                 FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
             );
@@ -245,6 +246,9 @@ def init_db() -> None:
         run_cols = [r["name"] for r in c.execute("PRAGMA table_info(runs)")]
         if "group_id" not in run_cols:
             c.execute("ALTER TABLE runs ADD COLUMN group_id TEXT DEFAULT ''")
+        infra_cols = [r["name"] for r in c.execute("PRAGMA table_info(infra)")]
+        if "inventory_id" not in infra_cols:
+            c.execute("ALTER TABLE infra ADD COLUMN inventory_id INTEGER")
         # One-time: encrypt any credential/controller secrets still stored as
         # plaintext (rows written before at-rest encryption). Idempotent.
         _encrypt_legacy_secrets(c)
@@ -524,10 +528,10 @@ def mark_schedule_fired(sid: int, run_id: int, status: str = "launched"):
 
 
 # ---------------------------------------------------------------- infrastructure
-def set_infra(project_id, provider, controller_id=None, ssh_user="", environment=""):
+def set_infra(project_id, provider, controller_id=None, ssh_user="", environment="", inventory_id=None):
     with _connect() as c:
-        c.execute("INSERT OR REPLACE INTO infra(project_id,provider,controller_id,ssh_user,environment,created) "
-                  "VALUES(?,?,?,?,?,?)", (project_id, provider, controller_id, ssh_user, environment, _now()))
+        c.execute("INSERT OR REPLACE INTO infra(project_id,provider,controller_id,ssh_user,environment,inventory_id,created) "
+                  "VALUES(?,?,?,?,?,?,?)", (project_id, provider, controller_id, ssh_user, environment, inventory_id, _now()))
 
 
 def get_infra(project_id):
