@@ -10,6 +10,7 @@ export default function Infrastructure({ onOpenProject, onOpenRun }) {
   const [rows, setRows] = useState([])
   const [open, setOpen] = useState(false)
   const [pipe, setPipe] = useState(null)   // {project, steps} → opens the pipeline builder
+  const [vms, setVms] = useState(null)     // {name, loading?|list?|error?} → VMs-on-hypervisor modal
   const load = () => api('infra').then((d) => setRows(d.infra))
   useEffect(() => { load() }, [])
   const writable = canWrite()
@@ -47,6 +48,15 @@ export default function Infrastructure({ onOpenProject, onOpenRun }) {
   // created into this project's inventory and auto-targets the Ansible/Salt steps
   // at them — so Create flows straight into Configure → Maintain with no manual
   // inventory hop.
+  // Show the domains actually on this project's hypervisor (virsh list --all) —
+  // so you can see what exists without SSHing to the host.
+  const listVms = async (r) => {
+    setVms({ name: r.project_name, loading: true })
+    try {
+      const d = await api(`infra/${r.project_id}/vms`, { method: 'POST' })
+      setVms({ name: r.project_name, list: d.vms || [], error: d.ok ? '' : d.output })
+    } catch (e) { setVms({ name: r.project_name, error: e.message }) }
+  }
   const cadence = async (r) => {
     try {
       await api(`infra/${r.project_id}/scaffold`, { method: 'POST', json: { stage: 'configure' } })
@@ -85,6 +95,7 @@ export default function Infrastructure({ onOpenProject, onOpenRun }) {
                   {writable && <button className="ghost sm" title="Terraform/OpenTofu plan" onClick={() => run(r, 'plan')}>Plan</button>}
                   {writable && <button className="ghost sm" title="Terraform/OpenTofu apply — create the VMs" onClick={() => run(r, 'apply')}>Apply</button>}
                   {writable && <button className="danger ghost sm" onClick={() => run(r, 'destroy')}>Destroy</button>}
+                  {writable && <button className="ghost sm" title="List the VMs actually on this project's hypervisor" onClick={() => listVms(r)}>🖥 VMs</button>}
                   {writable && <button className="ghost sm" title="Read the applied VMs into a SLEP Ansible inventory" onClick={() => toInventory(r)}>→ Inventory</button>}
                   {writable && r.controller_id ? <button className="primary sm" onClick={() => enroll(r)}>Enroll →</button> : null}
                   {writable && <button className="ghost sm" title="Scaffold an Ansible playbook and open it (Configure)" onClick={() => scaffold(r, 'configure')}>Configure</button>}
@@ -100,7 +111,35 @@ export default function Infrastructure({ onOpenProject, onOpenRun }) {
         onDone={(pid, name, slug) => { setOpen(false); load(); onOpenProject({ id: pid, name, slug }) }} />}
       {pipe && <PipelineModal project={pipe.project} initialSteps={pipe.steps}
         onClose={() => setPipe(null)} onLaunched={(id) => { setPipe(null); onOpenRun(id) }} />}
+      {vms && <VmsModal data={vms} onClose={() => setVms(null)} />}
     </>
+  )
+}
+
+// The domains actually on a project's hypervisor (virsh list --all). A quick way
+// to see what exists / is running without SSHing to the host.
+function VmsModal({ data, onClose }) {
+  const stateColor = (s) => /running/i.test(s) ? 'var(--green-bright)'
+    : /paused/i.test(s) ? 'var(--warn)' : /shut|off/i.test(s) ? 'var(--muted)' : 'var(--text)'
+  return (
+    <Modal title={`VMs on ${data.name}'s hypervisor`} onClose={onClose}>
+      {data.loading ? <div className="muted">Querying the hypervisor…</div>
+        : data.error ? <div style={{ color: 'var(--danger)', fontSize: 13, whiteSpace: 'pre-wrap' }}>✗ {data.error}</div>
+          : (data.list && data.list.length) ? (
+            <table style={{ width: '100%' }}>
+              <thead><tr><th>Name</th><th>State</th></tr></thead>
+              <tbody>
+                {data.list.map((v) => (
+                  <tr key={v.name}>
+                    <td className="mono">{v.name}</td>
+                    <td style={{ color: stateColor(v.state) }}>● {v.state}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          ) : <div className="muted">No domains defined on this hypervisor.</div>}
+      <div className="faint" style={{ fontSize: 11.5, marginTop: 8 }}>Read-only <span className="mono">virsh list --all</span> against this project's connection URI.</div>
+    </Modal>
   )
 }
 

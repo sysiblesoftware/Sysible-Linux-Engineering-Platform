@@ -453,6 +453,43 @@ def test_cloudinit_no_directive_injection():
     assert not any(ln.startswith("runcmd") for ln in lines)   # no column-0 injected directive
 
 
+def test_autobuild_infra_inventory_on_apply(client, monkeypatch):
+    """A successful apply auto-reads the VMs into the project's own inventory
+    (what the terraform runner calls); non-infra ids return None."""
+    import backend.app as appmod
+    pid = client.post("/infra", json={"name": "autoinv", "provider": "libvirt",
+                                      "options": {"count": 1, "base_image": "x", "environment": "prod"}}).json()["project_id"]
+
+    class Out:
+        returncode = 0
+        stdout = '{"sysible_hosts":{"value":[{"name":"m-1","ip":"10.0.0.5","user":"ubuntu"}]}}'
+        stderr = ""
+    monkeypatch.setattr(appmod.subprocess, "run", lambda *a, **k: Out())
+    built = appmod._autobuild_infra_inventory(pid)
+    assert built is not None
+    iid, name, n = built
+    assert n == 1 and name.endswith("(VMs)")
+    assert appmod._autobuild_infra_inventory(10_000_000) is None      # not a project
+
+
+def test_infra_project_vms_lists_domains(client, monkeypatch):
+    """List VMs on a project's hypervisor: parse `virsh list --all` into name+state."""
+    import shutil
+    import backend.app as appmod
+    pid = client.post("/infra", json={"name": "vmlist", "provider": "libvirt",
+                                      "options": {"count": 1, "base_image": "x"}}).json()["project_id"]
+    monkeypatch.setattr(shutil, "which", lambda b: "/usr/bin/virsh")
+
+    class R:
+        returncode = 0
+        stdout = " Id   Name    State\n----------------------\n -    app-1   shut off\n 3    app-2   running\n"
+        stderr = ""
+    monkeypatch.setattr(appmod.subprocess, "run", lambda *a, **k: R())
+    d = client.post(f"/infra/{pid}/vms", json={}).json()
+    assert d["ok"] is True
+    assert {v["name"]: v["state"] for v in d["vms"]} == {"app-1": "shut off", "app-2": "running"}
+
+
 def test_libvirt_uri_allowlist():
     """Security: reject non-qemu schemes (SSRF) and exec-capable URI params
     (command=/netcat=); allow the qemu transports + keyfile/no_verify SLEP sets."""

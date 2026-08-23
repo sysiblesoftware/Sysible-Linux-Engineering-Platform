@@ -187,6 +187,21 @@ def launch(run_id: int) -> None:
                 emit("-- version in required_providers (e.g. a tighter version constraint), then apply.")
                 emit("-- (dmacvicar/libvirt 0.9.x rewrote its resource schema vs 0.7/0.8.) --")
 
+        # After a successful apply of a Create-Infrastructure project, read the new
+        # VMs into the project's own inventory automatically — so they're immediately
+        # targetable by Ansible/Salt with no manual "→ Inventory" step. Best-effort:
+        # a non-infra project or a not-yet-ready output just skips silently.
+        if action == "apply" and rc == 0:
+            try:
+                from .. import app as _app
+                built = _app._autobuild_infra_inventory(run["project_id"])
+                if built:
+                    iid, iname, n = built
+                    emit(f"\n-- SLEP: added {n} VM(s) to inventory “{iname}” (#{iid}) — "
+                         f"select it in your Ansible/Salt step to configure them.")
+            except Exception:  # noqa: BLE001 — never fail the apply over this
+                pass
+
         emit(f"\n== finished: exit code {rc} ==")
         db.set_run_status(run_id, "success" if rc == 0 else "failed",
                           exit_code=rc, finished=int(time.time()))

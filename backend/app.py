@@ -1500,6 +1500,65 @@ def infra_test_hypervisor(body: dict = Body(...), user: str = Depends(current_us
         return {"ok": False, "output": str(e)}
 
 
+def _virsh_list_domains(uri: str):
+    """Read the domains on a libvirt hypervisor (`virsh list --all`). Returns
+    (list[{id,name,state}], None) or (None, error_message)."""
+    import shutil
+    if not shutil.which("virsh"):
+        return None, "`virsh` (libvirt-clients) isn't installed on the SLEP host."
+    try:
+        p = subprocess.run(["virsh", "-c", uri, "--readonly", "list", "--all"],
+                           capture_output=True, text=True, timeout=25, env=dict(os.environ))
+    except subprocess.TimeoutExpired:
+        return None, "timed out after 25s — the hypervisor didn't respond (check it's up and SSH-reachable)."
+    except Exception as e:  # noqa: BLE001
+        return None, str(e)
+    if p.returncode != 0:
+        return None, (p.stderr or p.stdout or "virsh failed").strip()[:300]
+    doms = []
+    for line in p.stdout.splitlines():
+        s = line.strip()
+        if not s or s.startswith("Id ") or set(s) <= set("- "):
+            continue
+        parts = s.split()
+        if len(parts) < 3:
+            continue
+        doms.append({"id": parts[0], "name": parts[1], "state": " ".join(parts[2:])})
+    return doms, None
+
+
+def _libvirt_uri_for_project(project_id: int) -> str:
+    """Pull the libvirt connection URI baked into a project's variables.tf."""
+    import re
+    vf = db.project_dir(project_id) / "variables.tf"
+    if not vf.exists():
+        return ""
+    m = re.search(r'variable\s+"uri"\s*\{[^}]*?default\s*=\s*"([^"]*)"', vf.read_text(), re.S)
+    return m.group(1) if m else ""
+
+
+@app.post("/infra/list-vms")
+def infra_list_vms(body: dict = Body(...), user: str = Depends(require_operator)):
+    """List the domains on a libvirt hypervisor from an ad-hoc URI (the Create form)."""
+    uri = _validate_libvirt_uri(body.get("uri"))
+    doms, err = _virsh_list_domains(uri)
+    return {"ok": err is None, "vms": doms or [], "output": err or ""}
+
+
+@app.post("/infra/{project_id}/vms")
+def infra_project_vms(project_id: int, user: str = Depends(require_operator)):
+    """List the VMs on the hypervisor this infra project targets (its var.uri) — so
+    the operator can see what's actually running without SSHing to the host."""
+    if not db.get_project(project_id):
+        raise HTTPException(status_code=404, detail="Project not found.")
+    uri = _libvirt_uri_for_project(project_id)
+    if not uri:
+        raise HTTPException(status_code=400, detail="This project has no libvirt connection URI (not a libvirt project?).")
+    _validate_libvirt_uri(uri)
+    doms, err = _virsh_list_domains(uri)
+    return {"ok": err is None, "vms": doms or [], "output": err or "", "uri": uri}
+
+
 @app.post("/infra/hypervisor-key")
 def infra_hypervisor_key(user: str = Depends(require_operator)):
     """Ensure SLEP's managed hypervisor SSH key exists (a persistent ed25519 pair
@@ -1693,6 +1752,22 @@ def _build_infra_inventory(project, meta):
         db.upsert_host(iid, nm, ip, groups=group, variables={"ansible_user": huser}, source="infra")
         n += 1
     return iid, db.get_inventory(iid)["name"], n
+
+
+def _autobuild_infra_inventory(project_id: int):
+    """Best-effort: read a project's applied VMs into its own '<name> (VMs)'
+    inventory. Returns (inventory_id, name, host_count), or None when it's not an
+    infra project or apply hasn't produced hosts yet. Called automatically by the
+    terraform runner after a successful apply so new VMs land in an inventory with
+    no manual step."""
+    project = db.get_project(project_id)
+    meta = db.get_infra(project_id)
+    if not project or not meta:
+        return None
+    try:
+        return _build_infra_inventory(project, meta)
+    except HTTPException:
+        return None
 
 
 @app.post("/infra/{project_id}/inventory")
