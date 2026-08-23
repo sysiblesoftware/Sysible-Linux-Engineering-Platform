@@ -995,35 +995,9 @@ export function PipelineModal({ project, currentFile, initialSteps, initialName,
   const { wrap, node } = useErr()
 
   const [files, setFiles] = useState([])   // project files → target autocomplete
-  // Enroll-into-Controller action (for infra sequences that create VMs).
-  const [controllers, setControllers] = useState([])
-  const [enrollBusy, setEnrollBusy] = useState(false)
-  const [enrollPick, setEnrollPick] = useState(false)
-  const [pickedCtrl, setPickedCtrl] = useState('')
   useEffect(() => { api('inventories').then((d) => { setInvs(d.inventories)
     setSteps((s) => s.map((st) => ({ ...st, inventory_id: st.inventory_id || (d.inventories[0] ? String(d.inventories[0].id) : '') }))) }) }, [])
   useEffect(() => { api('credentials').then((d) => setCreds(d.credentials)) }, [])
-  useEffect(() => { api('controllers').then((d) => setControllers(d.controllers || [])).catch(() => {}) }, [])
-
-  // Register this project's applied VMs into a Controller. Uses the project's
-  // chosen Controller; if none is set, opens an inline picker of connected ones.
-  const doEnroll = async (cid) => {
-    if (!project?.id) return
-    setEnrollBusy(true)
-    try {
-      const body = cid ? { controller_id: Number(cid) } : {}
-      const d = await api(`infra/${project.id}/enroll`, { method: 'POST', json: body })
-      setEnrollPick(false)
-      const lines = (d.results || []).map((h) => `${h.ok ? '✓' : '✗'} ${h.name} ${h.ip} — ${h.detail}`).join('\n')
-      alert(`Enrolled ${d.enrolled}/${d.total} into ${d.controller}:\n\n${lines}`)
-    } catch (e) {
-      if (/no controller was chosen/i.test(e.message) && controllers.length) {
-        setPickedCtrl(String(controllers[0].id)); setEnrollPick(true)
-      } else {
-        alert(e.message + (/no controller/i.test(e.message) ? '\n\nConnect one under Controllers first.' : ''))
-      }
-    } finally { setEnrollBusy(false) }
-  }
   useEffect(() => { if (project?.id) api(`projects/${project.id}/files`)
     .then((d) => setFiles((d.files || []).filter((f) => f.type === 'file').map((f) => f.path))).catch(() => {}) }, [project?.id])
   // Files that make sense as a run target for each engine — playbooks for Ansible,
@@ -1133,23 +1107,7 @@ export function PipelineModal({ project, currentFile, initialSteps, initialName,
         </Field>
       )}
       {node}
-      {enrollPick && (
-        <div className="row" style={{ gap: 8, margin: '4px 0 8px', alignItems: 'center' }}>
-          <span className="muted" style={{ fontSize: 13 }}>Enroll the VMs into</span>
-          <select value={pickedCtrl} onChange={(e) => setPickedCtrl(e.target.value)}>
-            {controllers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
-          </select>
-          <button className="primary sm" disabled={enrollBusy || !pickedCtrl}
-            onClick={() => doEnroll(pickedCtrl)}>{enrollBusy ? 'Enrolling…' : 'Enroll →'}</button>
-          <button className="ghost sm" onClick={() => setEnrollPick(false)}>Cancel</button>
-        </div>
-      )}
       <div className="row">
-        {steps.some((st) => st.kind === 'terraform') && (
-          <button className="ghost" disabled={enrollBusy}
-            title="Register this project's applied VMs into a connected Controller"
-            onClick={() => doEnroll(null)}>{enrollBusy ? 'Enrolling…' : 'Enroll → Controller'}</button>
-        )}
         {onSaved && (
           <button className="ghost" disabled={!name.trim()} onClick={() => wrap(async () => {
             const body = { project_id: project.id, name: name.trim(), steps: payloadOf(), stop_on_failure: stopOnFail }

@@ -230,10 +230,11 @@ export function RunLog({ runId, onBack, onOpenRun }) {
           <button className="ghost sm" title={`Re-run the playbook against just: ${failedHosts.join(', ')}`}
             onClick={openRerun}>↻ Re-run failed ({failedHosts.length})</button>
         )}
-        {projectId && (engine === 'terraform' || seq.some((s) => s.kind === 'terraform')) && (
+        {projectId && ((engine === 'terraform' && status === 'success') ||
+                       seq.some((s) => s.kind === 'terraform' && s.status === 'success')) && (
           <button className="primary sm" disabled={enrollBusy}
-            title="Register this project's applied VMs into a connected Controller"
-            onClick={() => doEnroll(null)}>{enrollBusy ? 'Enrolling…' : 'Enroll → Controller'}</button>
+            title="Register the VMs this apply created into a connected Controller"
+            onClick={() => doEnroll(null)}>{enrollBusy ? 'Enrolling…' : 'Enroll hosts → Controller'}</button>
         )}
       </div>
       {enrollPick && (

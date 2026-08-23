@@ -688,7 +688,7 @@ def list_projects(org_ids=None):
             return []
         else:
             ph = ",".join("?" * len(org_ids))
-            rows = c.execute(f"SELECT * FROM projects WHERE org_id IN ({ph}) ORDER BY name",
+            rows = c.execute(f"SELECT * FROM projects WHERE (org_id IN ({ph}) OR org_id IS NULL) ORDER BY name",
                              tuple(org_ids)).fetchall()
         rows = [dict(r) for r in rows]
     for d in rows:
@@ -801,7 +801,7 @@ def list_credentials(include_secret=False, org_ids=None):
             return []
         else:
             ph = ",".join("?" * len(org_ids))
-            rows = c.execute(f"SELECT * FROM credentials WHERE org_id IN ({ph}) ORDER BY name",
+            rows = c.execute(f"SELECT * FROM credentials WHERE (org_id IN ({ph}) OR org_id IS NULL) ORDER BY name",
                              tuple(org_ids)).fetchall()
         rows = [dict(r) for r in rows]
     if include_secret:
@@ -902,7 +902,7 @@ def list_controllers(include_key=False, org_ids=None):
             return []
         else:
             ph = ",".join("?" * len(org_ids))
-            rows = c.execute(f"SELECT * FROM controllers WHERE org_id IN ({ph}) ORDER BY name",
+            rows = c.execute(f"SELECT * FROM controllers WHERE (org_id IN ({ph}) OR org_id IS NULL) ORDER BY name",
                              tuple(org_ids)).fetchall()
         rows = [dict(r) for r in rows]
     if not include_key:
@@ -957,7 +957,7 @@ def list_inventories(project_id=None, org_ids=None):
         if org_ids is not None:
             if not org_ids:
                 return []
-            clauses.append(f"org_id IN ({','.join('?' * len(org_ids))})"); params.extend(org_ids)
+            clauses.append(f"(org_id IN ({','.join('?' * len(org_ids))}) OR org_id IS NULL)"); params.extend(org_ids)
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
         rows = c.execute(f"SELECT * FROM inventories{where} ORDER BY name", tuple(params)).fetchall()
         return [dict(r) for r in rows]
