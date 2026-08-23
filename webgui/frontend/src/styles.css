@@ -265,3 +265,13 @@ label.fld{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--
 .seq-n{display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:5px;
   font-size:10px;font-weight:700;background:var(--panel2);color:var(--muted)}
 .seq-arrow{color:var(--faint)}
+
+/* Organizations / Teams — role pills, team member chips, selected row. */
+.pill.role-admin{background:rgba(109,219,115,.16);color:var(--green,#63c869)}
+.pill.role-operator{background:rgba(122,162,255,.16);color:var(--accent,#7aa2ff)}
+.pill.role-viewer{background:var(--panel2);color:var(--muted)}
+.active-row>td{background:var(--panel2)}
+.chip{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:999px;
+  background:var(--panel2);font-size:12px}
+.chip-x{border:none;background:none;color:var(--muted);cursor:pointer;font-size:14px;line-height:1;padding:0 2px}
+.chip-x:hover{color:var(--danger,#e5534b)}

@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react'
 import { api, setToken, getToken, setRole, isSuperuser, getTheme, applyTheme } from './api.js'
 import { Field, useErr } from './ui.jsx'
 import Logo from './Logo.jsx'
+import Organizations from './views/Organizations.jsx'
 import Projects from './views/Projects.jsx'
 import Ide from './views/Ide.jsx'
 import Inventories from './views/Inventories.jsx'
@@ -19,6 +20,7 @@ import Pipelines from './views/Pipelines.jsx'
 // Left-rail navigation — same shape as the Sysible Controller console.
 // `su: true` items are shown only to superusers.
 const NAV = [
+  { key: 'organizations', label: 'Organizations', icon: 'org' },
   { key: 'projects', label: 'Projects', icon: 'folder' },
   { key: 'inventories', label: 'Inventories', icon: 'server' },
   { key: 'infra', label: 'Infrastructure', icon: 'cloud' },
@@ -45,6 +47,7 @@ const ICONS = {
   clock: <><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></>,
   activity: <path d="M3 12h4l3 8 4-16 3 8h4" />,
   cloud: <path d="M6.5 19a4.5 4.5 0 0 1-.5-8.97 6 6 0 0 1 11.64-1.36A4 4 0 0 1 17.5 19z" />,
+  org: <><rect x="4" y="3" width="7" height="18" rx="1" /><rect x="13" y="8" width="7" height="13" rx="1" /><line x1="7" y1="7" x2="7.01" y2="7" /><line x1="7" y1="11" x2="7.01" y2="11" /><line x1="16" y1="12" x2="16.01" y2="12" /></>,
 }
 
 function NavIcon({ name }) {
@@ -118,6 +121,7 @@ export default function App() {
         {runId == null && !project && <HealthBanner />}
         {runId != null ? <RunLog runId={runId} onBack={() => setRunId(null)} onOpenRun={setRunId} />
           : project ? <Ide project={project} onBack={() => setProject(null)} onRun={(id) => setRunId(id)} />
+            : view === 'organizations' ? <Organizations />
             : view === 'projects' ? <Projects onOpen={setProject} />
               : view === 'inventories' ? <Inventories />
                 : view === 'infra' ? <Infrastructure onOpenProject={setProject} onOpenRun={setRunId} />

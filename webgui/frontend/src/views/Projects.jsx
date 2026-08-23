@@ -4,9 +4,11 @@ import { Field, Modal, useErr } from '../ui.jsx'
 
 export default function Projects({ onOpen }) {
   const [projects, setProjects] = useState([])
+  const [orgs, setOrgs] = useState([])
   const [newOpen, setNewOpen] = useState(false)
   const load = () => api('projects').then((d) => setProjects(d.projects))
-  useEffect(() => { load() }, [])
+  useEffect(() => { load(); api('organizations').then((d) => setOrgs(d.organizations || [])).catch(() => {}) }, [])
+  const orgName = (id) => (orgs.find((o) => o.id === id) || {}).name || '—'
 
   return (
     <>
@@ -16,11 +18,12 @@ export default function Projects({ onOpen }) {
       </div>
       {projects.length === 0 ? <div className="muted">No projects yet. Create one to start authoring playbooks, Terraform, or Salt states.</div> : (
         <table>
-          <thead><tr><th>Name</th><th>Slug</th><th>Description</th><th></th></tr></thead>
+          <thead><tr><th>Name</th><th>Organization</th><th>Slug</th><th>Description</th><th></th></tr></thead>
           <tbody>
             {projects.map((p) => (
               <tr key={p.id}>
                 <td><a onClick={() => onOpen(p)}>{p.name}</a></td>
+                <td className="muted">{orgName(p.org_id)}</td>
                 <td className="muted">{p.slug}</td>
                 <td className="muted">{p.description}</td>
                 <td className="row">
@@ -32,29 +35,40 @@ export default function Projects({ onOpen }) {
           </tbody>
         </table>
       )}
-      {newOpen && <NewProject onClose={() => setNewOpen(false)} onCreated={(p) => { setNewOpen(false); onOpen(p) }} />}
+      {newOpen && <NewProject orgs={orgs} onClose={() => setNewOpen(false)} onCreated={(p) => { setNewOpen(false); load(); onOpen(p) }} />}
     </>
   )
 }
 
-function NewProject({ onClose, onCreated }) {
+function NewProject({ orgs = [], onClose, onCreated }) {
   const [name, setName] = useState('')
   const [desc, setDesc] = useState('')
   const [mode, setMode] = useState('blank')   // 'blank' | 'clone'
   const [url, setUrl] = useState('')
   const [token, setToken] = useState('')
   const [busy, setBusy] = useState(false)
+  // Only orgs where the user can author (operator or admin) can receive a project.
+  const writableOrgs = orgs.filter((o) => o.role === 'operator' || o.role === 'admin')
+  const [orgId, setOrgId] = useState(writableOrgs[0] ? String(writableOrgs[0].id) : '')
   const { wrap, node } = useErr()
   const create = () => wrap(async () => {
     setBusy(true)
     try {
       const json = { name: name.trim() || (mode === 'clone' ? repoName(url) : ''), description: desc }
+      if (orgId) json.org_id = Number(orgId)
       if (mode === 'clone') { json.clone_url = url.trim(); if (token) json.git_token = token }
       onCreated(await api('projects', { method: 'POST', json }))
     } finally { setBusy(false) }
   })
   return (
     <Modal title="New project" onClose={onClose}>
+      {writableOrgs.length > 1 && (
+        <Field label="Organization">
+          <select value={orgId} onChange={(e) => setOrgId(e.target.value)}>
+            {writableOrgs.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
+          </select>
+        </Field>
+      )}
       <div className="row" style={{ gap: 6, marginBottom: 4 }}>
         <button className={'ghost sm' + (mode === 'blank' ? ' active' : '')} onClick={() => setMode('blank')}>Blank</button>
         <button className={'ghost sm' + (mode === 'clone' ? ' active' : '')} onClick={() => setMode('clone')}>Clone a git repo</button>
