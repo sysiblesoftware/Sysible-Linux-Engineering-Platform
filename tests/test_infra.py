@@ -70,6 +70,55 @@ def test_hypervisor_volumes_lists_pool_images(client, monkeypatch):
     assert d["volumes"] == ["jammy.qcow2", "rocky9.img"]     # ISO + .txt filtered out
 
 
+def test_hypervisor_networks_lists_nets_and_pools(client, monkeypatch):
+    """The network/pool picker reads what the hypervisor actually has (virsh
+    net-list / pool-list), each with an active flag — so the wizard can offer the
+    real network ('homelab') and flag an inactive pool."""
+    import backend.app as appmod
+    import shutil
+    monkeypatch.setattr(shutil, "which", lambda b: "/usr/bin/virsh")
+
+    def fake_run(cmd, *a, **k):
+        sub = cmd[cmd.index("--readonly") + 1]
+
+        class R:
+            returncode = 0
+            stderr = ""
+            stdout = (" Name       State    Autostart\n----------------------------\n homelab   active   yes\n"
+                      if sub == "net-list" else
+                      " Name      State     Autostart\n---------------------------\n default   inactive  no\n images   active   yes\n")
+        return R()
+    monkeypatch.setattr(appmod.subprocess, "run", fake_run)
+    d = client.post("/infra/hypervisor-networks", json={"uri": "qemu:///system"}).json()
+    assert d["ok"] is True
+    assert d["networks"] == [{"name": "homelab", "active": True}]
+    assert {"name": "default", "active": False} in d["pools"]
+    assert {"name": "images", "active": True} in d["pools"]
+
+
+def test_hypervisor_pool_start(client, monkeypatch):
+    """One-click pool activation runs virsh pool-start (and pool-autostart)."""
+    import backend.app as appmod
+    import shutil
+    monkeypatch.setattr(shutil, "which", lambda b: "/usr/bin/virsh")
+    calls = []
+
+    def fake_run(cmd, *a, **k):
+        calls.append(cmd[cmd.index("-c") + 2] if "-c" in cmd else "")
+
+        class R:
+            returncode = 0
+            stdout = "Pool default started"
+            stderr = ""
+        return R()
+    monkeypatch.setattr(appmod.subprocess, "run", fake_run)
+    d = client.post("/infra/hypervisor-pool-start", json={"uri": "qemu:///system", "pool": "default"}).json()
+    assert d["ok"] is True and "default" in d["output"]
+    assert "pool-start" in calls and "pool-autostart" in calls
+    # A blank pool is rejected.
+    assert client.post("/infra/hypervisor-pool-start", json={"uri": "qemu:///system", "pool": ""}).status_code == 400
+
+
 def test_libvirt_existing_pool_volume_skips_download():
     """Naming an existing pool volume clones each VM disk from it (base_volume_name)
     with NO base-volume-from-source resource — so nothing is downloaded/uploaded and

@@ -424,6 +424,60 @@ function PoolVolumePicker({ values, set }) {
   )
 }
 
+// Network + storage-pool picker for the libvirt connection panel. Reads what the
+// hypervisor ACTUALLY has (virsh net-list / pool-list) and offers them as
+// dropdowns — so you pick the real network ('homelab') instead of guessing
+// 'default', and see at a glance which pool is inactive (with a one-click start).
+function NetworkPoolPicker({ values, set }) {
+  const [data, setData] = useState(null)   // {networks:[{name,active}], pools:[...]}
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState('')
+  const [starting, setStarting] = useState('')
+  const load = async () => {
+    setBusy(true); setErr('')
+    try {
+      const d = await api('infra/hypervisor-networks', { method: 'POST', json: { uri: values.uri } })
+      if (d.ok) setData({ networks: d.networks || [], pools: d.pools || [] })
+      else { setData({ networks: [], pools: [] }); setErr(d.output || 'Could not list networks/pools.') }
+    } catch (e) { setErr(e.message) } finally { setBusy(false) }
+  }
+  const startPool = async (name) => {
+    setStarting(name)
+    try { await api('infra/hypervisor-pool-start', { method: 'POST', json: { uri: values.uri, pool: name } }); await load() }
+    catch (e) { setErr(e.message) } finally { setStarting('') }
+  }
+  const net = values.network || 'default'
+  const pool = values.pool || 'default'
+  const nets = data?.networks || []
+  const pools = data?.pools || []
+  const poolObj = pools.find((p) => p.name === pool)
+  const sel = (cur, list, key, ph) => (list.length > 0
+    ? <select value={list.some((x) => x.name === cur) ? cur : ''} onChange={(e) => set(key, e.target.value)} style={{ flex: 1 }}>
+        <option value="">(pick one)</option>
+        {list.map((x) => <option key={x.name} value={x.name}>{x.name}{x.active ? '' : ' — inactive'}</option>)}
+      </select>
+    : <input value={cur} onChange={(e) => set(key, e.target.value)} style={{ flex: 1 }} placeholder={ph} />)
+  return (
+    <div style={{ margin: '2px 0 8px' }}>
+      <div className="row" style={{ gap: 10 }}>
+        <Field label="Network"><div className="row" style={{ gap: 6 }}>{sel(net, nets, 'network', 'e.g. homelab')}</div></Field>
+        <Field label="Storage pool"><div className="row" style={{ gap: 6 }}>{sel(pool, pools, 'pool', 'e.g. default')}</div></Field>
+        <button type="button" className="ghost sm" style={{ alignSelf: 'flex-end', whiteSpace: 'nowrap' }}
+          disabled={busy || !values.uri} title="List the networks and pools on the hypervisor"
+          onClick={load}>{busy ? 'Loading…' : '↻ Load from host'}</button>
+      </div>
+      {poolObj && !poolObj.active && (
+        <div className="faint" style={{ fontSize: 11.5, color: 'var(--danger)', marginTop: 2 }}>
+          Pool “{pool}” is defined but INACTIVE — apply will fail.{' '}
+          <a onClick={() => startPool(pool)} style={{ cursor: 'pointer' }}>{starting === pool ? 'starting…' : 'Start it now'}</a>
+        </div>
+      )}
+      {err && <div className="faint" style={{ fontSize: 11, color: 'var(--danger)', marginTop: 2 }}>{err}</div>}
+      {!data && !err && <div className="faint" style={{ fontSize: 11, marginTop: 2 }}>“Load from host” to pick the real network + pool (e.g. this host has ‘homelab’, not ‘default’).</div>}
+    </div>
+  )
+}
+
 // Hypervisor connection helper for the libvirt provider. Turns the fiddly
 // qemu+ssh URI + SSH-key dance into: pick Local or Remote, (for remote) enter
 // host + user and click "Get deploy key" — SLEP returns its managed public key
@@ -524,6 +578,7 @@ function LibvirtConnect({ values, set }) {
         <input value={values.uri || ''} onChange={(e) => set('uri', e.target.value)}
           style={{ fontFamily: 'ui-monospace,monospace', fontSize: 12 }} />
       </Field>
+      <NetworkPoolPicker values={values} set={set} />
       <div className="row" style={{ gap: 10, alignItems: 'center' }}>
         <button className="ghost sm" disabled={hvTest === 'testing' || !values.uri}
           onClick={() => wrap(async () => {

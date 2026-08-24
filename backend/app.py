@@ -2044,6 +2044,72 @@ def infra_hypervisor_volumes(body: dict = Body(...), user: str = Depends(current
     return {"ok": True, "volumes": sorted(vols), "output": f"{len(vols)} image(s) in pool '{pool}'."}
 
 
+@app.post("/infra/hypervisor-networks")
+def infra_hypervisor_networks(body: dict = Body(...), user: str = Depends(current_user)):
+    """List the virtual networks and storage pools on a libvirt hypervisor (virsh
+    net-list / pool-list, --all) so the wizard can offer what ACTUALLY exists as
+    dropdowns — the two most common apply blockers are naming a network/pool that
+    isn't there (the host calls it 'homelab', not 'default') or one that's defined
+    but inactive. Each entry carries {name, active} so the UI can flag and offer to
+    start an inactive one. Read-only; never mutates. Returns {ok, networks, pools}."""
+    import shutil
+    uri = _validate_libvirt_uri(body.get("uri"))
+    if not shutil.which("virsh"):
+        return {"ok": False, "networks": [], "pools": [],
+                "output": "`virsh` (libvirt-clients) isn't installed on the SLEP host — type the names instead."}
+
+    def _list(kind):
+        try:
+            p = subprocess.run(["virsh", "-c", uri, "--readonly", kind, "--all"],
+                               capture_output=True, text=True, timeout=25, env=dict(os.environ))
+        except Exception as e:  # noqa: BLE001
+            return None, str(e)
+        if p.returncode != 0:
+            return None, (p.stderr or p.stdout or f"{kind} failed").strip()[:200]
+        out = []
+        for line in p.stdout.splitlines():
+            s = line.strip()
+            if not s or s.startswith("Name") or set(s) <= set("- "):
+                continue
+            parts = s.split()
+            if len(parts) < 2:
+                continue
+            out.append({"name": parts[0], "active": parts[1].lower() == "active"})
+        return out, None
+
+    nets, nerr = _list("net-list")
+    pools, perr = _list("pool-list")
+    if nets is None and pools is None:
+        return {"ok": False, "networks": [], "pools": [], "output": nerr or perr or "couldn't reach the hypervisor."}
+    return {"ok": True, "networks": nets or [], "pools": pools or [],
+            "output": f"{len(nets or [])} network(s), {len(pools or [])} pool(s)."}
+
+
+@app.post("/infra/hypervisor-pool-start")
+def infra_hypervisor_pool_start(body: dict = Body(...), user: str = Depends(require_operator)):
+    """Start (activate) a defined-but-inactive storage pool on the hypervisor —
+    `virsh pool-start <pool>` — the one-click fix for the 'pool defined but INACTIVE'
+    preflight failure, so the operator doesn't have to SSH to the host to run it.
+    Also flips autostart on so it survives a hypervisor reboot."""
+    import shutil
+    uri = _validate_libvirt_uri(body.get("uri"))
+    pool = infra._one_line(str(body.get("pool") or "")).strip()
+    if not pool:
+        raise HTTPException(status_code=400, detail="A pool name is required.")
+    if not shutil.which("virsh"):
+        return {"ok": False, "output": "`virsh` isn't installed on the SLEP host — run `virsh pool-start " + pool + "` on the hypervisor."}
+    try:
+        p = subprocess.run(["virsh", "-c", uri, "pool-start", pool],
+                           capture_output=True, text=True, timeout=25, env=dict(os.environ))
+        subprocess.run(["virsh", "-c", uri, "pool-autostart", pool],
+                       capture_output=True, text=True, timeout=15, env=dict(os.environ))
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "output": str(e)}
+    ok = p.returncode == 0 or "already active" in (p.stderr or "").lower()
+    return {"ok": ok, "output": (f"✓ pool '{pool}' is active." if ok
+                                 else (p.stderr or p.stdout or "pool-start failed").strip()[:200])}
+
+
 def _virsh_list_domains(uri: str):
     """Read the domains on a libvirt hypervisor (`virsh list --all`). Returns
     (list[{id,name,state}], None) or (None, error_message)."""
