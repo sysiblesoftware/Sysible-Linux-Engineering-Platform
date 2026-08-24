@@ -1,15 +1,18 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { api } from '../api.js'
 import { Field, Modal, useErr } from '../ui.jsx'
 
 // Projects are the top-level unit; each can nest sub-projects (folders) via
 // parent_id, rendered here as an expandable tree. Organizations still exist for
 // access control behind the scenes (shown as a column only when you can see
-// more than one).
+// more than one). The name is the primary action (opens the project); everything
+// else lives in a per-row ⋯ menu to keep the list calm.
 export default function Projects({ onOpen }) {
   const [projects, setProjects] = useState([])
   const [orgs, setOrgs] = useState([])
   const [newFor, setNewFor] = useState(undefined)   // undefined=closed; null=top-level; id=sub-project parent
+  const [moveP, setMoveP] = useState(null)          // project being reparented
+  const [menuId, setMenuId] = useState(null)        // project whose ⋯ menu is open
   const [collapsed, setCollapsed] = useState({})    // {projectId: true} → children hidden
   const { wrap, node } = useErr()
 
@@ -27,7 +30,7 @@ export default function Projects({ onOpen }) {
     return acc
   }
   const move = (p, parent_id) => wrap(async () => {
-    await api(`projects/${p.id}`, { method: 'PATCH', json: { parent_id: parent_id } }); load()
+    await api(`projects/${p.id}`, { method: 'PATCH', json: { parent_id } }); load()
   })
   const del = (p) => wrap(async () => {
     const kids = childrenOf(p.id).length
@@ -35,34 +38,43 @@ export default function Projects({ onOpen }) {
     if (!confirm(msg)) return
     await api('projects/' + p.id, { method: 'DELETE' }); load()
   })
+  const moveTargetsFor = (p) => {
+    const banned = descendants(p.id); banned.add(p.id)
+    return projects.filter((t) => t.org_id === p.org_id && !banned.has(t.id))
+  }
 
   const Row = ({ p, depth }) => {
     const kids = childrenOf(p.id)
     const isCollapsed = collapsed[p.id]
-    const banned = descendants(p.id); banned.add(p.id)
-    const moveTargets = projects.filter((t) => t.org_id === p.org_id && !banned.has(t.id))
     return (
       <>
-        <tr>
-          <td style={{ paddingLeft: 8 + depth * 22 }}>
-            {kids.length > 0
-              ? <a onClick={() => setCollapsed((c) => ({ ...c, [p.id]: !c[p.id] }))} style={{ marginRight: 6 }}>{isCollapsed ? '▸' : '▾'}</a>
-              : <span style={{ display: 'inline-block', width: 14 }} />}
-            <a onClick={() => onOpen(p)}>{p.name}</a>
+        <tr className="proj-row">
+          <td style={{ paddingLeft: 10 + depth * 22 }}>
+            <span className="proj-name">
+              <button className={'proj-caret' + (kids.length ? '' : ' leaf')}
+                title={isCollapsed ? 'Expand' : 'Collapse'}
+                onClick={() => setCollapsed((c) => ({ ...c, [p.id]: !c[p.id] }))}>{isCollapsed ? '▶' : '▼'}</button>
+              <span className="proj-link" title={`Open ${p.name}`} onClick={() => onOpen(p)}>{p.name}</span>
+              {kids.length > 0 && <span className="proj-count" title={`${kids.length} sub-project(s)`}>{kids.length}</span>}
+            </span>
           </td>
           {multiOrg && <td className="muted">{orgName(p.org_id)}</td>}
-          <td className="muted">{p.slug}</td>
-          <td className="muted">{p.description}</td>
-          <td className="row">
-            <button className="ghost sm" onClick={() => onOpen(p)}>Open</button>
-            <button className="ghost sm" title="Add a sub-project under this one" onClick={() => setNewFor(p.id)}>+ Sub</button>
-            <select className="sm" value="" title="Move under another project"
-              onChange={(e) => { const v = e.target.value; move(p, v === '__top' ? null : Number(v)) }}>
-              <option value="" disabled>Move…</option>
-              {p.parent_id && <option value="__top">↑ Top level</option>}
-              {moveTargets.map((t) => <option key={t.id} value={t.id}>→ {t.name}</option>)}
-            </select>
-            <button className="danger ghost sm" onClick={() => del(p)}>Delete</button>
+          <td><span className="proj-slug">{p.slug}</span></td>
+          <td><div className="proj-desc" title={p.description}>{p.description || <span className="faint">—</span>}</div></td>
+          <td>
+            <div className="proj-actions">
+              <RowMenu
+                open={menuId === p.id}
+                onToggle={() => setMenuId((id) => (id === p.id ? null : p.id))}
+                onClose={() => setMenuId(null)}
+                items={[
+                  { label: 'Open', accel: '↵', run: () => onOpen(p) },
+                  { label: 'Add sub-project', run: () => setNewFor(p.id) },
+                  { label: 'Move…', run: () => setMoveP(p) },
+                  { sep: true },
+                  { label: 'Delete', danger: true, run: () => del(p) },
+                ]} />
+            </div>
           </td>
         </tr>
         {!isCollapsed && kids.map((c) => <Row key={c.id} p={c} depth={depth + 1} />)}
@@ -72,14 +84,21 @@ export default function Projects({ onOpen }) {
 
   return (
     <>
-      <h2>Projects</h2>
-      <div className="row" style={{ marginBottom: 12 }}>
+      <div className="row" style={{ marginBottom: 14 }}>
+        <h2 style={{ margin: 0 }}>Projects</h2>
+        <div className="spacer" />
         <button className="primary" onClick={() => setNewFor(null)}>+ New project</button>
       </div>
       {node}
-      {projects.length === 0 ? <div className="muted">No projects yet. Create one to start authoring playbooks, Terraform, or Salt states.</div> : (
-        <table>
-          <thead><tr><th>Name</th>{multiOrg && <th>Organization</th>}<th>Slug</th><th>Description</th><th></th></tr></thead>
+      {projects.length === 0 ? (
+        <div className="empty-state">
+          <div className="es-title">No projects yet</div>
+          <div>Create one to start authoring playbooks, Terraform, or Salt states.</div>
+          <div style={{ marginTop: 14 }}><button className="primary" onClick={() => setNewFor(null)}>+ New project</button></div>
+        </div>
+      ) : (
+        <table className="proj-table">
+          <thead><tr><th>Name</th>{multiOrg && <th>Organization</th>}<th>Slug</th><th>Description</th><th style={{ width: 44 }} /></tr></thead>
           <tbody>{roots.map((p) => <Row key={p.id} p={p} depth={0} />)}</tbody>
         </table>
       )}
@@ -88,7 +107,66 @@ export default function Projects({ onOpen }) {
           onClose={() => setNewFor(undefined)}
           onCreated={(p) => { setNewFor(undefined); load(); onOpen(p) }} />
       )}
+      {moveP && (
+        <MoveProject p={moveP} targets={moveTargetsFor(moveP)}
+          onClose={() => setMoveP(null)}
+          onMove={(parentId) => { setMoveP(null); move(moveP, parentId) }} />
+      )}
     </>
+  )
+}
+
+// A per-row ⋯ overflow menu, reusing the app's context-menu styling. Closes on
+// outside click / Escape. Positioned under the trigger button.
+function RowMenu({ open, onToggle, onClose, items }) {
+  const btnRef = useRef(null)
+  const [pos, setPos] = useState({ x: 0, y: 0 })
+  useEffect(() => {
+    if (!open) return undefined
+    const r = btnRef.current?.getBoundingClientRect()
+    if (r) setPos({ x: Math.max(8, Math.min(r.right - 200, window.innerWidth - 210)), y: r.bottom + 4 })
+    const close = (e) => { if (!btnRef.current || !btnRef.current.contains(e.target)) onClose() }
+    const onKey = (e) => { if (e.key === 'Escape') onClose() }
+    window.addEventListener('mousedown', close)
+    window.addEventListener('keydown', onKey)
+    window.addEventListener('scroll', onClose, true)
+    return () => { window.removeEventListener('mousedown', close); window.removeEventListener('keydown', onKey); window.removeEventListener('scroll', onClose, true) }
+  }, [open, onClose])
+  return (
+    <>
+      <button ref={btnRef} className={'kebab' + (open ? ' open' : '')} title="Actions"
+        aria-label="Project actions" onClick={onToggle}>⋯</button>
+      {open && (
+        <div className="ctx-menu" style={{ left: pos.x, top: pos.y }} onMouseDown={(e) => e.stopPropagation()}>
+          {items.map((it, i) => it.sep
+            ? <div key={i} className="ctx-sep" />
+            : <button key={i} className="ctx-item" style={it.danger ? { color: 'var(--danger)' } : undefined}
+                onClick={() => { onClose(); it.run() }}>
+                <span>{it.label}</span>{it.accel && <span className="ctx-accel">{it.accel}</span>}
+              </button>)}
+        </div>
+      )}
+    </>
+  )
+}
+
+// Reparent a project (or send it to the top level), cycle-guarded by the caller's
+// target list.
+function MoveProject({ p, targets, onClose, onMove }) {
+  return (
+    <Modal title={`Move “${p.name}”`} onClose={onClose}>
+      <div className="muted" style={{ marginBottom: 4 }}>Choose where this project should nest. Its own sub-projects move with it.</div>
+      <div className="col" style={{ gap: 6, maxHeight: '50vh', overflow: 'auto' }}>
+        {p.parent_id != null && (
+          <button className="ghost" style={{ justifyContent: 'flex-start' }} onClick={() => onMove(null)}>↑ Top level</button>
+        )}
+        {targets.length === 0 && p.parent_id == null
+          ? <div className="faint" style={{ fontSize: 13 }}>No other project can hold this one.</div>
+          : targets.map((t) => (
+            <button key={t.id} className="ghost" style={{ justifyContent: 'flex-start' }} onClick={() => onMove(t.id)}>→ {t.name}</button>
+          ))}
+      </div>
+    </Modal>
   )
 }
 

@@ -275,3 +275,27 @@ label.fld{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--
   background:var(--panel2);font-size:12px}
 .chip-x{border:none;background:none;color:var(--muted);cursor:pointer;font-size:14px;line-height:1;padding:0 2px}
 .chip-x:hover{color:var(--danger,#e5534b)}
+
+/* Projects tree — a calm, professional host list: the name is the primary action,
+   secondary actions live in a per-row ⋯ menu (reuses .ctx-menu styling). */
+.proj-table td{vertical-align:middle;height:44px}
+.proj-row{transition:background .08s}
+.proj-row:hover>td{background:var(--panel2)}
+.proj-name{display:inline-flex;align-items:center;gap:8px;min-width:0}
+.proj-caret{width:18px;height:18px;flex:none;display:inline-flex;align-items:center;justify-content:center;
+  border:0;background:transparent;color:var(--faint);cursor:pointer;border-radius:5px;font-size:10px}
+.proj-caret:hover{color:var(--text);background:var(--line)}
+.proj-caret.leaf{visibility:hidden;cursor:default}
+.proj-link{color:var(--text);font-weight:500;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.proj-link:hover{color:var(--accent2)}
+.proj-count{font-size:11px;color:var(--faint);border:1px solid var(--line);border-radius:20px;padding:0 7px;line-height:17px;flex:none}
+.proj-slug{color:var(--muted);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}
+.proj-desc{color:var(--muted);max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.proj-actions{display:flex;justify-content:flex-end}
+.kebab{width:30px;height:28px;flex:none;display:inline-flex;align-items:center;justify-content:center;
+  border:1px solid transparent;background:transparent;color:var(--muted);border-radius:7px;cursor:pointer;
+  font-size:17px;line-height:1;letter-spacing:1px}
+.proj-row:hover .kebab{border-color:var(--line)}
+.kebab:hover,.kebab.open{border-color:var(--accent2);color:var(--text);background:var(--panel)}
+.empty-state{border:1px dashed var(--line-strong);border-radius:10px;padding:34px 20px;text-align:center;color:var(--muted)}
+.empty-state .es-title{color:var(--text);font-weight:600;margin-bottom:4px}
