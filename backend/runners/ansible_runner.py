@@ -147,9 +147,13 @@ def _emit_unreachable_help(emit, has_bastion: bool, proxy_hop_closed: bool,
     if proxy_hop_closed:
         emit("   • 'Connection closed by UNKNOWN' = the jump host connected but the hop to")
         emit("     the target closed. The bastion can reach itself but not the target:")
+        emit("       – WRONG JUMP HOST: for libvirt/cloud VMs on a private NAT network, the jump")
+        emit("         host must be the HYPERVISOR that runs them — it's the only machine on their")
+        emit("         network. A sibling box on the LAN can reach itself but not the VMs. Set the")
+        emit("         inventory's jump host to the hypervisor (the user@host from its qemu+ssh URI);")
+        emit("         SLEP now does this automatically for VMs it builds, or")
         emit("       – the target has no SSH server running (Sysible Linux ships SSH OFF by")
         emit("         default — enable sshd on the host, or manage it via its agent), or")
-        emit("       – the bastion can't route to the target's subnet / a firewall blocks it, or")
         emit("       – the bastion's sshd has 'AllowTcpForwarding no'.")
     if timed_out:
         emit("   • The connection TIMED OUT — SSH never reached the host's port 22. This is")

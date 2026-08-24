@@ -277,6 +277,15 @@ def _run_distribute(inventory_id: int, only: set, username: str, password: str, 
                 emit(f"Credential “{_CRED_NAME}” (id {cid}) is ready — pick it for key-based runs.")
             else:
                 emit(f"== 0 succeeded, {len(fail_hosts)} failed — no credential created ==")
+            # All failed through a jump host → almost always the wrong jump host:
+            # the VMs are on the hypervisor's private NAT network, so ONLY the
+            # hypervisor can reach them. Name the fix explicitly.
+            if bastion and fail_hosts and not ok_hosts:
+                emit("")
+                emit("Tip: these are on a private network the jump host can't reach. For libvirt/"
+                     "cloud VMs, the jump host MUST be the HYPERVISOR that runs them (it's the only "
+                     "machine on their NAT network) — set the inventory's jump host to the hypervisor "
+                     "(e.g. the user@host from its qemu+ssh URI), not another box on the LAN.")
         except Exception as e:  # noqa: BLE001 — surface any failure into the log
             emit(f"!! key distribution failed: {e}")
         finally:
@@ -416,7 +425,13 @@ def _run_test(key: str, inventory_id: int, only: set, credential_id, bastion: st
             emit("")
             emit(f"== {len(reachable)} reachable, {len(unreachable)} unreachable ==")
             if unreachable and not reachable:
-                emit("Tip: if these want a password, run “Distribute SSH key” first, then test with the SLEP managed key.")
+                if bastion:
+                    emit("Tip: if the jump host reached the targets but the tunnel closed, it can't route "
+                         "to them. For libvirt/cloud VMs, the jump host must be the HYPERVISOR that runs "
+                         "them (only it is on their NAT network) — set the inventory's jump host to the "
+                         "hypervisor (the user@host from its qemu+ssh URI).")
+                else:
+                    emit("Tip: if these want a password, run “Distribute SSH key” first, then test with the SLEP managed key.")
         except Exception as e:  # noqa: BLE001
             emit(f"!! connection test failed: {e}")
         finally:
