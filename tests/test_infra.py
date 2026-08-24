@@ -585,6 +585,34 @@ def test_libvirt_hypervisor_becomes_jump_host(client, monkeypatch):
     assert db.get_inventory(iid)["bastion"] == "admin@192.168.8.212"
 
 
+def test_project_level_jump_host_propagates_to_inventories(client, monkeypatch):
+    """Designating a jump host on the infra project (PATCH /infra/{id}) stores it
+    and pushes it down to every inventory the project owns — so you set it once,
+    not per inventory."""
+    import backend.app as appmod
+    import backend.db as db
+    pid = client.post("/infra", json={"name": "jh", "provider": "libvirt",
+                                      "options": {"count": 1, "base_image": "x", "uri": "qemu:///system"}}).json()["project_id"]
+
+    class Out:
+        returncode = 0
+        stdout = '{"sysible_hosts":{"value":[{"name":"vm-1","ip":"10.0.0.9","user":"ubuntu"}]}}'
+        stderr = ""
+    monkeypatch.setattr(appmod.subprocess, "run", lambda *a, **k: Out())
+    iid, _n, _c = appmod._autobuild_infra_inventory(pid)          # a project inventory exists
+    assert (db.get_inventory(iid)["bastion"] or "") == ""          # none yet (local hypervisor)
+
+    r = client.patch(f"/infra/{pid}", json={"bastion": "admin@192.168.8.212"})
+    assert r.status_code == 200 and r.json()["bastion"] == "admin@192.168.8.212"
+    assert db.get_inventory(iid)["bastion"] == "admin@192.168.8.212"   # pushed down
+
+    # Clearing it propagates too.
+    client.patch(f"/infra/{pid}", json={"bastion": ""})
+    assert (db.get_inventory(iid)["bastion"] or "") == ""
+    # A bad IP in the jump host is rejected.
+    assert client.patch(f"/infra/{pid}", json={"bastion": "admin@192.168.300.1"}).status_code == 400
+
+
 def test_local_libvirt_sets_no_jump_host(client):
     """A local hypervisor (qemu:///system) needs no jump host — the bastion stays
     empty rather than pointing at a non-routable address."""

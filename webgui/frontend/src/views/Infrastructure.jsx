@@ -13,6 +13,7 @@ export default function Infrastructure({ onOpenProject, onOpenRun }) {
   const [vms, setVms] = useState(null)     // {name, loading?|list?|error?} → VMs-on-hypervisor modal
   const [controllers, setControllers] = useState([])
   const [enrollFor, setEnrollFor] = useState(null)   // {r} → Controller picker when none set
+  const [jumpFor, setJumpFor] = useState(null)       // {r} → jump-host editor
   const load = () => api('infra').then((d) => setRows(d.infra))
   useEffect(() => { load(); api('controllers').then((d) => setControllers(d.controllers || [])).catch(() => {}) }, [])
   const writable = canWrite()
@@ -109,6 +110,7 @@ export default function Infrastructure({ onOpenProject, onOpenRun }) {
                   {writable && <button className="danger ghost sm" onClick={() => run(r, 'destroy')}>Destroy</button>}
                   {writable && <button className="ghost sm" title="List the VMs actually on this project's hypervisor" onClick={() => listVms(r)}>🖥 VMs</button>}
                   {writable && <button className="ghost sm" title="Read the applied VMs into a SLEP Ansible inventory" onClick={() => toInventory(r)}>→ Inventory</button>}
+                  {writable && <button className="ghost sm" title={r.bastion ? `Jump host: ${r.bastion}` : 'Set the SSH jump host (hypervisor) used to reach these VMs'} onClick={() => setJumpFor(r)}>{r.bastion ? '⤳ Jump host' : '+ Jump host'}</button>}
                   {writable && <button className="primary sm" title="Register the applied VMs into a connected Controller (agent enroll)" onClick={() => enroll(r)}>Enroll → Controller</button>}
                   {writable && <button className="ghost sm" title="Scaffold an Ansible playbook and open it (Configure)" onClick={() => scaffold(r, 'configure')}>Configure</button>}
                   {writable && <button className="ghost sm" title="Scaffold a Salt state and open it (Maintain)" onClick={() => scaffold(r, 'maintain')}>Maintain</button>}
@@ -126,7 +128,38 @@ export default function Infrastructure({ onOpenProject, onOpenRun }) {
       {vms && <VmsModal data={vms} onClose={() => setVms(null)} />}
       {enrollFor && <EnrollPicker r={enrollFor} controllers={controllers}
         onClose={() => setEnrollFor(null)} onPick={(cid) => enroll(enrollFor, cid)} />}
+      {jumpFor && <JumpHostEditor r={jumpFor} onClose={() => setJumpFor(null)}
+        onSaved={() => { setJumpFor(null); load() }} />}
     </>
+  )
+}
+
+// Designate the SSH jump host for a project's VMs at the project level — pushed
+// down to every inventory the project owns, so runs/tests/key-distribution hop
+// through it. For libvirt this is the hypervisor (auto-set on create); this lets
+// you view or override it without visiting each inventory.
+function JumpHostEditor({ r, onClose, onSaved }) {
+  const [bastion, setBastion] = useState(r.bastion || '')
+  const { wrap, node } = useErr()
+  return (
+    <Modal title={`Jump host — ${r.project_name}`} onClose={onClose}>
+      <p className="muted" style={{ marginTop: 0 }}>
+        The VMs sit on the hypervisor’s private network, which SLEP can’t reach directly — it hops through this
+        jump host. For libvirt it’s the hypervisor itself (the <span className="mono">user@host</span> from its
+        connection URI). Applies to every inventory in this project.
+      </p>
+      <Field label="Jump host (user@host[:port]) — empty for a direct connection">
+        <input value={bastion} autoFocus onChange={(e) => setBastion(e.target.value)} placeholder="admin@192.168.8.212" />
+      </Field>
+      {node}
+      <div className="row" style={{ marginTop: 12, justifyContent: 'flex-end' }}>
+        <button className="ghost sm" onClick={onClose}>Cancel</button>
+        <button className="primary sm" onClick={() => wrap(async () => {
+          await api(`infra/${r.project_id}`, { method: 'PATCH', json: { bastion: bastion.trim() } })
+          onSaved()
+        })}>Save jump host</button>
+      </div>
+    </Modal>
   )
 }
 

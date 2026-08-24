@@ -634,6 +634,14 @@ def set_infra_inventory(project_id, inventory_id):
         c.execute("UPDATE infra SET inventory_id=? WHERE project_id=?", (inventory_id, project_id))
 
 
+def set_infra_bastion(project_id, bastion):
+    """Set the infra project's SSH jump host (hypervisor) without disturbing its
+    other fields. Designated once at the project level and pushed to its
+    inventories by the caller."""
+    with _connect() as c:
+        c.execute("UPDATE infra SET bastion=? WHERE project_id=?", (bastion or "", project_id))
+
+
 def list_infra():
     """Infra projects joined with their project name/slug, for the Infrastructure view."""
     with _connect() as c:

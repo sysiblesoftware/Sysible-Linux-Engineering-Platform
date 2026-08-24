@@ -2209,6 +2209,27 @@ def infra_to_inventory(project_id: int, user: str = Depends(require_operator)):
     return {"inventory_id": iid, "name": name, "hosts": n}
 
 
+@app.patch("/infra/{project_id}")
+def infra_update(project_id: int, body: dict = Body(...), user: str = Depends(require_operator)):
+    """Update an infrastructure project's settings. Currently the SSH jump host
+    (bastion) used to reach its VMs — designating it here (project level) applies
+    it to every inventory the project owns, so you don't have to set it on each
+    inventory. Empty clears it. For libvirt this is normally the hypervisor and is
+    auto-derived on create; this lets you view/override it."""
+    meta = db.get_infra(project_id)
+    if not meta:
+        raise HTTPException(status_code=404, detail="Not an infrastructure project.")
+    if "bastion" in body:
+        bastion = _validate_bastion(str(body.get("bastion") or ""))
+        db.set_infra_bastion(project_id, bastion)
+        # Push it down to the project's inventories so runs/tests hop through it —
+        # the whole point of setting it once at the project level.
+        for inv in db.list_inventories(project_id=project_id):
+            db.set_inventory_bastion(inv["id"], bastion)
+        db.log_audit("infra_bastion_set", user, f"project #{project_id} → '{bastion or '(cleared)'}'")
+    return db.get_infra(project_id)
+
+
 def _enroll_infra_hosts(project_id: int, controller_id=None):
     """Register a project's applied VMs (the sysible_hosts output) into a
     Controller as SSH hosts. Returns {results, enrolled, total, controller}.
