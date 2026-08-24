@@ -101,7 +101,7 @@ export default function Infrastructure({ onOpenProject, onOpenRun }) {
             {rows.map((r) => (
               <tr key={r.project_id}>
                 <td><a onClick={() => onOpenProject({ id: r.project_id, name: r.project_name, slug: r.project_slug })}>{r.project_name}</a></td>
-                <td className="muted">{r.provider}</td>
+                <td className="muted">{r.provider}{r.bastion ? <><br /><span className="faint" style={{ fontSize: 11 }} title="VMs are reached through this hypervisor jump host">↳ via {r.bastion}</span></> : null}</td>
                 <td className="muted">{r.controller_id ? `Controller #${r.controller_id}${r.environment ? ' · ' + r.environment : ''}` : '—'}</td>
                 <td className="row">
                   {writable && <button className="ghost sm" title="Terraform/OpenTofu plan" onClick={() => run(r, 'plan')}>Plan</button>}

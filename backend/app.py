@@ -1754,6 +1754,28 @@ def _validate_libvirt_uri(uri: str) -> str:
     return u
 
 
+def _bastion_from_libvirt_uri(uri: str) -> str:
+    """Derive an SSH jump host (user@host[:port]) from a libvirt qemu+ssh URI.
+    Freshly-applied libvirt VMs sit on the hypervisor's private network (e.g. the
+    192.168.x NAT), which SLEP — typically a container — can't route to directly.
+    But SLEP CAN reach the hypervisor (that's how it drove the apply, and its
+    managed key is already installed there), so the hypervisor is the natural
+    bastion: Ansible reaches each VM via ProxyJump through it. Returns '' for a
+    local (qemu:///system) or non-ssh transport, where no jump is needed."""
+    import urllib.parse
+    u = str(uri or "").strip()
+    if not u.lower().startswith("qemu+ssh"):
+        return ""
+    parts = urllib.parse.urlsplit(u)
+    host = parts.hostname or ""
+    if not host:
+        return ""
+    hostpart = f"{parts.username}@{host}" if parts.username else host
+    if parts.port:
+        hostpart += f":{parts.port}"
+    return hostpart
+
+
 @app.post("/infra/test-hypervisor")
 def infra_test_hypervisor(body: dict = Body(...), user: str = Depends(current_user)):
     """Probe a libvirt (KVM/QEMU) hypervisor connection before applying — runs a
@@ -2037,8 +2059,20 @@ def infra_create(body: dict = Body(...), user: str = Depends(require_operator)):
         nm = str(body["inventory_name"]).strip()
         dup = db.find_inventory_by_name(pid, nm)
         inv_target = dup["id"] if dup else db.create_inventory(nm, project_id=pid, source="infra")
+    # A libvirt hypervisor reached over SSH is the jump host for its own VMs: they
+    # sit on its private NAT network (192.168.x), which SLEP can't route to — but
+    # the hypervisor can, and SLEP already logs into it. Record it as the infra's
+    # bastion so the built inventory reaches the VMs through it automatically.
+    hv_bastion = _bastion_from_libvirt_uri(options.get("uri")) if provider == "libvirt" else ""
     db.set_infra(pid, provider, int(controller_id) if controller_id else None,
-                 str(options.get("ssh_user", "")), str(options.get("environment", "")), inventory_id=inv_target)
+                 str(options.get("ssh_user", "")), str(options.get("environment", "")),
+                 inventory_id=inv_target, bastion=hv_bastion)
+    # If the VMs land in an inventory that has no jump host yet, give it the
+    # hypervisor as one so Ansible/Salt hop through it (no-op when there's none).
+    if hv_bastion and inv_target:
+        inv = db.get_inventory(inv_target)
+        if inv and not (inv.get("bastion") or "").strip():
+            db.set_inventory_bastion(inv_target, hv_bastion)
     db.log_audit("infra_created", user, f"{provider} project '{name}'")
     return {"project_id": pid, "slug": slug, "files": list(files), "provider": provider, "inventory_id": inv_target}
 
@@ -2101,6 +2135,14 @@ def _build_infra_inventory(project, meta, target_inventory_id=None):
     # builds go straight down the `target` branch above and never re-create.
     if meta.get("inventory_id") != iid:
         db.set_infra_inventory(project["id"], iid)
+    # Reach the VMs through the hypervisor jump host: they're on its private NAT
+    # network, which SLEP can't route to directly. Set it on the inventory when it
+    # has none of its own, so Ansible/Salt hop through the hypervisor.
+    hv_bastion = (meta.get("bastion") or "").strip()
+    if hv_bastion:
+        inv_row = db.get_inventory(iid)
+        if inv_row and not (inv_row.get("bastion") or "").strip():
+            db.set_inventory_bastion(iid, hv_bastion)
     group = ansible_runner._ansible_group(meta.get("environment", "")) if meta.get("environment") else ""
     n = 0
     for h in hosts:
@@ -2189,7 +2231,7 @@ def _enroll_infra_hosts(project_id: int, controller_id=None):
     if controller_id and not meta.get("controller_id"):
         db.set_infra(project_id, meta["provider"], controller_id=cid,
                      ssh_user=meta.get("ssh_user", ""), environment=meta.get("environment", ""),
-                     inventory_id=meta.get("inventory_id"))
+                     inventory_id=meta.get("inventory_id"), bastion=meta.get("bastion", ""))
     hosts = _infra_applied_hosts(project_id)
 
     results, ok_n = [], 0

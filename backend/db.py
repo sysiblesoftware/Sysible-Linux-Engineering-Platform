@@ -289,6 +289,12 @@ def init_db() -> None:
         infra_cols = [r["name"] for r in c.execute("PRAGMA table_info(infra)")]
         if "inventory_id" not in infra_cols:
             c.execute("ALTER TABLE infra ADD COLUMN inventory_id INTEGER")
+        # The hypervisor's SSH jump host (user@host[:port]) for reaching the VMs:
+        # freshly-applied VMs sit on the hypervisor's private network, which SLEP
+        # can't route to directly — but it can reach the hypervisor, so that's the
+        # bastion the built inventory uses.
+        if "bastion" not in infra_cols:
+            c.execute("ALTER TABLE infra ADD COLUMN bastion TEXT DEFAULT ''")
         # Multi-tenancy: every owned resource carries an org_id. Add the column
         # where missing, then adopt any orphaned rows + existing users into a
         # 'Default' organization so pre-tenancy installs keep working unchanged.
@@ -608,10 +614,10 @@ def mark_schedule_fired(sid: int, run_id: int, status: str = "launched"):
 
 
 # ---------------------------------------------------------------- infrastructure
-def set_infra(project_id, provider, controller_id=None, ssh_user="", environment="", inventory_id=None):
+def set_infra(project_id, provider, controller_id=None, ssh_user="", environment="", inventory_id=None, bastion=""):
     with _connect() as c:
-        c.execute("INSERT OR REPLACE INTO infra(project_id,provider,controller_id,ssh_user,environment,inventory_id,created) "
-                  "VALUES(?,?,?,?,?,?,?)", (project_id, provider, controller_id, ssh_user, environment, inventory_id, _now()))
+        c.execute("INSERT OR REPLACE INTO infra(project_id,provider,controller_id,ssh_user,environment,inventory_id,bastion,created) "
+                  "VALUES(?,?,?,?,?,?,?,?)", (project_id, provider, controller_id, ssh_user, environment, inventory_id, bastion, _now()))
 
 
 def get_infra(project_id):

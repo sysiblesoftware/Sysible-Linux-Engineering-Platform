@@ -563,6 +563,37 @@ def test_manual_inventory_create_is_get_or_create(client):
     assert len(invs) == 1
 
 
+def test_libvirt_hypervisor_becomes_jump_host(client, monkeypatch):
+    """A libvirt project reached over qemu+ssh records the hypervisor as its jump
+    host, and the built inventory hops through it — because the VMs sit on the
+    hypervisor's private NAT network that SLEP can't route to directly."""
+    import backend.app as appmod
+    import backend.db as db
+    pid = client.post("/infra", json={"name": "lab", "provider": "libvirt",
+                                      "options": {"count": 1, "base_image": "x", "environment": "prod",
+                                                  "uri": "qemu+ssh://admin@192.168.8.212/system?keyfile=/k&no_verify=1"}}).json()["project_id"]
+    # The hypervisor SSH endpoint is stored as the infra's bastion.
+    assert db.get_infra(pid)["bastion"] == "admin@192.168.8.212"
+
+    class Out:
+        returncode = 0
+        stdout = '{"sysible_hosts":{"value":[{"name":"vm-1","ip":"192.168.100.50","user":"ubuntu"}]}}'
+        stderr = ""
+    monkeypatch.setattr(appmod.subprocess, "run", lambda *a, **k: Out())
+    iid, _n, _c = appmod._autobuild_infra_inventory(pid)
+    # The built inventory inherits the hypervisor as its jump host.
+    assert db.get_inventory(iid)["bastion"] == "admin@192.168.8.212"
+
+
+def test_local_libvirt_sets_no_jump_host(client):
+    """A local hypervisor (qemu:///system) needs no jump host — the bastion stays
+    empty rather than pointing at a non-routable address."""
+    import backend.db as db
+    pid = client.post("/infra", json={"name": "local", "provider": "libvirt",
+                                      "options": {"count": 1, "base_image": "x", "uri": "qemu:///system"}}).json()["project_id"]
+    assert (db.get_infra(pid)["bastion"] or "") == ""
+
+
 def test_infra_project_vms_lists_domains(client, monkeypatch):
     """List VMs on a project's hypervisor: parse `virsh list --all` into name+state."""
     import shutil
