@@ -301,7 +301,8 @@ function CreateWizard({ onClose, onDone }) {
               : o.type === 'textarea'
                 ? <textarea rows={2} value={values[o.key] ?? ''} onChange={(e) => set(o.key, e.target.value)}
                   style={{ fontFamily: 'ui-monospace,monospace', fontSize: 12 }} />
-                : <input type={o.type === 'number' ? 'number' : 'text'} value={values[o.key] ?? ''}
+                : <input type={o.type === 'number' ? 'number' : o.type === 'password' ? 'password' : 'text'}
+                  autoComplete={o.type === 'password' ? 'new-password' : undefined} value={values[o.key] ?? ''}
                   onChange={(e) => set(o.key, o.type === 'number' ? Number(e.target.value) : e.target.value)} />}
             {o.help && <div className="faint" style={{ fontSize: 11 }}>{o.help}</div>}
           </Field>

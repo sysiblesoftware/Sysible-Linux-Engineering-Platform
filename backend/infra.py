@@ -19,6 +19,10 @@ _PREFIX = {"key": "name_prefix", "label": "Name prefix", "type": "text", "defaul
 _SSH_USER = {"key": "ssh_user", "label": "Login user", "type": "text", "default": "ubuntu"}
 _SSH_KEY = {"key": "ssh_public_key", "label": "Deploy SSH public key (for SLEP access)",
             "type": "textarea", "default": "", "help": "Paste an ssh-ed25519/ssh-rsa public key. Optional."}
+_SSH_PASSWORD = {"key": "ssh_password", "label": "Login password (optional — enables password SSH)",
+                 "type": "password", "default": "",
+                 "help": "Set a password for the login user and turn ON password SSH. Leave blank for "
+                         "key-only. Stored hashed (SHA-512) in the VM's cloud-init, not in plaintext."}
 _ENV = {"key": "environment", "label": "Environment tag (Controller group)", "type": "text", "default": "production"}
 
 # Curated catalog of common cloud images (generic/-cloud qcow2 with cloud-init),
@@ -93,7 +97,7 @@ PROVIDERS = {
                      "clone. A bare local path is read from the SLEP host (a container), not the "
                      "hypervisor — to use an image on the hypervisor, name it under “Existing pool volume”."},
             {"key": "network", "label": "Network name", "type": "text", "default": "default"},
-            _SSH_USER, _SSH_KEY, _ENV,
+            _SSH_USER, _SSH_KEY, _SSH_PASSWORD, _ENV,
         ],
     },
     "proxmox": {
@@ -182,41 +186,82 @@ def _one_line(s) -> str:
     return (parts[0].strip() if parts else "")
 
 
-def _cloudinit(ssh_user: str, keys: list[str]) -> str:
+def _cloudinit(ssh_user: str, keys: list[str], password: str = "") -> str:
     # Single-line each value so nothing can inject a top-level cloud-init directive.
     ssh_user = _one_line(ssh_user) or "user"
+    password = _one_line(password)
     clean, seen = [], set()
     for k in keys:
         k = _one_line(k) if k and k.strip() else ""
         if k and k not in seen:
             seen.add(k)
             clean.append(k)
-    lines = ["#cloud-config", "users:", f"  - name: {ssh_user}",
-             "    sudo: ALL=(ALL) NOPASSWD:ALL", "    shell: /bin/bash",
-             "    ssh_authorized_keys:"]
-    if clean:
-        lines += [f"      - {k}" for k in clean]
-    else:
-        lines.append("      []")
+    # Hash the optional password (SHA-512 crypt) so plaintext never lands in the
+    # cloud-init on disk; fall back to no password if crypt is unavailable.
+    hashed = ""
+    if password:
+        try:
+            import crypt
+            hashed = crypt.crypt(password, crypt.mksalt(crypt.METHOD_SHA512))
+        except Exception:  # noqa: BLE001
+            hashed = ""
+
+    # 1) Native users: module (the cloud-init way). `- default` keeps the image's
+    #    own default account too, so you're never locked out if the named user has
+    #    trouble.
+    lines = ["#cloud-config", "users:", "  - default", f"  - name: {ssh_user}",
+             "    groups: [sudo, wheel]",
+             "    sudo: ALL=(ALL) NOPASSWD:ALL",
+             "    shell: /bin/bash",
+             f"    lock_passwd: {'false' if hashed else 'true'}"]
+    if hashed:
+        lines.append(f'    hashed_passwd: "{hashed}"')
+    lines.append("    ssh_authorized_keys:")
+    lines += [f"      - {k}" for k in clean] if clean else ["      []"]
     lines.append("package_update: true")
-    lines.append("ssh_pwauth: false")            # key-based auth only
-    # Guarantee an SSH server is installed, enabled, and running BY DEFAULT — so
-    # SLEP's Ansible/Salt can reach the VM even when the base image ships sshd off
-    # or absent (a minimal cloud image, or a Sysible Linux image, which defaults
-    # SSH off). These commands are hardcoded (never derived from user input, so no
-    # injection risk) and best-effort/cross-distro: install openssh-server only if
-    # no sshd binary exists (apt → dnf → yum), then enable the Debian ('ssh') or
-    # RHEL ('sshd') unit.
-    lines += [
-        "runcmd:",
-        "  - [ sh, -c, \"command -v sshd >/dev/null 2>&1 || "
-        "{ command -v apt-get >/dev/null 2>&1 && apt-get update && "
-        "DEBIAN_FRONTEND=noninteractive apt-get install -y openssh-server; } || "
-        "{ command -v dnf >/dev/null 2>&1 && dnf install -y openssh-server; } || "
-        "{ command -v yum >/dev/null 2>&1 && yum install -y openssh-server; } || true\" ]",
-        "  - [ sh, -c, \"systemctl enable --now ssh 2>/dev/null || "
-        "systemctl enable --now sshd 2>/dev/null || true\" ]",
+    lines.append(f"ssh_pwauth: {'true' if hashed else 'false'}")
+
+    # 2) A setup script (dropped via write_files, run from runcmd) that GUARANTEES,
+    #    as root, the login user exists with these keys + passwordless sudo, and an
+    #    SSH server is installed and running — even on images that ignore the users:
+    #    module or ship sshd off. write_files uses a YAML block scalar and heredocs,
+    #    so the (hardcoded, single-lined) keys need no shell escaping. This is what
+    #    makes the VM reliably reachable regardless of the base image.
+    script = ["#!/bin/sh",
+              f"id -u {ssh_user} >/dev/null 2>&1 || useradd -m -s /bin/bash {ssh_user}",
+              f"getent group sudo  >/dev/null 2>&1 && usermod -aG sudo  {ssh_user} 2>/dev/null || true",
+              f"getent group wheel >/dev/null 2>&1 && usermod -aG wheel {ssh_user} 2>/dev/null || true",
+              f"install -d -m 700 /home/{ssh_user}/.ssh"]
+    if clean:
+        script.append(f"cat >> /home/{ssh_user}/.ssh/authorized_keys <<'SLEP_EOF'")
+        script += clean
+        script.append("SLEP_EOF")
+        script.append(f"sort -u -o /home/{ssh_user}/.ssh/authorized_keys /home/{ssh_user}/.ssh/authorized_keys 2>/dev/null || true")
+    script += [
+        f"touch /home/{ssh_user}/.ssh/authorized_keys",
+        f"chown -R {ssh_user}:{ssh_user} /home/{ssh_user}/.ssh 2>/dev/null || true",
+        f"chmod 700 /home/{ssh_user}/.ssh; chmod 600 /home/{ssh_user}/.ssh/authorized_keys",
+        f"printf '%s\\n' '{ssh_user} ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/90-slep-{ssh_user}",
+        f"chmod 440 /etc/sudoers.d/90-slep-{ssh_user}",
+        # install + start an SSH server (apt → dnf → yum), cross-distro, best-effort
+        "command -v sshd >/dev/null 2>&1 || { command -v apt-get >/dev/null 2>&1 && apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y openssh-server; } || { command -v dnf >/dev/null 2>&1 && dnf install -y openssh-server; } || { command -v yum >/dev/null 2>&1 && yum install -y openssh-server; } || true",
+        "systemctl enable --now ssh 2>/dev/null || systemctl enable --now sshd 2>/dev/null || true",
     ]
+    if hashed:
+        # Set the password and turn password auth ON in sshd (cloud images usually
+        # disable it in a drop-in), then reload.
+        script += [
+            f"echo '{ssh_user}:{hashed}' | chpasswd -e 2>/dev/null || true",
+            "sed -ri 's/^#?\\s*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config 2>/dev/null || true",
+            "for f in /etc/ssh/sshd_config.d/*.conf; do [ -e \"$f\" ] && sed -ri 's/^#?\\s*PasswordAuthentication.*/PasswordAuthentication yes/' \"$f\"; done 2>/dev/null || true",
+            "systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true",
+        ]
+    lines.append("write_files:")
+    lines.append("  - path: /run/slep-setup.sh")
+    lines.append("    permissions: '0755'")
+    lines.append("    content: |")
+    lines += [f"      {ln}" for ln in script]
+    lines += ["runcmd:", "  - [ sh, /run/slep-setup.sh ]"]
     return "\n".join(lines) + "\n"
 
 
@@ -260,7 +305,7 @@ resource "aws_instance" "vm" {{
     })
     outputs = _outputs("aws_instance.vm", "public_ip", ssh_user)
     return {"main.tf": main, "variables.tf": variables, "outputs.tf": outputs,
-            "cloudinit.cfg": _cloudinit(ssh_user, keys)}
+            "cloudinit.cfg": _cloudinit(ssh_user, keys, _opt(spec, "ssh_password", ""))}
 
 
 def _render_digitalocean(spec, keys):
@@ -293,7 +338,7 @@ resource "digitalocean_droplet" "vm" {{
     })
     outputs = _outputs("digitalocean_droplet.vm", "ipv4_address", ssh_user)
     return {"main.tf": main, "variables.tf": variables, "outputs.tf": outputs,
-            "cloudinit.cfg": _cloudinit(ssh_user, keys)}
+            "cloudinit.cfg": _cloudinit(ssh_user, keys, _opt(spec, "ssh_password", ""))}
 
 
 def _render_libvirt(spec, keys):
@@ -395,7 +440,7 @@ resource "libvirt_domain" "vm" {{
 }}
 '''
     return {"main.tf": main, "variables.tf": variables, "outputs.tf": outputs,
-            "cloudinit.cfg": _cloudinit(ssh_user, keys)}
+            "cloudinit.cfg": _cloudinit(ssh_user, keys, _opt(spec, "ssh_password", ""))}
 
 
 def _render_proxmox(spec, keys):
@@ -630,7 +675,7 @@ resource "azurerm_linux_virtual_machine" "vm" {{
 }}
 '''
     return {"main.tf": main, "variables.tf": variables, "outputs.tf": outputs,
-            "cloudinit.cfg": _cloudinit(ssh_user, ctrl_keys)}
+            "cloudinit.cfg": _cloudinit(ssh_user, ctrl_keys, _opt(spec, "ssh_password", ""))}
 
 
 _RENDERERS = {"aws": _render_aws, "digitalocean": _render_digitalocean,

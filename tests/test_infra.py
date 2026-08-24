@@ -513,13 +513,35 @@ def test_slep_managed_key_baked_into_infra_vms():
     assert "name: clouduser" in ci              # for the configured login user
 
 
+def test_cloudinit_guarantees_local_user_and_password_option():
+    """Cloud-init reliably creates the login user (useradd + keys + passwordless
+    sudo via a root setup script, not just the users: module), and an optional
+    password enables password SSH — hashed, never plaintext."""
+    import yaml
+    key = "ssh-ed25519 AAAAK managed"
+    ci = infra.generate("libvirt", {"count": 1, "base_image": "x", "ssh_user": "clouduser"},
+                        managed_key=key)["cloudinit.cfg"]
+    yaml.safe_load(ci)                                          # valid YAML
+    assert "useradd -m -s /bin/bash clouduser" in ci           # created even if users: is ignored
+    assert "/etc/sudoers.d/90-slep-clouduser" in ci            # passwordless sudo
+    assert "authorized_keys" in ci and key in ci               # keys installed by the script too
+    assert "ssh_pwauth: false" in ci                           # key-only by default
+
+    p = infra.generate("libvirt", {"count": 1, "base_image": "x", "ssh_user": "clouduser",
+                                    "ssh_password": "S3cret-pw!"}, managed_key=key)["cloudinit.cfg"]
+    yaml.safe_load(p)
+    assert "ssh_pwauth: true" in p and "hashed_passwd" in p and "chpasswd -e" in p
+    assert "S3cret-pw!" not in p                                # stored hashed, not plaintext
+
+
 def test_cloudinit_no_duplicate_keys():
-    """The same key supplied twice (e.g. managed == chosen deploy credential) is
-    listed once, not duplicated in authorized_keys."""
+    """The same key supplied three times (managed == deploy == controller) is not
+    listed three times — it's deduped in each place it's authorized (the users:
+    module and the setup script), so at most once per location."""
     k = "ssh-ed25519 AAAADUP same-key"
-    files = infra.generate("libvirt", {"count": 1, "base_image": "x", "ssh_user": "ubuntu"},
-                           controller_key=k, deploy_key=k, managed_key=k)
-    assert files["cloudinit.cfg"].count(k) == 1
+    ci = infra.generate("libvirt", {"count": 1, "base_image": "x", "ssh_user": "ubuntu"},
+                        controller_key=k, deploy_key=k, managed_key=k)["cloudinit.cfg"]
+    assert 1 <= ci.count(k) <= 2
 
 
 def test_cloudinit_enables_ssh_by_default():
