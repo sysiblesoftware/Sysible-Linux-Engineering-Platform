@@ -275,6 +275,9 @@ def init_db() -> None:
         inv_cols = [r["name"] for r in c.execute("PRAGMA table_info(inventories)")]
         if "bastion" not in inv_cols:
             c.execute("ALTER TABLE inventories ADD COLUMN bastion TEXT DEFAULT ''")
+        # Environment (dev / staging / prod / …) groups inventories in the list.
+        if "environment" not in inv_cols:
+            c.execute("ALTER TABLE inventories ADD COLUMN environment TEXT DEFAULT ''")
         cred_cols = [r["name"] for r in c.execute("PRAGMA table_info(credentials)")]
         if "become_secret" not in cred_cols:
             c.execute("ALTER TABLE credentials ADD COLUMN become_secret TEXT DEFAULT ''")
@@ -1026,7 +1029,7 @@ def get_inventory(iid: int):
         return dict(r) if r else None
 
 
-def create_inventory(name, project_id=None, source="manual", bastion="", org_id=None):
+def create_inventory(name, project_id=None, source="manual", bastion="", org_id=None, environment=""):
     if org_id is None:
         # Inherit the project's org when attached, else the Default org.
         if project_id is not None:
@@ -1036,10 +1039,15 @@ def create_inventory(name, project_id=None, source="manual", bastion="", org_id=
             org_id = default_org_id()
     with _connect() as c:
         cur = c.execute(
-            "INSERT INTO inventories(project_id,name,source,bastion,org_id,created) VALUES(?,?,?,?,?,?)",
-            (project_id, name, source, bastion, org_id, _now()),
+            "INSERT INTO inventories(project_id,name,source,bastion,org_id,environment,created) VALUES(?,?,?,?,?,?,?)",
+            (project_id, name, source, bastion, org_id, environment or "", _now()),
         )
         return cur.lastrowid
+
+
+def set_inventory_environment(iid: int, environment: str):
+    with _connect() as c:
+        c.execute("UPDATE inventories SET environment=? WHERE id=?", (environment or "", iid))
 
 
 def find_inventory(project_id, source):

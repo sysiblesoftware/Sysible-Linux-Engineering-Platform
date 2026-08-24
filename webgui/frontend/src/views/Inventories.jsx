@@ -6,33 +6,61 @@ export default function Inventories() {
   const [invs, setInvs] = useState([])
   const [selected, setSelected] = useState(null)   // inventory id being drilled into
   const [newOpen, setNewOpen] = useState(false)
+  const [collapsed, setCollapsed] = useState({})   // {env: true} → group hidden
   const load = () => api('inventories').then((d) => setInvs(d.inventories))
   useEffect(() => { load() }, [])
 
   const sel = invs.find((i) => i.id === selected)
   if (sel) return <InventoryDetail inv={sel} onBack={() => { setSelected(null); load() }} onChanged={load} />
 
+  // Nest inventories under their environment (dev / staging / prod / …). Untagged
+  // ones fall under "Unassigned". Groups sort with the common envs first, then
+  // alphabetically; a lone Unassigned group renders flat (no header noise).
+  const ORDER = ['dev', 'development', 'test', 'testing', 'stage', 'staging', 'qa', 'uat', 'prod', 'production']
+  const rank = (e) => { const i = ORDER.indexOf((e || '').toLowerCase()); return i < 0 ? 500 : i }
+  const groups = {}
+  for (const inv of invs) { const k = (inv.environment || '').trim() || 'Unassigned'; (groups[k] || (groups[k] = [])).push(inv) }
+  const envs = Object.keys(groups).sort((a, b) => (rank(a) - rank(b)) || a.localeCompare(b))
+  const flat = envs.length === 1 && envs[0] === 'Unassigned'
+
+  const del = async (inv) => { if (confirm('Delete inventory ' + inv.name + '?')) { await api('inventories/' + inv.id, { method: 'DELETE' }); load() } }
+  const Row = ({ inv }) => (
+    <tr>
+      <td><a onClick={() => setSelected(inv.id)}>{inv.name}</a></td>
+      <td><span className="pill">{inv.source}</span></td>
+      <td className="mono muted">{inv.bastion || '—'}</td>
+      <td className="row">
+        <button className="ghost sm" onClick={() => setSelected(inv.id)}>Open →</button>
+        <button className="danger ghost sm" onClick={() => del(inv)}>Delete</button>
+      </td>
+    </tr>
+  )
+
   return (
     <>
-      <h2>Inventories</h2>
       <div className="row" style={{ marginBottom: 12 }}>
+        <h2 style={{ margin: 0 }}>Inventories</h2>
+        <div className="spacer" />
         <button className="primary" onClick={() => setNewOpen(true)}>+ New inventory</button>
       </div>
       {invs.length === 0 ? <div className="muted">No inventories. Create one, then add hosts or import from a Sysible Controller.</div> : (
         <table>
           <thead><tr><th>Name</th><th>Source</th><th>Jump host</th><th></th></tr></thead>
           <tbody>
-            {invs.map((inv) => (
-              <tr key={inv.id}>
-                <td><a onClick={() => setSelected(inv.id)}>{inv.name}</a></td>
-                <td><span className="pill">{inv.source}</span></td>
-                <td className="mono muted">{inv.bastion || '—'}</td>
-                <td className="row">
-                  <button className="ghost sm" onClick={() => setSelected(inv.id)}>Open →</button>
-                  <button className="danger ghost sm" onClick={async () => { if (confirm('Delete inventory ' + inv.name + '?')) { await api('inventories/' + inv.id, { method: 'DELETE' }); load() } }}>Delete</button>
-                </td>
-              </tr>
-            ))}
+            {flat
+              ? groups.Unassigned.map((inv) => <Row key={inv.id} inv={inv} />)
+              : envs.map((env) => (
+                <React.Fragment key={env}>
+                  <tr className="env-head" onClick={() => setCollapsed((c) => ({ ...c, [env]: !c[env] }))}>
+                    <td colSpan={4}>
+                      <span className="env-caret">{collapsed[env] ? '▶' : '▼'}</span>
+                      {env === 'Unassigned' ? <span className="faint">Unassigned</span> : env}
+                      <span className="env-count">{groups[env].length}</span>
+                    </td>
+                  </tr>
+                  {!collapsed[env] && groups[env].map((inv) => <Row key={inv.id} inv={inv} />)}
+                </React.Fragment>
+              ))}
           </tbody>
         </table>
       )}
@@ -54,9 +82,10 @@ function InventoryDetail({ inv, onBack, onChanged }) {
       <div className="card col">
       <div className="row">
         <b>{inv.name}</b><span className="pill">{inv.source}</span><span className="muted">{hosts.length} host(s)</span>
+        {inv.environment && <span className="pill" title="Environment">🖿 {inv.environment}</span>}
         {inv.bastion && <span className="pill" title="Runs tunnel through this SSH jump host">⤳ {inv.bastion}</span>}
         <div className="spacer" />
-        <button className="ghost sm" onClick={() => setModal('bastion')}>{inv.bastion ? 'Jump host' : '+ Jump host'}</button>
+        <button className="ghost sm" title="Environment & jump host" onClick={() => setModal('bastion')}>⚙ Settings</button>
         {inv.bastion && <button className="ghost sm" title="Install SLEP's key on the jump host so runs hop through it with the key" onClick={() => setModal('bastionprep')}>Prepare jump host</button>}
         <button className="ghost sm" onClick={() => setModal('import')}>Import from Controller</button>
         <button className="ghost sm" disabled={hosts.length === 0}
@@ -90,30 +119,43 @@ function InventoryDetail({ inv, onBack, onChanged }) {
   )
 }
 
+// Common environments offered as quick picks (still free-text so any label works).
+const ENV_SUGGESTIONS = ['dev', 'staging', 'qa', 'prod']
+
 function NewInventory({ onClose, onDone }) {
   const [name, setName] = useState('')
   const [bastion, setBastion] = useState('')
+  const [environment, setEnvironment] = useState('')
   const { wrap, node } = useErr()
   return (
     <Modal title="New inventory" onClose={onClose}>
-      <Field label="Name"><input value={name} onChange={(e) => setName(e.target.value)} autoFocus placeholder="e.g. production" /></Field>
+      <Field label="Name"><input value={name} onChange={(e) => setName(e.target.value)} autoFocus placeholder="e.g. web-tier" /></Field>
+      <Field label="Environment (groups it in the list — dev / staging / prod / …)">
+        <input value={environment} list="env-suggestions" onChange={(e) => setEnvironment(e.target.value)} placeholder="dev" />
+        <datalist id="env-suggestions">{ENV_SUGGESTIONS.map((e) => <option key={e} value={e} />)}</datalist>
+      </Field>
       <Field label="SSH jump host / bastion (optional)"><input value={bastion} onChange={(e) => setBastion(e.target.value)} placeholder="user@192.168.8.212  — reach hosts through this box" /></Field>
-      <div className="muted">Set this when the hosts aren’t directly reachable (e.g. VMs on a hypervisor’s internal network). Runs tunnel SSH through it (ProxyJump).</div>
+      <div className="muted">Set the jump host when hosts aren’t directly reachable (e.g. VMs on a hypervisor’s internal network). Runs tunnel SSH through it (ProxyJump).</div>
       {node}
-      <button className="primary" onClick={() => wrap(async () => { await api('inventories', { method: 'POST', json: { name, bastion } }); onDone() })}>Create</button>
+      <button className="primary" onClick={() => wrap(async () => { await api('inventories', { method: 'POST', json: { name, bastion, environment } }); onDone() })}>Create</button>
     </Modal>
   )
 }
 
 function SetBastion({ inv, onClose, onDone }) {
   const [bastion, setBastion] = useState(inv.bastion || '')
+  const [environment, setEnvironment] = useState(inv.environment || '')
   const { wrap, node } = useErr()
   return (
-    <Modal title={`Jump host for ${inv.name}`} onClose={onClose}>
-      <div className="muted">SSH bastion to reach this inventory’s hosts through (ProxyJump). Leave empty for direct connections.</div>
-      <Field label="Jump host"><input value={bastion} onChange={(e) => setBastion(e.target.value)} autoFocus placeholder="user@192.168.8.212" /></Field>
+    <Modal title={`Settings — ${inv.name}`} onClose={onClose}>
+      <Field label="Environment (groups it in the list)">
+        <input value={environment} list="env-suggestions" onChange={(e) => setEnvironment(e.target.value)} autoFocus placeholder="dev / staging / prod" />
+        <datalist id="env-suggestions">{ENV_SUGGESTIONS.map((e) => <option key={e} value={e} />)}</datalist>
+      </Field>
+      <div className="muted" style={{ margin: '4px 0' }}>SSH bastion to reach this inventory’s hosts through (ProxyJump). Leave empty for direct connections.</div>
+      <Field label="Jump host"><input value={bastion} onChange={(e) => setBastion(e.target.value)} placeholder="user@192.168.8.212" /></Field>
       {node}
-      <button className="primary" onClick={() => wrap(async () => { await api('inventories/' + inv.id, { method: 'PATCH', json: { bastion } }); onDone() })}>Save</button>
+      <button className="primary" onClick={() => wrap(async () => { await api('inventories/' + inv.id, { method: 'PATCH', json: { bastion, environment } }); onDone() })}>Save</button>
     </Modal>
   )
 }

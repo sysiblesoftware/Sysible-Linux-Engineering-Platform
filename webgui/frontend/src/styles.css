@@ -299,3 +299,10 @@ label.fld{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--
 .kebab:hover,.kebab.open{border-color:var(--accent2);color:var(--text);background:var(--panel)}
 .empty-state{border:1px dashed var(--line-strong);border-radius:10px;padding:34px 20px;text-align:center;color:var(--muted)}
 .empty-state .es-title{color:var(--text);font-weight:600;margin-bottom:4px}
+
+/* Inventories grouped by environment */
+.env-head>td{background:var(--panel2);cursor:pointer;font-weight:600;font-size:12px;
+  letter-spacing:.03em;color:var(--text);padding-top:10px;padding-bottom:10px}
+.env-head:hover>td{color:var(--accent2)}
+.env-caret{display:inline-block;width:16px;color:var(--faint);font-size:10px}
+.env-count{margin-left:8px;font-size:11px;color:var(--faint);border:1px solid var(--line);border-radius:20px;padding:0 7px}

@@ -62,6 +62,17 @@ def test_inventory_and_hosts(client, project):
     assert len(hosts) == 1 and hosts[0]["address"] == "10.0.0.11"
 
 
+def test_inventory_environment_create_and_patch(client):
+    """Inventories carry an environment (dev/prod/…) for grouping — set on create,
+    returned in the list, and changeable via PATCH."""
+    iid = client.post("/inventories", json={"name": "web", "environment": "prod"}).json()["id"]
+    got = next(i for i in client.get("/inventories").json()["inventories"] if i["id"] == iid)
+    assert got["environment"] == "prod"
+    assert client.patch(f"/inventories/{iid}", json={"environment": "staging"}).json()["environment"] == "staging"
+    # Empty clears it.
+    assert client.patch(f"/inventories/{iid}", json={"environment": ""}).json()["environment"] == ""
+
+
 def test_bastion_rejects_invalid_ip(client):
     # An octet > 255 (192.268.8.212) is caught up front, not at SSH time.
     r = client.post("/inventories", json={"name": "b1", "bastion": "admin@192.268.8.212"})

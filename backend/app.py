@@ -1050,17 +1050,21 @@ def create_inventory(request: Request, body: dict = Body(...), user: str = Depen
     iid = db.create_inventory(name, project_id=pid,
                               source=str(body.get("source") or "manual"),
                               bastion=_validate_bastion(str(body.get("bastion") or "")),
-                              org_id=org_id)
+                              org_id=org_id,
+                              environment=str(body.get("environment") or "").strip())
     return db.get_inventory(iid)
 
 
 @app.patch("/inventories/{iid}")
 def update_inventory(iid: int, body: dict = Body(...), user: str = Depends(current_user)):
-    """Update an inventory's SSH jump host (bastion). Empty string clears it."""
+    """Update an inventory's SSH jump host (bastion) and/or environment. Empty
+    string clears either."""
     if not db.get_inventory(iid):
         raise HTTPException(status_code=404, detail="Inventory not found.")
     if "bastion" in body:
         db.set_inventory_bastion(iid, _validate_bastion(str(body.get("bastion") or "")))
+    if "environment" in body:
+        db.set_inventory_environment(iid, str(body.get("environment") or "").strip())
     return db.get_inventory(iid)
 
 
@@ -2218,6 +2222,13 @@ def _build_infra_inventory(project, meta, target_inventory_id=None):
         inv_row = db.get_inventory(iid)
         if inv_row and not (inv_row.get("bastion") or "").strip():
             db.set_inventory_bastion(iid, hv_bastion)
+    # Nest the inventory under the infra's environment (dev/prod/…) when it has one
+    # and the inventory doesn't already carry an environment of its own.
+    env_tag = (meta.get("environment") or "").strip()
+    if env_tag:
+        inv_row = db.get_inventory(iid)
+        if inv_row and not (inv_row.get("environment") or "").strip():
+            db.set_inventory_environment(iid, env_tag)
     group = ansible_runner._ansible_group(meta.get("environment", "")) if meta.get("environment") else ""
     n = 0
     for h in hosts:
