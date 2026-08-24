@@ -637,6 +637,12 @@ def set_infra_inventory(project_id, inventory_id):
         c.execute("UPDATE infra SET inventory_id=? WHERE project_id=?", (inventory_id, project_id))
 
 
+def set_infra_ssh_user(project_id, ssh_user):
+    """Set the infra project's login user without disturbing its other fields."""
+    with _connect() as c:
+        c.execute("UPDATE infra SET ssh_user=? WHERE project_id=?", (ssh_user or "", project_id))
+
+
 def set_infra_bastion(project_id, bastion):
     """Set the infra project's SSH jump host (hypervisor) without disturbing its
     other fields. Designated once at the project level and pushed to its

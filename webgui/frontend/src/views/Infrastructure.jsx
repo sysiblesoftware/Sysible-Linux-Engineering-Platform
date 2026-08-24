@@ -110,7 +110,7 @@ export default function Infrastructure({ onOpenProject, onOpenRun }) {
                   {writable && <button className="danger ghost sm" onClick={() => run(r, 'destroy')}>Destroy</button>}
                   {writable && <button className="ghost sm" title="List the VMs actually on this project's hypervisor" onClick={() => listVms(r)}>🖥 VMs</button>}
                   {writable && <button className="ghost sm" title="Read the applied VMs into a SLEP Ansible inventory" onClick={() => toInventory(r)}>→ Inventory</button>}
-                  {writable && <button className="ghost sm" title={r.bastion ? `Jump host: ${r.bastion}` : 'Set the SSH jump host (hypervisor) used to reach these VMs'} onClick={() => setJumpFor(r)}>{r.bastion ? '⤳ Jump host' : '+ Jump host'}</button>}
+                  {writable && <button className="ghost sm" title="Login user, password (Vault) and jump host used to reach these VMs" onClick={() => setJumpFor(r)}>⚙ Access</button>}
                   {writable && <button className="primary sm" title="Register the applied VMs into a connected Controller (agent enroll)" onClick={() => enroll(r)}>Enroll → Controller</button>}
                   {writable && <button className="ghost sm" title="Scaffold an Ansible playbook and open it (Configure)" onClick={() => scaffold(r, 'configure')}>Configure</button>}
                   {writable && <button className="ghost sm" title="Scaffold a Salt state and open it (Maintain)" onClick={() => scaffold(r, 'maintain')}>Maintain</button>}
@@ -134,30 +134,42 @@ export default function Infrastructure({ onOpenProject, onOpenRun }) {
   )
 }
 
-// Designate the SSH jump host for a project's VMs at the project level — pushed
-// down to every inventory the project owns, so runs/tests/key-distribution hop
-// through it. For libvirt this is the hypervisor (auto-set on create); this lets
-// you view or override it without visiting each inventory.
+// Project-level VM access settings: the login user the keys are installed on (kept
+// consistent across cloud-init, the Terraform output, and the inventory), an
+// optional login password sourced from a Vault variable (turns on password SSH so
+// a VM is reachable even before its key lands), and the SSH jump host. All apply to
+// every inventory the project owns, so you set them once instead of per inventory.
 function JumpHostEditor({ r, onClose, onSaved }) {
+  const [sshUser, setSshUser] = useState(r.ssh_user || '')
+  const [pw, setPw] = useState('')
   const [bastion, setBastion] = useState(r.bastion || '')
   const { wrap, node } = useErr()
   return (
-    <Modal title={`Jump host — ${r.project_name}`} onClose={onClose}>
+    <Modal title={`VM access — ${r.project_name}`} onClose={onClose}>
       <p className="muted" style={{ marginTop: 0 }}>
-        The VMs sit on the hypervisor’s private network, which SLEP can’t reach directly — it hops through this
-        jump host. For libvirt it’s the hypervisor itself (the <span className="mono">user@host</span> from its
-        connection URI). Applies to every inventory in this project.
+        How SLEP logs into this project’s VMs. The login user is baked into the cloud-init, the Terraform output,
+        and the inventory together, so they never drift out of step (the mismatch that causes
+        <span className="mono"> Permission denied</span>). Re-apply to rebuild existing VMs with these settings.
       </p>
+      <Field label="Login user — the account keys are installed on (e.g. admin)">
+        <input value={sshUser} autoFocus onChange={(e) => setSshUser(e.target.value)} placeholder="admin" />
+      </Field>
+      <Field label="Login password — a Vault variable, e.g. vault.admin_pw (turns on password SSH; leave blank to keep unchanged)">
+        <input value={pw} onChange={(e) => setPw(e.target.value)} placeholder="vault.admin_pw" />
+      </Field>
       <Field label="Jump host (user@host[:port]) — empty for a direct connection">
-        <input value={bastion} autoFocus onChange={(e) => setBastion(e.target.value)} placeholder="admin@192.168.8.212" />
+        <input value={bastion} onChange={(e) => setBastion(e.target.value)} placeholder="admin@192.168.8.212" />
       </Field>
       {node}
       <div className="row" style={{ marginTop: 12, justifyContent: 'flex-end' }}>
         <button className="ghost sm" onClick={onClose}>Cancel</button>
         <button className="primary sm" onClick={() => wrap(async () => {
-          await api(`infra/${r.project_id}`, { method: 'PATCH', json: { bastion: bastion.trim() } })
+          const body = { bastion: bastion.trim() }
+          if (sshUser.trim() && sshUser.trim() !== (r.ssh_user || '')) body.ssh_user = sshUser.trim()
+          if (pw.trim()) body.ssh_password = pw.trim()
+          await api(`infra/${r.project_id}`, { method: 'PATCH', json: body })
           onSaved()
-        })}>Save jump host</button>
+        })}>Save</button>
       </div>
     </Modal>
   )

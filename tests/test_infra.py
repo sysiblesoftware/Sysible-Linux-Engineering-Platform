@@ -826,6 +826,88 @@ def test_apply_regenerates_stale_cloudinit_with_setup_script(client, monkeypatch
     yaml.safe_load(text)
 
 
+def test_resolve_secret_ref_from_vault(client):
+    """A `vault.NAME` reference resolves to the secret's plaintext (any of the
+    playbook spellings), a bare name works too, and an unknown vault ref resolves
+    to '' (never baked literally) while a plain literal passes through."""
+    import backend.app as appmod
+    import backend.db as db
+    import backend.vault as vault
+    db.upsert_secret("admin_pw", vault.encrypt("s3cr3t!"))
+    assert appmod._resolve_secret_ref("vault.admin_pw") == "s3cr3t!"
+    assert appmod._resolve_secret_ref("{{ vault.admin_pw }}") == "s3cr3t!"
+    assert appmod._resolve_secret_ref("admin_pw") == "s3cr3t!"     # bare name
+    assert appmod._resolve_secret_ref("vault.nope") == ""          # unknown ref → not literal
+    assert appmod._resolve_secret_ref("PlainText123") == "PlainText123"  # literal
+    assert appmod._resolve_secret_ref("") == ""
+
+
+def test_infra_ssh_user_kept_consistent(client, monkeypatch):
+    """Setting the login user on the project (PATCH ssh_user) keeps it consistent
+    everywhere: the infra row, the Terraform output `user` (→ inventory ansible_user),
+    the built inventory hosts, and the cloud-init the VM boots with."""
+    import backend.app as appmod
+    import backend.db as db
+    pid = client.post("/infra", json={"name": "suser", "provider": "libvirt",
+                                      "options": {"count": 1, "base_image": "x",
+                                                  "ssh_user": "clouduser", "uri": "qemu:///system"}}).json()["project_id"]
+
+    class Out:
+        returncode = 0
+        stdout = '{"sysible_hosts":{"value":[{"name":"vm-1","ip":"10.0.0.9","user":"clouduser"}]}}'
+        stderr = ""
+    monkeypatch.setattr(appmod.subprocess, "run", lambda *a, **k: Out())
+    iid, _n, _c = appmod._autobuild_infra_inventory(pid)
+
+    r = client.patch(f"/infra/{pid}", json={"ssh_user": "admin"})
+    assert r.status_code == 200 and r.json()["ssh_user"] == "admin"
+    # Terraform output now names admin, so re-reads feed ansible_user=admin.
+    assert 'user = "admin"' in (db.project_dir(pid) / "outputs.tf").read_text()
+    # Existing inventory hosts were repointed.
+    hosts = db.list_hosts(iid)
+    assert hosts and all((h["variables"] or {}).get("ansible_user") == "admin" for h in hosts)
+    # Cloud-init creates admin (users: block AND setup script), not the old user.
+    ci = (db.project_dir(pid) / "cloudinit.cfg").read_text()
+    assert "name: admin" in ci and "useradd -m -s /bin/bash admin" in ci
+    assert "clouduser" not in ci
+
+
+def test_infra_password_from_vault_wired_into_cloudinit(client):
+    """Setting the login password as a Vault variable (PATCH ssh_password) hashes it
+    into the cloud-init and turns password SSH on — the plaintext is never written to
+    disk. An unknown vault ref is rejected, not baked literally."""
+    import backend.app as appmod
+    import backend.db as db
+    import backend.vault as vault
+    pid = client.post("/infra", json={"name": "pw", "provider": "libvirt",
+                                      "options": {"count": 1, "base_image": "x",
+                                                  "ssh_user": "admin", "uri": "qemu:///system"}}).json()["project_id"]
+    db.upsert_secret("admin_pw", vault.encrypt("Sup3rSecret"))
+
+    r = client.patch(f"/infra/{pid}", json={"ssh_password": "vault.admin_pw"})
+    assert r.status_code == 200
+    ci = (db.project_dir(pid) / "cloudinit.cfg").read_text()
+    assert "ssh_pwauth: true" in ci and "hashed_passwd:" in ci
+    assert "Sup3rSecret" not in ci               # plaintext never on disk
+    assert "chpasswd -e" in ci                   # password applied in setup script
+    # A typo'd vault ref is rejected rather than baked as a literal.
+    assert client.patch(f"/infra/{pid}", json={"ssh_password": "vault.missing"}).status_code == 400
+
+
+def test_infra_create_resolves_vault_password(client):
+    """A Vault password given at create time is resolved before generate, so the
+    cloud-init carries the hashed real password, not the literal `vault.NAME`."""
+    import backend.db as db
+    import backend.vault as vault
+    db.upsert_secret("boot_pw", vault.encrypt("BootPass42"))
+    pid = client.post("/infra", json={"name": "cpw", "provider": "libvirt",
+                                      "options": {"count": 1, "base_image": "x", "ssh_user": "admin",
+                                                  "ssh_password": "vault.boot_pw", "uri": "qemu:///system"}}).json()["project_id"]
+    ci = (db.project_dir(pid) / "cloudinit.cfg").read_text()
+    assert "hashed_passwd:" in ci and "ssh_pwauth: true" in ci
+    assert "BootPass42" not in ci and "vault.boot_pw" not in ci
+
+
 def test_post_apply_key_check(client, monkeypatch):
     """After apply, SLEP probes SSH to each new VM with the managed key (through the
     jump host) and logs a per-host verdict. No managed key → silent no-op; with a

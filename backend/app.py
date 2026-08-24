@@ -1887,7 +1887,7 @@ def _ensure_managed_key_in_cloudinit(project_id: int, emit=None) -> bool:
     return True
 
 
-def _refresh_infra_cloudinit(project_id: int, emit=None) -> bool:
+def _refresh_infra_cloudinit(project_id: int, emit=None, password=None) -> bool:
     """Rebuild a project's cloudinit.cfg with the CURRENT generator — the robust
     setup script that GUARANTEES the login user exists with keys + sudo and sshd is
     up — while preserving every key already baked in and adding SLEP's own keys.
@@ -1922,12 +1922,18 @@ def _refresh_infra_cloudinit(project_id: int, emit=None) -> bool:
     if not ssh_user:
         m = re.search(r"name:\s*(\S+)", text)
         ssh_user = m.group(1) if m else "ubuntu"
-    # Carry a previously-set password through (stored hashed in the old file).
+    # Carry a previously-set password through (stored hashed in the old file),
+    # unless the caller supplies a new plaintext one to (re)set. A new password is
+    # hashed by _cloudinit; an empty string means "no change" (keep the old hash).
     pw_hash = ""
     m = re.search(r'hashed_passwd:\s*"([^"]+)"', text)
     if m:
         pw_hash = m.group(1)
-    new = infra._cloudinit(ssh_user, keys, password="", hashed_password=pw_hash)
+    new_pw = (password or "").strip()
+    if new_pw:
+        new = infra._cloudinit(ssh_user, keys, password=new_pw)
+    else:
+        new = infra._cloudinit(ssh_user, keys, password="", hashed_password=pw_hash)
     if new.strip() == text.strip():
         return False
     ci.write_text(new)
@@ -2152,6 +2158,30 @@ def infra_list(user: str = Depends(current_user)):
     return {"infra": db.list_infra()}
 
 
+def _resolve_secret_ref(value: str) -> str:
+    """Resolve a Vault-variable reference to its plaintext, so an operator can set a
+    login password without pasting it in the clear. Accepts the same spellings a
+    playbook uses — `vault.NAME`, `{{ vault.NAME }}`, `$vault.NAME` — as well as a
+    bare secret name; anything that isn't a known secret is returned unchanged and
+    treated as a literal password. Returns '' for an empty/blank input."""
+    import re
+    s = (value or "").strip()
+    if not s:
+        return ""
+    m = re.fullmatch(r"\{\{\s*vault\.([A-Za-z0-9_.-]+)\s*\}\}", s) \
+        or re.fullmatch(r"\$?vault\.([A-Za-z0-9_.-]+)", s)
+    name = m.group(1) if m else s
+    for n, ct in db.all_secret_ciphertexts():
+        if n == name:
+            try:
+                return vault.decrypt(ct)
+            except Exception:  # noqa: BLE001
+                return ""
+    # Not a Vault variable — treat the literal, unless it *looked* like a vault ref
+    # (then it's a typo'd variable name; don't bake `vault.foo` into cloud-init).
+    return "" if m else s
+
+
 def _derive_public_key(private_key: str) -> str:
     """Derive the OpenSSH public key from a private key (`ssh-keygen -y`). Returns ''
     when it can't — no ssh-keygen, a malformed key, or a passphrase-protected one
@@ -2229,6 +2259,12 @@ def infra_create(body: dict = Body(...), user: str = Depends(require_operator)):
         managed_key = keydist.ensure_key()
     except Exception:  # noqa: BLE001 — never block infra creation over this
         managed_key = keydist.public_key()
+    # A login password may be given as a Vault variable (`vault.NAME`) so it never
+    # rides in the clear — resolve it to plaintext here; _cloudinit hashes it. A
+    # literal password is passed through unchanged.
+    if str(options.get("ssh_password") or "").strip():
+        options = dict(options)
+        options["ssh_password"] = _resolve_secret_ref(options["ssh_password"])
     try:
         files = infra.generate(provider, options, controller_key,
                                deploy_key=deploy_key, managed_key=managed_key)
@@ -2477,6 +2513,50 @@ def infra_update(project_id: int, body: dict = Body(...), user: str = Depends(re
         for inv in db.list_inventories(project_id=project_id):
             db.set_inventory_bastion(inv["id"], bastion)
         db.log_audit("infra_bastion_set", user, f"project #{project_id} → '{bastion or '(cleared)'}'")
+    if "ssh_user" in body:
+        # The login user must be ONE value everywhere — the cloud-init that creates
+        # the account, the Terraform output that feeds the inventory's ansible_user,
+        # and the built inventory. Changing it here keeps all three in step so runs
+        # log into the same account the keys were installed on.
+        su = infra._one_line(str(body.get("ssh_user") or "")).strip()
+        if su:
+            db.set_infra_ssh_user(project_id, su)
+            # Keep the Terraform output (→ inventory ansible_user) in step.
+            outp = db.project_dir(project_id) / "outputs.tf"
+            if outp.exists():
+                import re as _re
+                try:
+                    t = outp.read_text()
+                    t2 = _re.sub(r'(\buser\s*=\s*)"[^"]*"', rf'\1"{su}"', t)
+                    if t2 != t:
+                        outp.write_text(t2)
+                except OSError:
+                    pass
+            # Point any already-built inventory hosts at the new user too.
+            meta2 = db.get_infra(project_id)
+            if meta2 and meta2.get("inventory_id"):
+                for h in db.list_hosts(meta2["inventory_id"]):
+                    v = dict(h.get("variables") or {}); v["ansible_user"] = su
+                    db.upsert_host(meta2["inventory_id"], h["name"], h["address"],
+                                   groups=h.get("groups", ""), variables=v, source=h.get("source", "infra"))
+            # Rebuild the cloud-init so the account it creates matches.
+            _refresh_infra_cloudinit(project_id)
+            db.log_audit("infra_ssh_user_set", user, f"project #{project_id} → {su}")
+    if "ssh_password" in body:
+        # Set (or clear) the login user's password and turn ON password SSH, so a
+        # VM can be reached even before its key lands. The value may be a Vault
+        # variable (`vault.NAME`) so the plaintext never rides in the request or
+        # the audit log; it's hashed into the cloud-init, never stored in the clear.
+        raw = str(body.get("ssh_password") or "").strip()
+        pw = _resolve_secret_ref(raw) if raw else ""
+        if raw and not pw:
+            raise HTTPException(status_code=400,
+                                detail=f"Vault variable '{raw}' not found — add it under Secrets first, "
+                                       f"or enter a literal password.")
+        if pw:
+            _refresh_infra_cloudinit(project_id, password=pw)
+            db.log_audit("infra_ssh_password_set", user,
+                         f"project #{project_id} ({'vault' if raw != pw else 'literal'})")
     return db.get_infra(project_id)
 
 
