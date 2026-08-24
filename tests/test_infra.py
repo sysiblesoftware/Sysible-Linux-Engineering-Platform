@@ -803,6 +803,29 @@ def test_managed_key_patch_handles_empty_key_list(client, monkeypatch):
     yaml.safe_load(text)                                    # still valid YAML
 
 
+def test_apply_regenerates_stale_cloudinit_with_setup_script(client, monkeypatch):
+    """A project whose cloud-init predates the robust setup script gets its
+    cloud-init rebuilt on apply — the setup script (useradd + keys + sshd) is added,
+    existing keys are preserved, and SLEP's managed key is included."""
+    import backend.app as appmod
+    import backend.keydist as keydist
+    pid = client.post("/infra", json={"name": "regen", "provider": "libvirt",
+                                      "options": {"count": 1, "base_image": "x", "ssh_user": "clouduser"}}).json()["project_id"]
+    # Simulate an OLD-format cloud-init: users: module only, no setup script.
+    ci = appmod.db.project_dir(pid) / "cloudinit.cfg"
+    ci.write_text("#cloud-config\nusers:\n  - name: clouduser\n    ssh_authorized_keys:\n"
+                  "      - ssh-ed25519 AAAADEPLOY deploy\npackage_update: true\nssh_pwauth: false\n")
+    monkeypatch.setattr(appmod, "_slep_authorized_keys", lambda: ["ssh-ed25519 AAAAMANAGED managed"])
+
+    assert appmod._refresh_infra_cloudinit(pid) is True
+    text = ci.read_text()
+    assert "useradd -m -s /bin/bash clouduser" in text      # robust setup script now present
+    assert "ssh-ed25519 AAAADEPLOY deploy" in text          # existing key preserved
+    assert "ssh-ed25519 AAAAMANAGED managed" in text        # SLEP's key added
+    import yaml
+    yaml.safe_load(text)
+
+
 def test_post_apply_key_check(client, monkeypatch):
     """After apply, SLEP probes SSH to each new VM with the managed key (through the
     jump host) and logs a per-host verdict. No managed key → silent no-op; with a

@@ -1887,6 +1887,56 @@ def _ensure_managed_key_in_cloudinit(project_id: int, emit=None) -> bool:
     return True
 
 
+def _refresh_infra_cloudinit(project_id: int, emit=None) -> bool:
+    """Rebuild a project's cloudinit.cfg with the CURRENT generator — the robust
+    setup script that GUARANTEES the login user exists with keys + sudo and sshd is
+    up — while preserving every key already baked in and adding SLEP's own keys.
+
+    The cloud-init is written once at project creation and reused by every apply,
+    so a project created before these improvements keeps deploying a stale file
+    (its `users:` block may be silently ignored by the base image → the account
+    SSH connects as has no key → 'Permission denied'). Regenerating on apply brings
+    it up to date without recreating the project. Best-effort; returns True if it
+    changed the file."""
+    import re
+    meta = db.get_infra(project_id)
+    ci = db.project_dir(project_id) / "cloudinit.cfg"
+    if not meta or not ci.exists():
+        return False
+    try:
+        text = ci.read_text()
+    except OSError:
+        return False
+    # Preserve the keys already baked in (deploy / controller / typed), then add
+    # SLEP's managed + credential-derived keys.
+    keytypes = ("ssh-ed25519 ", "ssh-rsa ", "ecdsa-sha2-", "ssh-dss ", "sk-ssh-", "sk-ecdsa-")
+    existing = []
+    for ln in text.splitlines():
+        s = ln.strip()
+        if s.startswith("- "):
+            s = s[2:].strip()
+        if any(s.startswith(t) for t in keytypes):
+            existing.append(s)
+    keys = existing + _slep_authorized_keys()
+    ssh_user = (meta.get("ssh_user") or "").strip()
+    if not ssh_user:
+        m = re.search(r"name:\s*(\S+)", text)
+        ssh_user = m.group(1) if m else "ubuntu"
+    # Carry a previously-set password through (stored hashed in the old file).
+    pw_hash = ""
+    m = re.search(r'hashed_passwd:\s*"([^"]+)"', text)
+    if m:
+        pw_hash = m.group(1)
+    new = infra._cloudinit(ssh_user, keys, password="", hashed_password=pw_hash)
+    if new.strip() == text.strip():
+        return False
+    ci.write_text(new)
+    if emit:
+        emit("-- SLEP: rebuilt this project's cloud-init to the current format "
+             "(guaranteed local user + keys + sshd) so re-created VMs are reachable.")
+    return True
+
+
 @app.post("/infra/test-hypervisor")
 def infra_test_hypervisor(body: dict = Body(...), user: str = Depends(current_user)):
     """Probe a libvirt (KVM/QEMU) hypervisor connection before applying — runs a

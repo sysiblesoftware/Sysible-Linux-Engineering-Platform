@@ -186,25 +186,26 @@ def _one_line(s) -> str:
     return (parts[0].strip() if parts else "")
 
 
-def _cloudinit(ssh_user: str, keys: list[str], password: str = "") -> str:
+def _cloudinit(ssh_user: str, keys: list[str], password: str = "", hashed_password: str = "") -> str:
     # Single-line each value so nothing can inject a top-level cloud-init directive.
     ssh_user = _one_line(ssh_user) or "user"
     password = _one_line(password)
+    # Hash the optional password (SHA-512 crypt) so plaintext never lands in the
+    # cloud-init on disk; a pre-hashed one (carried through a regeneration) is used
+    # as-is. Fall back to no password if crypt is unavailable.
+    hashed = _one_line(hashed_password)
+    if password and not hashed:
+        try:
+            import crypt
+            hashed = crypt.crypt(password, crypt.mksalt(crypt.METHOD_SHA512))
+        except Exception:  # noqa: BLE001
+            hashed = ""
     clean, seen = [], set()
     for k in keys:
         k = _one_line(k) if k and k.strip() else ""
         if k and k not in seen:
             seen.add(k)
             clean.append(k)
-    # Hash the optional password (SHA-512 crypt) so plaintext never lands in the
-    # cloud-init on disk; fall back to no password if crypt is unavailable.
-    hashed = ""
-    if password:
-        try:
-            import crypt
-            hashed = crypt.crypt(password, crypt.mksalt(crypt.METHOD_SHA512))
-        except Exception:  # noqa: BLE001
-            hashed = ""
 
     # 1) Native users: module (the cloud-init way). `- default` keeps the image's
     #    own default account too, so you're never locked out if the named user has

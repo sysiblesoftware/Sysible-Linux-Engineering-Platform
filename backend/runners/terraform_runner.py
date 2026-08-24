@@ -130,7 +130,11 @@ def launch(run_id: int) -> None:
             # was baked in (apply reuses the on-disk cloudinit.cfg, never regens it).
             try:
                 from .. import app as _app
-                _app._ensure_managed_key_in_cloudinit(run["project_id"], emit)
+                # Rebuild the cloud-init to the current robust format (guaranteed
+                # user + keys + sshd) preserving existing keys; falls back to just
+                # patching keys in if regeneration can't run.
+                if not _app._refresh_infra_cloudinit(run["project_id"], emit):
+                    _app._ensure_managed_key_in_cloudinit(run["project_id"], emit)
             except Exception:  # noqa: BLE001 — never block the apply over this
                 pass
 
