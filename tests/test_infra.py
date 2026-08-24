@@ -458,6 +458,28 @@ def test_cloudinit_no_directive_injection():
     assert "\nruncmd:\n  - [sh, -c, id]" not in ci
 
 
+def test_slep_managed_key_baked_into_infra_vms():
+    """Every VM SLEP builds authorizes SLEP's own managed key (for the configured
+    login user), so the default "SLEP managed key" credential can log in with no
+    manual key distribution. (Exercises generate() directly — the /infra endpoint
+    pulls the real managed key from keydist, which needs ssh-keygen at runtime.)"""
+    mk = "ssh-ed25519 AAAAMANAGED slep-managed"
+    files = infra.generate("libvirt", {"count": 1, "base_image": "x", "ssh_user": "clouduser"},
+                           managed_key=mk)
+    ci = files["cloudinit.cfg"]
+    assert mk in ci                             # the managed public key is authorized
+    assert "name: clouduser" in ci              # for the configured login user
+
+
+def test_cloudinit_no_duplicate_keys():
+    """The same key supplied twice (e.g. managed == chosen deploy credential) is
+    listed once, not duplicated in authorized_keys."""
+    k = "ssh-ed25519 AAAADUP same-key"
+    files = infra.generate("libvirt", {"count": 1, "base_image": "x", "ssh_user": "ubuntu"},
+                           controller_key=k, deploy_key=k, managed_key=k)
+    assert files["cloudinit.cfg"].count(k) == 1
+
+
 def test_cloudinit_enables_ssh_by_default():
     """Every generated VM turns its SSH server on by default (install if missing +
     enable the service), so SLEP can reach a host even if the base image ships SSH

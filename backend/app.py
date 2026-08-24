@@ -2032,8 +2032,17 @@ def infra_create(body: dict = Body(...), user: str = Depends(require_operator)):
             raise HTTPException(status_code=400,
                                 detail="Couldn't derive a public key from that credential — it must be an unencrypted SSH private key.")
 
+    # Always bake SLEP's own managed public key into the VMs, so its default
+    # "SLEP managed key" credential can log in to a machine it built without any
+    # manual key distribution — this is what makes the cadence's Ansible/Salt
+    # steps reach the new VMs out of the box.
     try:
-        files = infra.generate(provider, options, controller_key, deploy_key=deploy_key)
+        managed_key = keydist.ensure_key()
+    except Exception:  # noqa: BLE001 — never block infra creation over this
+        managed_key = keydist.public_key()
+    try:
+        files = infra.generate(provider, options, controller_key,
+                               deploy_key=deploy_key, managed_key=managed_key)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 

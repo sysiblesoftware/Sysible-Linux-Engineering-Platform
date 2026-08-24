@@ -162,8 +162,12 @@ def _one_line(s) -> str:
 def _cloudinit(ssh_user: str, keys: list[str]) -> str:
     # Single-line each value so nothing can inject a top-level cloud-init directive.
     ssh_user = _one_line(ssh_user) or "user"
-    clean = [_one_line(k) for k in keys if k and k.strip()]
-    clean = [k for k in clean if k]
+    clean, seen = [], set()
+    for k in keys:
+        k = _one_line(k) if k and k.strip() else ""
+        if k and k not in seen:
+            seen.add(k)
+            clean.append(k)
     lines = ["#cloud-config", "users:", f"  - name: {ssh_user}",
              "    sudo: ALL=(ALL) NOPASSWD:ALL", "    shell: /bin/bash",
              "    ssh_authorized_keys:"]
@@ -617,15 +621,22 @@ def _outputs(resource: str, ip_attr: str, ssh_user: str) -> str:
             f'  }} ]\n}}\n')
 
 
-def generate(provider: str, spec: dict, controller_key: str = "", deploy_key: str = "") -> dict:
+def generate(provider: str, spec: dict, controller_key: str = "", deploy_key: str = "",
+             managed_key: str = "") -> dict:
     """Return {filename: content} for the chosen provider + options. Keys baked into
-    cloud-init (so the machine is reachable after boot): the operator's typed
-    `ssh_public_key`, `deploy_key` (the public half of a chosen SLEP SSH credential —
-    what lets SLEP's own Ansible/Salt log in), and `controller_key` (so a connected
-    Controller can reach it). Each is a separate authorized_keys entry."""
+    cloud-init (so the machine is reachable after boot), each a separate
+    authorized_keys entry:
+      * `managed_key` — SLEP's OWN managed public key, so its default "SLEP managed
+        key" credential can always log in to a VM it built (no manual key
+        distribution needed);
+      * `deploy_key` — the public half of a chosen SLEP SSH credential (when the
+        operator picks one for the cadence's Ansible/Salt steps);
+      * `controller_key` — so a connected Controller can reach it;
+      * the operator's typed `ssh_public_key`.
+    Blank/duplicate keys are dropped by the cloud-init renderer."""
     if provider not in _RENDERERS:
         raise ValueError(f"unknown provider '{provider}'")
-    keys = [spec.get("ssh_public_key", ""), deploy_key, controller_key]
+    keys = [managed_key, deploy_key, controller_key, spec.get("ssh_public_key", "")]
     return _RENDERERS[provider](spec, keys)
 
 
