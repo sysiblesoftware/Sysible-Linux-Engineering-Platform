@@ -908,6 +908,64 @@ def test_infra_create_resolves_vault_password(client):
     assert "BootPass42" not in ci and "vault.boot_pw" not in ci
 
 
+def test_install_hypervisor_key_with_password(client, monkeypatch):
+    """Installing SLEP's hypervisor key with a one-time password: resolves a Vault
+    ref, shells out via sshpass with the password in the env (never argv), and
+    reports success. A missing sshpass falls back to the manual command; an unknown
+    vault ref is rejected."""
+    import shutil
+    import backend.app as appmod
+    import backend.db as db
+    import backend.vault as vault
+    monkeypatch.setattr(appmod, "infra_hypervisor_key",
+                        lambda user=None: {"public_key": "ssh-ed25519 HVKEY slep", "keyfile": "/k"})
+    db.upsert_secret("kvm_pw", vault.encrypt("hunter2"))
+
+    captured = {}
+
+    class Ok:
+        returncode = 0
+        stdout = "installed"
+        stderr = ""
+
+    def fake_which(b):
+        return "/usr/bin/sshpass" if b == "sshpass" else None
+
+    def fake_run(cmd, *a, **k):
+        captured["cmd"] = cmd
+        captured["env"] = k.get("env") or {}
+        return Ok()
+    monkeypatch.setattr(shutil, "which", fake_which)
+    monkeypatch.setattr(appmod.subprocess, "run", fake_run)
+
+    r = client.post("/infra/install-hypervisor-key",
+                    json={"host": "192.168.8.212", "user": "admin", "password": "vault.kvm_pw"}).json()
+    assert r["ok"] is True
+    # Password went through the env (SSHPASS), never on the command line.
+    assert captured["env"].get("SSHPASS") == "hunter2"
+    assert "hunter2" not in " ".join(captured["cmd"])
+    assert "admin@192.168.8.212" in captured["cmd"]
+
+    # Unknown vault ref → rejected, not used literally.
+    assert client.post("/infra/install-hypervisor-key",
+                       json={"host": "h", "user": "admin", "password": "vault.missing"}).status_code == 400
+
+    # No sshpass on the host → graceful fallback with the manual key.
+    monkeypatch.setattr(shutil, "which", lambda b: None)
+    r2 = client.post("/infra/install-hypervisor-key",
+                     json={"host": "h", "user": "admin", "password": "literalpw"}).json()
+    assert r2["ok"] is False and r2.get("need_manual") and "ssh-ed25519 HVKEY slep" in r2["public_key"]
+
+
+def test_install_hypervisor_key_validates_input(client):
+    """The install endpoint rejects a missing password, a bad host, and a bad user."""
+    assert client.post("/infra/install-hypervisor-key", json={"host": "h", "user": "admin"}).status_code == 400
+    assert client.post("/infra/install-hypervisor-key",
+                       json={"host": "h;rm -rf /", "user": "admin", "password": "x"}).status_code == 400
+    assert client.post("/infra/install-hypervisor-key",
+                       json={"host": "h", "user": "a b", "password": "x"}).status_code == 400
+
+
 def test_post_apply_key_check(client, monkeypatch):
     """After apply, SLEP probes SSH to each new VM with the managed key (through the
     jump host) and logs a per-host verdict. No managed key → silent no-op; with a

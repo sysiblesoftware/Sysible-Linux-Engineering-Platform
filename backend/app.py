@@ -2132,6 +2132,73 @@ def infra_hypervisor_key(user: str = Depends(require_operator)):
     return {"public_key": pub, "keyfile": str(key)}
 
 
+@app.post("/infra/install-hypervisor-key")
+def infra_install_hypervisor_key(body: dict = Body(...), user: str = Depends(require_operator)):
+    """Install SLEP's managed hypervisor public key onto a remote KVM host using a
+    one-time SSH password — the missing half of the two-step flow. Key auth to a
+    brand-new hypervisor can't work until the key is on it, and installing the key
+    the manual way needs SSH that already works: a chicken-and-egg. This breaks it —
+    SLEP logs in once with the password (never stored) and appends its key to the
+    host's authorized_keys, so every connection after is key-only.
+
+    `password` may be a literal or a Vault variable (`vault.NAME`), so the secret
+    doesn't ride in the clear. Requires `sshpass` on the SLEP host; without it we
+    return the manual copy command instead of failing silently."""
+    import re
+    import shutil
+    host = infra._one_line(str(body.get("host") or "")).strip()
+    if host and not re.fullmatch(r"[A-Za-z0-9._:\-\[\]]+", host):
+        raise HTTPException(status_code=400, detail="That host name/IP looks invalid.")
+    ssh_user = infra._one_line(str(body.get("user") or "root")).strip() or "root"
+    if not re.fullmatch(r"[A-Za-z0-9._\-]+", ssh_user):
+        raise HTTPException(status_code=400, detail="That SSH user looks invalid.")
+    port = str(body.get("port") or "22").strip() or "22"
+    if not host:
+        raise HTTPException(status_code=400, detail="A host is required.")
+    if not port.isdigit():
+        raise HTTPException(status_code=400, detail="Port must be a number.")
+    raw = str(body.get("password") or "").strip()
+    pw = _resolve_secret_ref(raw) if raw else ""
+    if raw and not pw:
+        raise HTTPException(status_code=400,
+                            detail=f"Vault variable '{raw}' not found — add it under Secrets first, "
+                                   f"or enter the host password directly.")
+    if not pw:
+        raise HTTPException(status_code=400, detail="A password is required to install the key.")
+    # Reuse the managed hypervisor key (generate on first use).
+    keyinfo = infra_hypervisor_key(user=user)   # {public_key, keyfile}
+    pub = keyinfo["public_key"]
+    install = ("umask 077; mkdir -p ~/.ssh; "
+               f"grep -qxF '{pub}' ~/.ssh/authorized_keys 2>/dev/null || echo '{pub}' >> ~/.ssh/authorized_keys; "
+               "chmod 700 ~/.ssh; chmod 600 ~/.ssh/authorized_keys")
+    if not shutil.which("sshpass"):
+        return {"ok": False, "need_manual": True, "public_key": pub,
+                "output": "`sshpass` isn't installed on the SLEP host, so the password install can't run here. "
+                          "Run the copy command shown above once on the hypervisor instead — after that, key auth works."}
+    env = dict(os.environ)
+    env["SSHPASS"] = pw   # -e reads it from the env, so it never lands in argv/ps
+    cmd = ["sshpass", "-e", "ssh", "-p", port,
+           "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
+           "-o", "PreferredAuthentications=password", "-o", "PubkeyAuthentication=no",
+           "-o", "ConnectTimeout=15", "-o", "NumberOfPasswordPrompts=1",
+           f"{ssh_user}@{host}", install]
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=30, env=env)
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "output": f"Timed out connecting to {ssh_user}@{host}:{port}."}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "output": f"Couldn't run the install: {e}"}
+    if p.returncode == 0:
+        db.log_audit("hypervisor_key_installed", user, f"{ssh_user}@{host}:{port}")
+        return {"ok": True, "output": f"✓ SLEP's key is now installed on {ssh_user}@{host}. "
+                                      f"Test the connection — it should authenticate with the key now."}
+    err = (p.stderr or p.stdout or "").strip()
+    # Scrub any echo of the password from the returned error, just in case.
+    if pw:
+        err = err.replace(pw, "***")
+    return {"ok": False, "output": err[:400] or "Password install failed (check the user/password)."}
+
+
 @app.post("/infra/{project_id}/scaffold")
 def infra_scaffold(project_id: int, body: dict = Body(...), user: str = Depends(current_user)):
     """Scaffold the next cadence stage into an infra project: 'configure' writes a

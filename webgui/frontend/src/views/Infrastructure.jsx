@@ -435,6 +435,8 @@ function LibvirtConnect({ values, set }) {
   const [mode, setMode] = useState(startRemote ? 'remote' : 'local')
   const [host, setHost] = useState('')
   const [user, setUser] = useState('root')
+  const [pw, setPw] = useState('')             // one-time host password (or vault.NAME)
+  const [installing, setInstalling] = useState(null)  // {ok, output} | 'installing'
   const [key, setKey] = useState(null)        // {public_key, keyfile}
   const [hvTest, setHvTest] = useState(null)   // {ok, output} | 'testing'
   const [copied, setCopied] = useState(false)
@@ -473,13 +475,37 @@ function LibvirtConnect({ values, set }) {
             <Field label="Host (IP or name)"><input value={host} onChange={(e) => setHost(e.target.value)} placeholder="192.168.8.212" /></Field>
             <Field label="SSH user"><input value={user} onChange={(e) => setUser(e.target.value)} placeholder="root / admin" /></Field>
           </div>
-          <div className="row" style={{ gap: 10, alignItems: 'center', marginTop: 2 }}>
+          {/* One-time password: let SLEP install its key for you, breaking the
+              chicken-and-egg (key auth can't work until the key is on the host).
+              The password is used once and never stored; it may be a Vault variable. */}
+          <div className="row" style={{ gap: 10, marginTop: 8, alignItems: 'flex-end' }}>
+            <Field label="Host password (one-time — installs SLEP’s key; or vault.NAME)">
+              <input type="password" value={pw} onChange={(e) => setPw(e.target.value)} placeholder="password or vault.kvm_pw" />
+            </Field>
+            <button className="primary sm" disabled={installing === 'installing' || !host || !pw}
+              onClick={() => wrap(async () => {
+                setInstalling('installing')
+                try {
+                  const r = await api('infra/install-hypervisor-key', { method: 'POST', json: { host: host.trim(), user: user.trim(), password: pw.trim() } })
+                  setInstalling(r)
+                  if (r.public_key) setKey({ public_key: r.public_key, keyfile: (key && key.keyfile) || '' })
+                } catch (e) { setInstalling({ ok: false, output: String(e.message || e) }) }
+              })} style={{ whiteSpace: 'nowrap' }}>
+              {installing === 'installing' ? 'Installing…' : '🔐 Install key with password'}
+            </button>
+          </div>
+          {installing && installing !== 'installing' && (
+            <div style={{ fontSize: 12.5, marginTop: 4, color: installing.ok ? 'var(--green-bright)' : 'var(--danger)' }}>
+              {installing.ok ? '✓ ' : '✗ '}<span className="muted" style={{ whiteSpace: 'pre-wrap' }}>{installing.output}</span>
+            </div>
+          )}
+          <div className="row" style={{ gap: 10, alignItems: 'center', marginTop: 8 }}>
             <button className="ghost sm" onClick={() => wrap(async () => setKey(await api('infra/hypervisor-key', { method: 'POST' })))}>
               🔑 {key ? 'Regenerate deploy key' : 'Get deploy key'}
             </button>
-            <span className="faint" style={{ fontSize: 12 }}>SLEP’s managed key — install it on the host once, then this and every future hypervisor just works.</span>
+            <span className="faint" style={{ fontSize: 12 }}>No password? Install SLEP’s key by hand once — then this and every future hypervisor just works.</span>
           </div>
-          {key && (
+          {key && cmd && (
             <div style={{ marginTop: 8 }}>
               <div className="faint" style={{ fontSize: 12, marginBottom: 4 }}>Run this once on the hypervisor (or via SSH from anywhere that can reach it):</div>
               <div className="row" style={{ gap: 6, alignItems: 'flex-start' }}>
