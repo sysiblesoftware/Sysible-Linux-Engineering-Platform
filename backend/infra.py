@@ -14,12 +14,29 @@ from __future__ import annotations
 
 # ---- option schema shown as menus in the console ---------------------------
 # type: "select" (choices), "number", "text", "textarea". `default` seeds the form.
-_COUNT = {"key": "count", "label": "How many VMs", "type": "number", "default": 2}
+_COUNT = {"key": "count", "label": "How many VMs", "type": "number", "default": 1}
 _PREFIX = {"key": "name_prefix", "label": "Name prefix", "type": "text", "default": "app"}
 _SSH_USER = {"key": "ssh_user", "label": "Login user", "type": "text", "default": "ubuntu"}
 _SSH_KEY = {"key": "ssh_public_key", "label": "Deploy SSH public key (for SLEP access)",
             "type": "textarea", "default": "", "help": "Paste an ssh-ed25519/ssh-rsa public key. Optional."}
 _ENV = {"key": "environment", "label": "Environment tag (Controller group)", "type": "text", "default": "production"}
+
+# Curated catalog of common cloud images (generic/-cloud qcow2 with cloud-init),
+# offered as a picker so the operator doesn't hunt for URLs. Each uses the distro's
+# stable "latest/current" path so it tracks point releases. amd64/x86_64.
+CLOUD_IMAGES = [
+    {"label": "Ubuntu 24.04 LTS (Noble)", "url": "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img"},
+    {"label": "Ubuntu 22.04 LTS (Jammy)", "url": "https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img"},
+    {"label": "Debian 12 (Bookworm)", "url": "https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-amd64.qcow2"},
+    {"label": "Debian 11 (Bullseye)", "url": "https://cloud.debian.org/images/cloud/bullseye/latest/debian-11-generic-amd64.qcow2"},
+    {"label": "Rocky Linux 9", "url": "https://download.rockylinux.org/pub/rocky/9/images/x86_64/Rocky-9-GenericCloud-Base.latest.x86_64.qcow2"},
+    {"label": "Rocky Linux 8", "url": "https://download.rockylinux.org/pub/rocky/8/images/x86_64/Rocky-8-GenericCloud-Base.latest.x86_64.qcow2"},
+    {"label": "AlmaLinux 9", "url": "https://repo.almalinux.org/almalinux/9/cloud/x86_64/images/AlmaLinux-9-GenericCloud-latest.x86_64.qcow2"},
+    {"label": "AlmaLinux 8", "url": "https://repo.almalinux.org/almalinux/8/cloud/x86_64/images/AlmaLinux-8-GenericCloud-latest.x86_64.qcow2"},
+    {"label": "CentOS Stream 9", "url": "https://cloud.centos.org/centos/9-stream/x86_64/images/CentOS-Stream-GenericCloud-9-latest.x86_64.qcow2"},
+    {"label": "Fedora 40 Cloud", "url": "https://download.fedoraproject.org/pub/fedora/linux/releases/40/Cloud/x86_64/images/Fedora-Cloud-Base-Generic.x86_64-40-1.14.qcow2"},
+    {"label": "openSUSE Leap 15.6", "url": "https://download.opensuse.org/distribution/leap/15.6/appliances/openSUSE-Leap-15.6-Minimal-VM.x86_64-Cloud.qcow2"},
+]
 
 PROVIDERS = {
     "aws": {
@@ -237,7 +254,7 @@ resource "aws_instance" "vm" {{
         "instance_type": ("string", spec.get("instance_type", "t3.micro")),
         "ami": ("string", spec.get("ami", "")),
         "disk_size": ("number", spec.get("disk_size", 20)),
-        "vm_count": ("number", spec.get("count", 2)),
+        "vm_count": ("number", spec.get("count", 1)),
         "name_prefix": ("string", spec.get("name_prefix", "app")),
         "environment": ("string", spec.get("environment", "production")),
     })
@@ -270,7 +287,7 @@ resource "digitalocean_droplet" "vm" {{
         "region": ("string", spec.get("region", "nyc3")),
         "size": ("string", spec.get("size", "s-1vcpu-1gb")),
         "image": ("string", spec.get("image", "ubuntu-22-04-x64")),
-        "vm_count": ("number", spec.get("count", 2)),
+        "vm_count": ("number", spec.get("count", 1)),
         "name_prefix": ("string", spec.get("name_prefix", "app")),
         "environment": ("string", spec.get("environment", "production")),
     })
@@ -364,7 +381,7 @@ resource "libvirt_domain" "vm" {{
         "base_image": ("string", spec.get("base_image", "")),
         "base_volume": ("string", base_volume),
         "network": ("string", spec.get("network", "default")),
-        "vm_count": ("number", spec.get("count", 2)),
+        "vm_count": ("number", spec.get("count", 1)),
         "name_prefix": ("string", spec.get("name_prefix", "app")),
         "environment": ("string", spec.get("environment", "production")),
     })
@@ -436,7 +453,7 @@ resource "proxmox_virtual_environment_vm" "vm" {{
         "disk_size": ("number", spec.get("disk_size", 20)),
         "datastore": ("string", spec.get("datastore", "local-lvm")),
         "bridge": ("string", spec.get("bridge", "vmbr0")),
-        "vm_count": ("number", spec.get("count", 2)),
+        "vm_count": ("number", spec.get("count", 1)),
         "name_prefix": ("string", spec.get("name_prefix", "app")),
         "environment": ("string", spec.get("environment", "production")),
     })
@@ -499,7 +516,7 @@ resource "google_compute_instance" "vm" {{
         "machine_type": ("string", spec.get("machine_type", "e2-small")),
         "image": ("string", spec.get("image", "ubuntu-os-cloud/ubuntu-2204-lts")),
         "disk_size": ("number", spec.get("disk_size", 20)),
-        "vm_count": ("number", spec.get("count", 2)),
+        "vm_count": ("number", spec.get("count", 1)),
         "name_prefix": ("string", spec.get("name_prefix", "app")),
         "environment": ("string", spec.get("environment", "production")),
     })
@@ -600,7 +617,7 @@ resource "azurerm_linux_virtual_machine" "vm" {{
         "vm_size": ("string", spec.get("vm_size", "Standard_B1s")),
         "admin_user": ("string", ssh_user),
         "ssh_public_key": ("string", spec.get("ssh_public_key", "")),
-        "vm_count": ("number", spec.get("count", 2)),
+        "vm_count": ("number", spec.get("count", 1)),
         "name_prefix": ("string", spec.get("name_prefix", "app")),
         "environment": ("string", spec.get("environment", "production")),
     })

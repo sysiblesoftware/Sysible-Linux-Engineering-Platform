@@ -1728,8 +1728,9 @@ def keydist_test_log(iid: int, offset: int = 0, user: str = Depends(current_user
 # ------------------------------------------------------------------ create infrastructure
 @app.get("/infra/providers")
 def infra_providers(user: str = Depends(current_user)):
-    """Provider + VM option menus for the Create Infrastructure wizard."""
-    return {"providers": infra.provider_schema()}
+    """Provider + VM option menus for the Create Infrastructure wizard, plus a
+    catalog of common cloud images to pick from for the base-image download."""
+    return {"providers": infra.provider_schema(), "cloud_images": infra.CLOUD_IMAGES}
 
 
 # Libvirt connection URIs are operator-supplied and handed to virsh / the terraform
@@ -1914,6 +1915,34 @@ def infra_test_hypervisor(body: dict = Body(...), user: str = Depends(current_us
                 "and that the host key is already trusted on the SLEP host (a new key can't be accepted here)."}
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "output": str(e)}
+
+
+@app.post("/infra/hypervisor-volumes")
+def infra_hypervisor_volumes(body: dict = Body(...), user: str = Depends(current_user)):
+    """List the storage volumes (disk images) in a pool on a libvirt hypervisor —
+    `virsh -c <uri> --readonly vol-list <pool>` — so the Create-Infrastructure
+    wizard can offer the images ALREADY on the hypervisor as a dropdown instead of
+    typing a name. Read-only; never mutates anything. Returns {ok, volumes, output}."""
+    import shutil
+    uri = _validate_libvirt_uri(body.get("uri"))
+    pool = str(body.get("pool") or "default").strip() or "default"
+    if not shutil.which("virsh"):
+        return {"ok": False, "volumes": [],
+                "output": "`virsh` (libvirt-clients) isn't installed on the SLEP host — type the volume name instead."}
+    try:
+        p = subprocess.run(["virsh", "-c", uri, "--readonly", "vol-list", pool, "--name"],
+                           capture_output=True, text=True, timeout=25, env=dict(os.environ))
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "volumes": [], "output": "timed out talking to the hypervisor."}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "volumes": [], "output": str(e)}
+    if p.returncode != 0:
+        return {"ok": False, "volumes": [], "output": (p.stderr or p.stdout or "vol-list failed").strip()}
+    # Disk images only — skip cloud-init ISOs and non-image artifacts.
+    vols = [v.strip() for v in p.stdout.splitlines() if v.strip()]
+    vols = [v for v in vols if not v.endswith("-ci.iso") and (
+        v.endswith((".qcow2", ".img", ".raw", ".qcow", ".vmdk")) or "." not in v)]
+    return {"ok": True, "volumes": sorted(vols), "output": f"{len(vols)} image(s) in pool '{pool}'."}
 
 
 def _virsh_list_domains(uri: str):

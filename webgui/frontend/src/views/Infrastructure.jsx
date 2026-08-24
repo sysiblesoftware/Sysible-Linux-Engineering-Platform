@@ -251,10 +251,12 @@ function CreateWizard({ onClose, onDone }) {
   const [invs, setInvs] = useState([])
   const [invTarget, setInvTarget] = useState('')   // '' = dedicated, <id> = existing, '__new'
   const [invName, setInvName] = useState('')
+  const [cloudImages, setCloudImages] = useState([])
   const { wrap, node } = useErr()
 
   useEffect(() => { api('infra/providers').then((d) => {
     setSchema(d.providers)
+    setCloudImages(d.cloud_images || [])
     const first = Object.keys(d.providers)[0]
     setProvider(first); seed(d.providers, first)
   }) }, [])
@@ -286,9 +288,11 @@ function CreateWizard({ onClose, onDone }) {
       <div className="faint" style={{ fontSize: 12, margin: '2px 0 8px' }}>{schema[provider]?.blurb}</div>
 
       {provider === 'libvirt' && <LibvirtConnect values={values} set={set} />}
+      {provider === 'libvirt' && <PoolVolumePicker values={values} set={set} />}
+      {provider === 'libvirt' && <BaseImageField values={values} set={set} catalog={cloudImages} />}
 
       <div className="task-palette" style={{ gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-        {opts.filter((o) => !(provider === 'libvirt' && o.key === 'uri')).map((o) => (
+        {opts.filter((o) => !(provider === 'libvirt' && (o.key === 'uri' || o.key === 'base_volume' || o.key === 'base_image'))).map((o) => (
           <Field key={o.key} label={o.label}>
             {o.type === 'select'
               ? <select value={values[o.key] ?? ''} onChange={(e) => set(o.key, e.target.value)}>
@@ -344,6 +348,66 @@ function CreateWizard({ onClose, onDone }) {
         onDone(d.project_id, name, d.slug)
       })}>Generate Terraform</button>
     </Modal>
+  )
+}
+
+// Base image to DOWNLOAD (used when no existing pool volume is chosen). Offers a
+// catalog of common cloud images so you don't hunt for URLs, plus a free URL field.
+function BaseImageField({ values, set, catalog }) {
+  const url = values.base_image || ''
+  const known = catalog.find((c) => c.url === url)
+  const usingPool = !!(values.base_volume || '').trim()
+  return (
+    <Field label={'Download a base image' + (usingPool ? ' (ignored — using the pool volume above)' : '')}>
+      <div className="row" style={{ gap: 6 }}>
+        <select value={known ? known.url : ''} title="Common cloud images" disabled={usingPool}
+          onChange={(e) => { if (e.target.value) set('base_image', e.target.value) }} style={{ width: 210 }}>
+          <option value="">Pick a common image…</option>
+          {catalog.map((c) => <option key={c.url} value={c.url}>{c.label}</option>)}
+        </select>
+        <input value={url} disabled={usingPool} onChange={(e) => set('base_image', e.target.value)}
+          placeholder="https://…/image.qcow2" style={{ flex: 1 }} />
+      </div>
+      <div className="faint" style={{ fontSize: 11 }}>Pick a distro or paste a qcow2/img URL — downloaded once into the pool and shared (copy-on-write per VM).</div>
+    </Field>
+  )
+}
+
+// Pick a base image already in the hypervisor's pool (skips the download). Lists
+// the pool's disk images via a read-only virsh probe; falls back to a text field
+// (type the name) when nothing loads or virsh isn't available on the SLEP host.
+function PoolVolumePicker({ values, set }) {
+  const [vols, setVols] = useState(null)   // null=not loaded, []=none, [names]
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState('')
+  const cur = values.base_volume || ''
+  const load = async () => {
+    setBusy(true); setErr('')
+    try {
+      const d = await api('infra/hypervisor-volumes', { method: 'POST', json: { uri: values.uri, pool: values.pool } })
+      if (d.ok) setVols(d.volumes || [])
+      else { setVols([]); setErr(d.output || 'Could not list images.') }
+    } catch (e) { setVols([]); setErr(e.message) } finally { setBusy(false) }
+  }
+  return (
+    <div style={{ margin: '2px 0 10px' }}>
+      <Field label="Base image — use one already in the pool (skips download)">
+        <div className="row" style={{ gap: 6 }}>
+          {vols && vols.length > 0
+            ? <select value={vols.includes(cur) ? cur : ''} onChange={(e) => set('base_volume', e.target.value)} style={{ flex: 1 }}>
+                <option value="">(none — download the base image URL below)</option>
+                {vols.map((v) => <option key={v} value={v}>{v}</option>)}
+              </select>
+            : <input value={cur} onChange={(e) => set('base_volume', e.target.value)} style={{ flex: 1 }}
+                     placeholder="e.g. jammy.qcow2 — or click “Load images” to pick" />}
+          <button type="button" className="ghost sm" disabled={busy || !values.uri} title="List images in the pool on the hypervisor"
+            onClick={load}>{busy ? 'Loading…' : '↻ Load images'}</button>
+        </div>
+        {vols && vols.length === 0 && !err && <div className="faint" style={{ fontSize: 11 }}>No images in pool “{values.pool || 'default'}”. Type a name, or leave blank to download the URL below.</div>}
+        {err && <div className="faint" style={{ fontSize: 11, color: 'var(--danger)' }}>{err}</div>}
+        {!vols && !err && <div className="faint" style={{ fontSize: 11 }}>Leave blank to download the base image URL below, or “Load images” to clone one already on the hypervisor.</div>}
+      </Field>
+    </div>
   )
 }
 

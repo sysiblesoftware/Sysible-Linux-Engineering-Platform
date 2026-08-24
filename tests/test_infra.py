@@ -42,6 +42,34 @@ def test_libvirt_provider_pinned_to_compatible_major():
     assert "network_interface {" in main and "disk {" in main
 
 
+def test_providers_include_cloud_image_catalog_and_default_one_vm(client):
+    """The wizard schema ships a catalog of common cloud images to download, and
+    new libvirt infra defaults to a single VM."""
+    d = client.get("/infra/providers").json()
+    imgs = d["cloud_images"]
+    assert imgs and all("label" in i and i["url"].startswith("http") for i in imgs)
+    assert any("Ubuntu" in i["label"] for i in imgs) and any("Rocky" in i["label"] for i in imgs)
+    count_opt = next(o for o in d["providers"]["libvirt"]["options"] if o["key"] == "count")
+    assert count_opt["default"] == 1
+
+
+def test_hypervisor_volumes_lists_pool_images(client, monkeypatch):
+    """The pool-volume picker lists a pool's disk images (virsh vol-list), dropping
+    cloud-init ISOs and non-image artifacts."""
+    import backend.app as appmod
+    import shutil
+    monkeypatch.setattr(shutil, "which", lambda b: "/usr/bin/virsh")
+
+    class R:
+        returncode = 0
+        stdout = "jammy.qcow2\nweb-1-ci.iso\nrocky9.img\nnotes.txt\n"
+        stderr = ""
+    monkeypatch.setattr(appmod.subprocess, "run", lambda *a, **k: R())
+    d = client.post("/infra/hypervisor-volumes", json={"uri": "qemu:///system", "pool": "default"}).json()
+    assert d["ok"] is True
+    assert d["volumes"] == ["jammy.qcow2", "rocky9.img"]     # ISO + .txt filtered out
+
+
 def test_libvirt_existing_pool_volume_skips_download():
     """Naming an existing pool volume clones each VM disk from it (base_volume_name)
     with NO base-volume-from-source resource — so nothing is downloaded/uploaded and
