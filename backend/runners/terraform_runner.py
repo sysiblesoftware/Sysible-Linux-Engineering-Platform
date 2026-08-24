@@ -124,6 +124,16 @@ def launch(run_id: int) -> None:
                 db.set_run_status(run_id, "failed", exit_code=2, finished=int(time.time()))
                 return
 
+            # Keep the project's cloud-init current: ensure SLEP's managed key is
+            # authorized, so VMs this apply (re)creates accept the default "SLEP
+            # managed key" credential — even for projects generated before the key
+            # was baked in (apply reuses the on-disk cloudinit.cfg, never regens it).
+            try:
+                from .. import app as _app
+                _app._ensure_managed_key_in_cloudinit(run["project_id"], emit)
+            except Exception:  # noqa: BLE001 — never block the apply over this
+                pass
+
         env = _common.credential_env(credential, os.environ)
         env.setdefault("TF_IN_AUTOMATION", "1")
 

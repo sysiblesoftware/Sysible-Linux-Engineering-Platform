@@ -668,6 +668,45 @@ def test_local_libvirt_sets_no_jump_host(client):
     assert (db.get_infra(pid)["bastion"] or "") == ""
 
 
+def test_apply_patches_managed_key_into_stale_cloudinit(client, monkeypatch):
+    """A project whose cloud-init predates managed-key baking gets SLEP's key
+    injected before apply — so re-created VMs accept the default credential — and
+    the patch is idempotent (no duplicate on a second pass)."""
+    import backend.app as appmod
+    import backend.keydist as keydist
+    pid = client.post("/infra", json={"name": "stale", "provider": "libvirt",
+                                      "options": {"count": 1, "base_image": "x", "ssh_user": "clouduser"}}).json()["project_id"]
+    # Simulate a pre-fix cloud-init: no managed key in authorized_keys.
+    ci = appmod.db.project_dir(pid) / "cloudinit.cfg"
+    ci.write_text("#cloud-config\nusers:\n  - name: clouduser\n    ssh_authorized_keys:\n      - ssh-ed25519 OLD deploy\npackage_update: true\n")
+    monkeypatch.setattr(keydist, "public_key", lambda: "ssh-ed25519 MANAGED slep-managed")
+
+    assert appmod._ensure_managed_key_in_cloudinit(pid) is True
+    text = ci.read_text()
+    assert "ssh-ed25519 MANAGED slep-managed" in text
+    assert "ssh-ed25519 OLD deploy" in text                 # existing keys preserved
+    # Idempotent: second call is a no-op and doesn't duplicate.
+    assert appmod._ensure_managed_key_in_cloudinit(pid) is False
+    assert ci.read_text().count("MANAGED slep-managed") == 1
+
+
+def test_managed_key_patch_handles_empty_key_list(client, monkeypatch):
+    """When the cloud-init had no keys ('[]' placeholder), the managed key replaces
+    it rather than producing invalid YAML."""
+    import backend.app as appmod
+    import backend.keydist as keydist
+    pid = client.post("/infra", json={"name": "nokeys", "provider": "libvirt",
+                                      "options": {"count": 1, "base_image": "x", "ssh_user": "u"}}).json()["project_id"]
+    ci = appmod.db.project_dir(pid) / "cloudinit.cfg"
+    ci.write_text("#cloud-config\nusers:\n  - name: u\n    ssh_authorized_keys:\n      []\npackage_update: true\n")
+    monkeypatch.setattr(keydist, "public_key", lambda: "ssh-ed25519 MK slep-managed")
+    assert appmod._ensure_managed_key_in_cloudinit(pid) is True
+    text = ci.read_text()
+    assert "- ssh-ed25519 MK slep-managed" in text and "[]" not in text
+    import yaml
+    yaml.safe_load(text)                                    # still valid YAML
+
+
 def test_post_apply_key_check(client, monkeypatch):
     """After apply, SLEP probes SSH to each new VM with the managed key (through the
     jump host) and logs a per-host verdict. No managed key → silent no-op; with a

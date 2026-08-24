@@ -1798,6 +1798,47 @@ def _project_hypervisor_bastion(project_id: int) -> str:
     return ""
 
 
+def _ensure_managed_key_in_cloudinit(project_id: int, emit=None) -> bool:
+    """Ensure SLEP's managed public key is in the project's cloud-init
+    authorized_keys, so VMs that a (re-)apply creates accept SLEP's default
+    "SLEP managed key" credential. The cloud-init is written once at project
+    creation and reused by every apply — so a project created before managed-key
+    baking has a stale file that never got the key. Patch it in place (idempotent,
+    best-effort). Returns True if it changed the file."""
+    from . import keydist
+    try:
+        mk = keydist.public_key() or keydist.ensure_key()
+    except Exception:  # noqa: BLE001
+        return False
+    ci = db.project_dir(project_id) / "cloudinit.cfg"
+    if not mk or not ci.exists():
+        return False
+    try:
+        text = ci.read_text()
+    except OSError:
+        return False
+    if mk in text:
+        return False
+    lines, out, i, inserted = text.splitlines(), [], 0, False
+    while i < len(lines):
+        ln = lines[i]
+        out.append(ln)
+        if not inserted and ln.strip() == "ssh_authorized_keys:":
+            indent = ln[:len(ln) - len(ln.lstrip())]
+            out.append(f"{indent}  - {mk}")
+            inserted = True
+            if i + 1 < len(lines) and lines[i + 1].strip() == "[]":
+                i += 1                      # drop the empty-list placeholder
+        i += 1
+    if not inserted:
+        return False
+    ci.write_text("\n".join(out) + ("\n" if text.endswith("\n") else ""))
+    if emit:
+        emit("-- SLEP: added SLEP's managed key to this project's cloud-init — "
+             "VMs this apply (re)creates will accept the default 'SLEP managed key' credential.")
+    return True
+
+
 @app.post("/infra/test-hypervisor")
 def infra_test_hypervisor(body: dict = Body(...), user: str = Depends(current_user)):
     """Probe a libvirt (KVM/QEMU) hypervisor connection before applying — runs a
