@@ -1124,3 +1124,20 @@ def test_pipeline_inventory_step_allows_empty_target(client):
                                         "steps": [{"kind": "inventory", "target": ""}]})
     assert r.status_code == 200
     assert r.json()["pipeline"]["steps"][0]["kind"] == "inventory"
+
+
+def test_orphan_cloudinit_iso_parse(tmp_path):
+    """The self-heal parses '<name>-ci.iso exists already' errors from the log and
+    only ever targets cloud-init ISOs, never real disks."""
+    from backend.runners import terraform_runner as tr
+    log = tmp_path / "run.log"
+    log.write_text(
+        "libvirt_volume.disk[0]: Creation complete\n"
+        "Error: error creating libvirt volume for cloudinit device app-1-ci.iso: "
+        "storage volume 'app-1-ci.iso' exists already\n"
+        "storage volume 'app-2-ci.iso' exists already\n"
+        "storage volume 'realdisk.qcow2' exists already\n"   # must be ignored
+    )
+    got = tr._orphan_cloudinit_isos(log)
+    assert got == ["app-1-ci.iso", "app-2-ci.iso"]
+    assert "realdisk.qcow2" not in got
