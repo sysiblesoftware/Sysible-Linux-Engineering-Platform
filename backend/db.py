@@ -895,6 +895,14 @@ def set_credential_become(cid: int, become_secret: str):
         c.execute("UPDATE credentials SET become_secret=? WHERE id=?", (_enc(become_secret), cid))
 
 
+def set_credential_secret(cid: int, secret: str):
+    """Replace a credential's private key/secret (encrypted at rest), leaving its
+    name/username/id untouched — used to keep the managed-key credential in step
+    with the on-disk key without disturbing runs that point at it."""
+    with _connect() as c:
+        c.execute("UPDATE credentials SET secret=? WHERE id=?", (_enc(secret), cid))
+
+
 def upsert_credential(name, kind="ssh", username="", secret="", become_secret=None):
     """Create a credential, or refresh an existing one with the same name in place
     (keeping its id, so runs already pointing at it keep working). Used by the

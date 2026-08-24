@@ -72,6 +72,30 @@ def public_key() -> str:
     return pub.read_text().strip() if pub.exists() else ""
 
 
+def sync_managed_credential() -> bool:
+    """Keep the 'SLEP managed key' credential holding the CURRENT on-disk managed
+    private key, so a run using it authenticates with exactly the key SLEP bakes
+    into the VMs. The two can diverge if the on-disk key was regenerated after the
+    credential was first created (e.g. a data dir that didn't persist) — which
+    surfaces as 'Permission denied (publickey)' even though the key looks baked in.
+    Only refreshes an EXISTING credential (creating one, with its username, is the
+    distribute flow's job). Returns True if it changed anything."""
+    priv = _key_paths()[0]
+    if not priv.exists():
+        return False
+    try:
+        want = priv.read_text()
+        for c in db.list_credentials(include_secret=True):
+            if c.get("name") == _CRED_NAME:
+                if (c.get("secret") or "") != want:
+                    db.set_credential_secret(c["id"], want)
+                    return True
+                return False
+    except Exception:  # noqa: BLE001
+        pass
+    return False
+
+
 def managed_key_path() -> str:
     """Filesystem path of SLEP's managed PRIVATE key if it exists, else ''. The
     runner uses it to authenticate the jump-host hop (which 'Prepare jump host' /

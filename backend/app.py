@@ -79,6 +79,13 @@ def _scheduler_loop():
 async def lifespan(_app):
     db.init_db()
     engines.ensure_path()   # pick up any previously one-click-installed engines
+    # Keep the 'SLEP managed key' credential matching the on-disk managed key, so a
+    # run authenticates with exactly the key baked into the VMs (they can diverge if
+    # the key was regenerated after the credential was created → Permission denied).
+    try:
+        keydist.sync_managed_credential()
+    except Exception:  # noqa: BLE001
+        pass
     t = threading.Thread(target=_scheduler_loop, daemon=True)
     t.start()
     yield
@@ -1803,26 +1810,61 @@ def _project_hypervisor_bastion(project_id: int) -> str:
     return ""
 
 
-def _ensure_managed_key_in_cloudinit(project_id: int, emit=None) -> bool:
-    """Ensure SLEP's managed public key is in the project's cloud-init
-    authorized_keys, so VMs that a (re-)apply creates accept SLEP's default
-    "SLEP managed key" credential. The cloud-init is written once at project
-    creation and reused by every apply — so a project created before managed-key
-    baking has a stale file that never got the key. Patch it in place (idempotent,
-    best-effort). Returns True if it changed the file."""
+def _slep_authorized_keys() -> list[str]:
+    """The SLEP public keys a run might authenticate with, so we can bake ALL of
+    them into a VM's cloud-init and never get 'Permission denied (publickey)' from
+    a source mismatch:
+      * the on-disk managed public key (what fresh generation bakes), and
+      * the public half DERIVED from the 'SLEP managed key' credential — this is
+        the exact key a cadence run uses, so baking it guarantees the login matches
+        even if the on-disk key and the stored credential ever diverged (e.g. the
+        key was regenerated after the credential was created).
+    """
     from . import keydist
     try:
-        mk = keydist.public_key() or keydist.ensure_key()
+        keydist.sync_managed_credential()   # credential ⇄ on-disk key before we bake
     except Exception:  # noqa: BLE001
-        return False
+        pass
+    keys = []
+    try:
+        mk = keydist.public_key() or keydist.ensure_key()
+        if mk:
+            keys.append(mk.strip())
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        for c in db.list_credentials(include_secret=True):
+            if c.get("name") == keydist._CRED_NAME and c.get("secret"):
+                pub = _derive_public_key(c["secret"])
+                if pub:
+                    keys.append(pub.strip())
+                break
+    except Exception:  # noqa: BLE001
+        pass
+    seen, out = set(), []
+    for k in keys:
+        if k and k not in seen:
+            seen.add(k)
+            out.append(k)
+    return out
+
+
+def _ensure_managed_key_in_cloudinit(project_id: int, emit=None) -> bool:
+    """Ensure every SLEP public key (on-disk managed key AND the 'SLEP managed key'
+    credential's derived key) is in the project's cloud-init authorized_keys, so
+    VMs a (re-)apply creates accept SLEP's default credential. The cloud-init is
+    written once at project creation and reused by every apply, so this patches it
+    in place (idempotent, best-effort). Returns True if it changed the file."""
+    keys = _slep_authorized_keys()
     ci = db.project_dir(project_id) / "cloudinit.cfg"
-    if not mk or not ci.exists():
+    if not keys or not ci.exists():
         return False
     try:
         text = ci.read_text()
     except OSError:
         return False
-    if mk in text:
+    missing = [k for k in keys if k not in text]
+    if not missing:
         return False
     lines, out, i, inserted = text.splitlines(), [], 0, False
     while i < len(lines):
@@ -1830,7 +1872,8 @@ def _ensure_managed_key_in_cloudinit(project_id: int, emit=None) -> bool:
         out.append(ln)
         if not inserted and ln.strip() == "ssh_authorized_keys:":
             indent = ln[:len(ln) - len(ln.lstrip())]
-            out.append(f"{indent}  - {mk}")
+            for k in missing:
+                out.append(f"{indent}  - {k}")
             inserted = True
             if i + 1 < len(lines) and lines[i + 1].strip() == "[]":
                 i += 1                      # drop the empty-list placeholder
@@ -1839,7 +1882,7 @@ def _ensure_managed_key_in_cloudinit(project_id: int, emit=None) -> bool:
         return False
     ci.write_text("\n".join(out) + ("\n" if text.endswith("\n") else ""))
     if emit:
-        emit("-- SLEP: added SLEP's managed key to this project's cloud-init — "
+        emit(f"-- SLEP: added {len(missing)} SLEP key(s) to this project's cloud-init — "
              "VMs this apply (re)creates will accept the default 'SLEP managed key' credential.")
     return True
 

@@ -710,6 +710,38 @@ def test_local_libvirt_sets_no_jump_host(client):
     assert (db.get_infra(pid)["bastion"] or "") == ""
 
 
+def test_sync_managed_credential_tracks_on_disk_key(client):
+    """The 'SLEP managed key' credential is kept holding the current on-disk private
+    key (so a run authenticates with exactly the baked key), without disturbing its
+    username; idempotent when already in sync."""
+    import backend.keydist as keydist
+    import backend.db as db
+    priv = keydist._key_paths()[0]
+    priv.parent.mkdir(parents=True, exist_ok=True)
+    priv.write_text("PRIVATE-ON-DISK")
+    cid = db.upsert_credential("SLEP managed key", kind="ssh", username="clouduser", secret="STALE-OLD")
+    assert keydist.sync_managed_credential() is True
+    got = db.get_credential(cid, include_secret=True)
+    assert got["secret"] == "PRIVATE-ON-DISK" and got["username"] == "clouduser"
+    assert keydist.sync_managed_credential() is False   # already in sync
+
+
+def test_slep_authorized_keys_bakes_credential_derived_key(client, monkeypatch):
+    """The keys baked into a VM include BOTH the on-disk managed key AND the public
+    half derived from the 'SLEP managed key' credential — so the login matches even
+    if the two ever diverged."""
+    import backend.app as appmod
+    import backend.keydist as keydist
+    import backend.db as db
+    monkeypatch.setattr(keydist, "sync_managed_credential", lambda: False)
+    monkeypatch.setattr(keydist, "public_key", lambda: "ssh-ed25519 ONDISK managed")
+    db.upsert_credential("SLEP managed key", kind="ssh", username="u", secret="PRIV")
+    monkeypatch.setattr(appmod, "_derive_public_key",
+                        lambda s: "ssh-ed25519 CREDKEY fromcred" if s == "PRIV" else "")
+    keys = appmod._slep_authorized_keys()
+    assert "ssh-ed25519 ONDISK managed" in keys and "ssh-ed25519 CREDKEY fromcred" in keys
+
+
 def test_apply_patches_managed_key_into_stale_cloudinit(client, monkeypatch):
     """A project whose cloud-init predates managed-key baking gets SLEP's key
     injected before apply — so re-created VMs accept the default credential — and
