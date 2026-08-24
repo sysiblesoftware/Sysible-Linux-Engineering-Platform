@@ -42,6 +42,20 @@ def test_libvirt_provider_pinned_to_compatible_major():
     assert "network_interface {" in main and "disk {" in main
 
 
+def test_libvirt_existing_pool_volume_skips_download():
+    """Naming an existing pool volume clones each VM disk from it (base_volume_name)
+    with NO base-volume-from-source resource — so nothing is downloaded/uploaded and
+    the image on the hypervisor is used directly."""
+    m = infra.generate("libvirt", {"count": 2, "base_volume": "jammy.qcow2"})["main.tf"]
+    assert "base_volume_name = var.base_volume" in m
+    assert 'base_volume_pool = var.pool' in m
+    assert 'resource "libvirt_volume" "base"' not in m      # no download/upload volume
+    assert "source = var.base_image" not in m
+    # Default (no pool volume) still pulls a shared base image and CoW-clones it.
+    d = infra.generate("libvirt", {"count": 1, "base_image": "https://x/y.img"})["main.tf"]
+    assert 'resource "libvirt_volume" "base"' in d and "base_volume_id = libvirt_volume.base.id" in d
+
+
 def test_libvirt_uses_cow_base_volume():
     """The base image is pulled into one shared base volume and each VM disk is a
     copy-on-write clone of it — so only the first apply downloads the image and it

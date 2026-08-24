@@ -64,11 +64,17 @@ PROVIDERS = {
              "choices": ["1024", "2048", "4096", "8192", "16384"]},
             {"key": "vcpu", "label": "vCPUs", "type": "select", "default": "2", "choices": ["1", "2", "4", "8"]},
             {"key": "pool", "label": "Storage pool", "type": "text", "default": "default"},
-            {"key": "base_image", "label": "Base image URL/path", "type": "text",
+            {"key": "base_volume", "label": "Existing pool volume (optional — skips download)", "type": "text",
+             "default": "",
+             "help": "Name of a cloud image ALREADY in the pool on the hypervisor "
+                     "(e.g. jammy.qcow2). When set, each VM's disk is a copy-on-write clone of it — "
+                     "nothing is downloaded or uploaded, and the base-image URL below is ignored."},
+            {"key": "base_image", "label": "Base image URL", "type": "text",
              "default": "https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img",
-             "help": "Downloaded once into a shared base volume and cached on the hypervisor; "
-                     "each VM's disk is a fast copy-on-write clone. Point at a local path on the "
-                     "hypervisor (e.g. /var/lib/libvirt/images/jammy.img) to skip the download."},
+             "help": "Used only when no existing pool volume is given: downloaded once into a shared "
+                     "base volume, cached on the hypervisor, and each VM's disk is a fast copy-on-write "
+                     "clone. A bare local path is read from the SLEP host (a container), not the "
+                     "hypervisor — to use an image on the hypervisor, name it under “Existing pool volume”."},
             {"key": "network", "label": "Network name", "type": "text", "default": "default"},
             _SSH_USER, _SSH_KEY, _ENV,
         ],
@@ -275,6 +281,37 @@ resource "digitalocean_droplet" "vm" {{
 
 def _render_libvirt(spec, keys):
     ssh_user = _opt(spec, "ssh_user", "ubuntu")
+    base_volume = _one_line(_opt(spec, "base_volume", "")).strip()
+    # Storage: either clone each VM disk from an image ALREADY in the pool (no
+    # download/upload — the fast path when the image is on the hypervisor), or pull
+    # a base image into a shared volume once and CoW-clone from that.
+    if base_volume:
+        storage = ('# Clone each VM disk from an image already in the pool — nothing is downloaded\n'
+                   '# or uploaded; the base image lives on the hypervisor.\n'
+                   'resource "libvirt_volume" "disk" {\n'
+                   '  count            = var.vm_count\n'
+                   '  name             = "${var.name_prefix}-${count.index + 1}.qcow2"\n'
+                   '  pool             = var.pool\n'
+                   '  base_volume_name = var.base_volume\n'
+                   '  base_volume_pool = var.pool\n'
+                   '  format           = "qcow2"\n'
+                   '}')
+    else:
+        storage = ('# Base image pulled into the pool ONCE and shared; per-VM disks are fast\n'
+                   '# copy-on-write clones (base_volume_id) — only the first apply downloads it.\n'
+                   'resource "libvirt_volume" "base" {\n'
+                   '  name   = "${var.name_prefix}-base.qcow2"\n'
+                   '  pool   = var.pool\n'
+                   '  source = var.base_image\n'
+                   '  format = "qcow2"\n'
+                   '}\n\n'
+                   'resource "libvirt_volume" "disk" {\n'
+                   '  count          = var.vm_count\n'
+                   '  name           = "${var.name_prefix}-${count.index + 1}.qcow2"\n'
+                   '  pool           = var.pool\n'
+                   '  base_volume_id = libvirt_volume.base.id\n'
+                   '  format         = "qcow2"\n'
+                   '}')
     # Pin to the 0.7.x line. dmacvicar/libvirt 0.9.x is a terraform-plugin-framework
     # rewrite that changed the HCL surface (nested blocks like disk/network_interface/
     # console became nested *attributes*, `cloudinit` moved, `type`/`meta_data` became
@@ -298,25 +335,7 @@ resource "libvirt_cloudinit_disk" "ci" {{
   user_data = file("${{path.module}}/cloudinit.cfg")
 }}
 
-# Base image, pulled into the pool ONCE and shared. Per-VM disks below are fast
-# copy-on-write clones of it (base_volume_id) — so only the first apply downloads
-# the image; adding VMs or re-applying is near-instant, and the image is cached on
-# the hypervisor in the pool. Point var.base_image at a local path on the
-# hypervisor (e.g. /var/lib/libvirt/images/jammy.img) to skip the download too.
-resource "libvirt_volume" "base" {{
-  name   = "${{var.name_prefix}}-base.qcow2"
-  pool   = var.pool
-  source = var.base_image
-  format = "qcow2"
-}}
-
-resource "libvirt_volume" "disk" {{
-  count          = var.vm_count
-  name           = "${{var.name_prefix}}-${{count.index + 1}}.qcow2"
-  pool           = var.pool
-  base_volume_id = libvirt_volume.base.id
-  format         = "qcow2"
-}}
+{storage}
 
 resource "libvirt_domain" "vm" {{
   count     = var.vm_count
@@ -343,6 +362,7 @@ resource "libvirt_domain" "vm" {{
         "vcpu": ("number", int(spec.get("vcpu", 2))),
         "pool": ("string", spec.get("pool", "default")),
         "base_image": ("string", spec.get("base_image", "")),
+        "base_volume": ("string", base_volume),
         "network": ("string", spec.get("network", "default")),
         "vm_count": ("number", spec.get("count", 2)),
         "name_prefix": ("string", spec.get("name_prefix", "app")),
