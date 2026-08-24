@@ -208,6 +208,11 @@ def launch(run_id: int) -> None:
                     if n > 0:
                         emit(f"\n-- SLEP: added {n} VM(s) to inventory “{iname}” (#{iid}) — "
                              f"the next Ansible/Salt step will target them.")
+                        # Confirm SLEP can log into the new VMs with its managed key
+                        # (through the jump host) right now, so a connect failure
+                        # shows here instead of surfacing as a confusing UNREACHABLE
+                        # on the next step.
+                        _app._verify_infra_key_access(run["project_id"], iid, emit)
                     else:
                         # VMs exist in the output but none had a usable address —
                         # almost always libvirt IPs not assigned yet (DHCP / guest

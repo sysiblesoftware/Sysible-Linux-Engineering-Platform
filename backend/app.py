@@ -2203,6 +2203,48 @@ def _autobuild_infra_inventory(project_id: int, run=None):
     return iid, name, n
 
 
+def _verify_infra_key_access(project_id: int, inventory_id: int, emit) -> None:
+    """After apply, confirm SLEP can actually SSH into the new VMs with its managed
+    key (through the project's jump host), streaming a per-host verdict into the
+    apply log. SLEP bakes its managed key into the VMs' cloud-init, so this should
+    pass out of the box — it turns 'the next step failed to connect' into an
+    immediate, explicit answer right where the VMs were created. Best-effort and
+    log-only: never raises, never fails the apply."""
+    try:
+        from . import keydist
+        key = keydist.managed_key_path()
+        if not key:
+            return
+        inv = db.get_inventory(inventory_id)
+        bastion = (inv or {}).get("bastion") or ""
+        hosts = db.list_hosts(inventory_id)
+        if not hosts:
+            return
+        emit("\n-- SLEP: checking SSH to the new VM(s) with the managed key"
+             + (f" via jump host {bastion}" if bastion else "") + " …")
+        ok = 0
+        for h in hosts:
+            user = (h.get("variables") or {}).get("ansible_user") or ""
+            target = (f"{user}@" if user else "") + h["address"]
+            hop = keydist.hop_for(bastion, h["address"])
+            cmd = keydist._key_cmd(hop, key, target, "echo SLEP_OK")
+            try:
+                r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+                good = r.returncode == 0 and "SLEP_OK" in r.stdout
+            except subprocess.TimeoutExpired:
+                good = False
+            ok += 1 if good else 0
+            emit(f"   {'✓' if good else '✗'} {h['name']} ({target})"
+                 + ("" if good else " — not reachable with the managed key yet"))
+        emit(f"-- SLEP: {ok}/{len(hosts)} new VM(s) reachable with the managed key. "
+             + ("The cadence's Ansible/Salt steps can log in." if ok == len(hosts) else
+                "Unreachable ones may still be booting (re-run the Ansible step); if a jump host "
+                "is set, run 'Prepare jump host' once so the hypervisor trusts SLEP's key; VMs built "
+                "before managed-key baking need a re-apply."))
+    except Exception:  # noqa: BLE001 — never let a post-apply check fail the apply
+        pass
+
+
 @app.post("/infra/{project_id}/inventory")
 def infra_to_inventory(project_id: int, user: str = Depends(require_operator)):
     """After apply, read the created VMs (sysible_hosts) into a SLEP Ansible

@@ -644,6 +644,38 @@ def test_local_libvirt_sets_no_jump_host(client):
     assert (db.get_infra(pid)["bastion"] or "") == ""
 
 
+def test_post_apply_key_check(client, monkeypatch):
+    """After apply, SLEP probes SSH to each new VM with the managed key (through the
+    jump host) and logs a per-host verdict. No managed key → silent no-op; with a
+    key and a reachable host → a ✓ summary."""
+    import backend.app as appmod
+    import backend.keydist as keydist
+    pid = client.post("/infra", json={"name": "pk", "provider": "libvirt",
+                                      "options": {"count": 1, "base_image": "x", "ssh_user": "clouduser"}}).json()["project_id"]
+    iid = client.post("/inventories", json={"name": "pk-inv", "project_id": pid}).json()["id"]
+    import backend.db as db
+    db.upsert_host(iid, "app-1", "192.168.100.5", variables={"ansible_user": "clouduser"}, source="infra")
+
+    # No managed key present → the check is a silent no-op, and never raises.
+    monkeypatch.setattr(keydist, "managed_key_path", lambda: "")
+    out = []
+    appmod._verify_infra_key_access(pid, iid, out.append)
+    assert out == []
+
+    # With a key and a reachable host, it reports the host as reachable.
+    monkeypatch.setattr(keydist, "managed_key_path", lambda: "/tmp/fake-key")
+
+    class Ok:
+        returncode = 0
+        stdout = "SLEP_OK\n"
+        stderr = ""
+    monkeypatch.setattr(appmod.subprocess, "run", lambda *a, **k: Ok())
+    out = []
+    appmod._verify_infra_key_access(pid, iid, out.append)
+    joined = "\n".join(out)
+    assert "✓ app-1" in joined and "1/1 new VM(s) reachable" in joined
+
+
 def test_infra_project_vms_lists_domains(client, monkeypatch):
     """List VMs on a project's hypervisor: parse `virsh list --all` into name+state."""
     import shutil
