@@ -2105,31 +2105,22 @@ def infra_project_vms(project_id: int, user: str = Depends(require_operator)):
 
 @app.post("/infra/hypervisor-key")
 def infra_hypervisor_key(user: str = Depends(require_operator)):
-    """Ensure SLEP's managed hypervisor SSH key exists (a persistent ed25519 pair
-    under the data volume) and return its public half + the in-container keyfile
-    path. This is what makes remote-KVM setup a two-step flow: the operator drops
-    the returned public key into the hypervisor's authorized_keys, and SLEP builds
-    the `qemu+ssh://…?keyfile=…` URI itself — no manual ssh-keygen or path-guessing.
-    The key lives on the data volume, so it survives image rebuilds."""
-    import shutil
-    key = db.DATA_DIR / "ssh" / "hypervisor"
-    key.parent.mkdir(parents=True, exist_ok=True)
+    """Return SLEP's ONE managed SSH key — the same key baked into every VM's
+    cloud-init and used for the jump-host hop. There is deliberately a single key
+    for everything: install its public half on the hypervisor once (via the returned
+    public_key, or the password-install flow) and that one key authenticates the
+    `qemu+ssh://…?keyfile=…` hypervisor connection, the ProxyCommand jump to the
+    VMs, and the Ansible login on the VMs themselves. One key installed once — no
+    per-purpose keys to keep in sync. It lives on the data volume, so it survives
+    image rebuilds."""
     try:
-        os.chmod(key.parent, 0o700)
-    except OSError:
-        pass
-    if not key.exists():
-        if not shutil.which("ssh-keygen"):
-            raise HTTPException(status_code=500, detail="ssh-keygen isn't available on the SLEP host.")
-        r = subprocess.run(["ssh-keygen", "-t", "ed25519", "-N", "", "-C", "slep-hypervisor",
-                            "-f", str(key)], capture_output=True, text=True, timeout=30)
-        if r.returncode != 0:
-            raise HTTPException(status_code=500, detail="Couldn't generate the key: " + (r.stderr or "").strip()[:200])
-    try:
-        pub = Path(str(key) + ".pub").read_text().strip()   # ssh-keygen writes <key>.pub
-    except OSError:
-        raise HTTPException(status_code=500, detail="Key generated but its public half couldn't be read.")
-    return {"public_key": pub, "keyfile": str(key)}
+        pub = keydist.ensure_key()          # generates the managed pair on first use
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"Couldn't prepare SLEP's managed key: {e}")
+    keyfile = keydist.managed_key_path()
+    if not pub or not keyfile:
+        raise HTTPException(status_code=500, detail="SLEP's managed key isn't available (ssh-keygen missing?).")
+    return {"public_key": pub, "keyfile": keyfile}
 
 
 @app.post("/infra/install-hypervisor-key")
@@ -2165,14 +2156,29 @@ def infra_install_hypervisor_key(body: dict = Body(...), user: str = Depends(req
                                    f"or enter the host password directly.")
     if not pw:
         raise HTTPException(status_code=400, detail="A password is required to install the key.")
-    # Reuse the managed hypervisor key (generate on first use).
+    # ONE key for everything: SLEP's managed key (also baked into VMs + used for the
+    # jump hop). Install its public half here so key auth to the hypervisor works.
     keyinfo = infra_hypervisor_key(user=user)   # {public_key, keyfile}
     pub = keyinfo["public_key"]
-    install = ("umask 077; mkdir -p ~/.ssh; "
-               f"grep -qxF '{pub}' ~/.ssh/authorized_keys 2>/dev/null || echo '{pub}' >> ~/.ssh/authorized_keys; "
-               "chmod 700 ~/.ssh; chmod 600 ~/.ssh/authorized_keys")
+    keyfile = keyinfo["keyfile"]
+    # For qemu+ssh://<user>@host/system to *manage* VMs, the account must reach the
+    # system libvirtd socket — i.e. be in the libvirt group (or the connection
+    # authenticates but every virsh call is denied). Add the account to the common
+    # libvirt/kvm groups via sudo, reading the sudo password from stdin (-S). This
+    # makes the login account a working libvirt-management account; harmless/no-op
+    # if it's already a member or is root. Group names vary by distro, so try the
+    # usual set best-effort. `id` at the end reports the resulting membership.
+    install = (
+        "umask 077; mkdir -p ~/.ssh; "
+        f"grep -qxF '{pub}' ~/.ssh/authorized_keys 2>/dev/null || echo '{pub}' >> ~/.ssh/authorized_keys; "
+        "chmod 700 ~/.ssh; chmod 600 ~/.ssh/authorized_keys; "
+        "if [ \"$(id -u)\" -ne 0 ]; then "
+        "for g in libvirt libvirtd libvirt-qemu kvm; do "
+        "getent group \"$g\" >/dev/null 2>&1 && sudo -S -p '' usermod -aG \"$g\" \"$(id -un)\" >/dev/null 2>&1; "
+        "done; fi; "
+        "id -nG 2>/dev/null | tr ' ' ,")
     if not shutil.which("sshpass"):
-        return {"ok": False, "need_manual": True, "public_key": pub,
+        return {"ok": False, "need_manual": True, "public_key": pub, "keyfile": keyfile,
                 "output": "`sshpass` isn't installed on the SLEP host, so the password install can't run here. "
                           "Run the copy command shown above once on the hypervisor instead — after that, key auth works."}
     env = dict(os.environ)
@@ -2183,15 +2189,24 @@ def infra_install_hypervisor_key(body: dict = Body(...), user: str = Depends(req
            "-o", "ConnectTimeout=15", "-o", "NumberOfPasswordPrompts=1",
            f"{ssh_user}@{host}", install]
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=30, env=env)
+        # The sudo password goes in on stdin (sudo -S consumes the first line); the
+        # SSH password comes from SSHPASS. Two channels, neither on the command line.
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=30, env=env,
+                           input=(pw + "\n"))
     except subprocess.TimeoutExpired:
         return {"ok": False, "output": f"Timed out connecting to {ssh_user}@{host}:{port}."}
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "output": f"Couldn't run the install: {e}"}
     if p.returncode == 0:
         db.log_audit("hypervisor_key_installed", user, f"{ssh_user}@{host}:{port}")
-        return {"ok": True, "output": f"✓ SLEP's key is now installed on {ssh_user}@{host}. "
-                                      f"Test the connection — it should authenticate with the key now."}
+        groups = (p.stdout or "").strip().splitlines()[-1] if (p.stdout or "").strip() else ""
+        has_libvirt = any(g in groups.split(",") for g in ("libvirt", "libvirtd", "libvirt-qemu")) or ssh_user == "root"
+        note = (" The account can reach libvirt." if has_libvirt
+                else " ⚠ The account is NOT in a libvirt group yet — qemu+ssh can log in but may not "
+                     "manage VMs. Add it on the host: sudo usermod -aG libvirt " + ssh_user + " (then re-login).")
+        return {"ok": True, "public_key": pub, "keyfile": keyfile,
+                "output": f"✓ SLEP's key is installed on {ssh_user}@{host} and the connection URI now points "
+                          f"at it." + note + " Test the connection."}
     err = (p.stderr or p.stdout or "").strip()
     # Scrub any echo of the password from the returned error, just in case.
     if pw:

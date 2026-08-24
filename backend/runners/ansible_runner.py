@@ -231,6 +231,21 @@ def _write_key(secret: str, dest: Path) -> None:
         os.close(fd)
 
 
+def _key_loads(path: Path) -> bool:
+    """True if OpenSSH can actually parse this private key. A malformed/encrypted/
+    truncated key produces ssh's 'Load key … error in libcrypto' at connect time and
+    then a misleading 'Permission denied' — catching it here lets the runner say so
+    plainly and fall back to SLEP's managed key instead of dead-ending the run."""
+    kg = shutil.which("ssh-keygen")
+    if not kg:
+        return True   # can't check here; assume ok and let ssh decide
+    try:
+        r = subprocess.run([kg, "-y", "-f", str(path)], capture_output=True, text=True, timeout=10)
+        return r.returncode == 0
+    except Exception:  # noqa: BLE001
+        return True
+
+
 def launch(run_id: int) -> None:
     run = db.get_run(run_id)
     if not run:
@@ -294,9 +309,37 @@ def launch(run_id: int) -> None:
             _wait_for_ssh(hosts, emit, bastion=bastion)
 
             cmd = ["ansible-playbook", "-i", str(inv_file), str(playbook)]
+            # Private key selection. SLEP's managed key is the ONE key baked into
+            # every VM it builds, so for those hosts it's the reliable identity. Use
+            # the operator's chosen SSH-key credential when it's actually a valid key;
+            # if it's malformed (the classic 'error in libcrypto' → Permission denied)
+            # or absent, fall back to the managed key rather than dead-ending.
+            managed_key = keydist.managed_key_path()
+            is_infra = False
+            try:
+                is_infra = bool(db.get_infra(run["project_id"]))
+            except Exception:  # noqa: BLE001
+                is_infra = False
+            key_ready = False
             if credential and credential.get("kind") == "ssh" and credential.get("secret"):
                 _write_key(credential["secret"], key_file)
-                cmd += ["--private-key", str(key_file)]
+                if _key_loads(key_file):
+                    cmd += ["--private-key", str(key_file)]
+                    key_ready = True
+                else:
+                    emit(f"!! The SSH private key in credential "
+                         f"'{credential.get('name', '?')}' is malformed — OpenSSH can't parse it "
+                         f"(encrypted, truncated, or not an OpenSSH/PEM key). Not offering it.")
+            if not key_ready and managed_key:
+                cmd += ["--private-key", managed_key]
+                key_ready = True
+                emit("-- using SLEP's managed key (the key baked into VMs SLEP builds).")
+            # For infra VMs, also offer the managed key as a secondary identity when a
+            # (valid) operator key is primary — so a key that simply doesn't match the
+            # VM still gets in via the baked-in managed key. ssh tries each in turn.
+            extra_ssh_args = ""
+            if is_infra and managed_key and key_ready and "--private-key" in cmd and cmd[cmd.index("--private-key") + 1] != managed_key:
+                extra_ssh_args = f"-o IdentityFile={managed_key}"
             # Targeted re-run: --limit narrows to a subset of hosts, --start-at-task
             # resumes at a named task (skipping the ones that already succeeded).
             opts = pop_opts(run_id)
@@ -350,6 +393,11 @@ def launch(run_id: int) -> None:
             if not projcfg.defines(run["project_id"], "defaults", "host_key_checking"):
                 env.setdefault("ANSIBLE_HOST_KEY_CHECKING", "False")
             env.setdefault("ANSIBLE_FORCE_COLOR", "1")
+            # Offer SLEP's managed key as an extra ssh identity for infra VMs (see
+            # above): appended to every target ssh invocation, so a mismatched
+            # operator key still yields to the baked-in managed key.
+            if extra_ssh_args:
+                env["ANSIBLE_SSH_EXTRA_ARGS"] = (env.get("ANSIBLE_SSH_EXTRA_ARGS", "") + " " + extra_ssh_args).strip()
 
             # Secret -e values must not be echoed into the (viewer-readable) log.
             emit(f"== SLEP run #{run_id} · project '{project['name']}' ==")

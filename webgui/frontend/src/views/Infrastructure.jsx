@@ -488,7 +488,9 @@ function LibvirtConnect({ values, set }) {
                 try {
                   const r = await api('infra/install-hypervisor-key', { method: 'POST', json: { host: host.trim(), user: user.trim(), password: pw.trim() } })
                   setInstalling(r)
-                  if (r.public_key) setKey({ public_key: r.public_key, keyfile: (key && key.keyfile) || '' })
+                  // Point the qemu+ssh URI at the key we just installed — this is what
+                  // was missing: the key was on the host but the URI never referenced it.
+                  if (r.public_key || r.keyfile) setKey({ public_key: r.public_key || (key && key.public_key) || '', keyfile: r.keyfile || (key && key.keyfile) || '' })
                 } catch (e) { setInstalling({ ok: false, output: String(e.message || e) }) }
               })} style={{ whiteSpace: 'nowrap' }}>
               {installing === 'installing' ? 'Installing…' : '🔐 Install key with password'}

@@ -908,6 +908,26 @@ def test_infra_create_resolves_vault_password(client):
     assert "BootPass42" not in ci and "vault.boot_pw" not in ci
 
 
+def test_hypervisor_key_is_the_single_managed_key(client):
+    """'Get deploy key' / the URI keyfile / the install flow all resolve to SLEP's
+    ONE managed key (slep_ed25519) — the same key baked into VMs and used for the
+    jump hop — not a separate per-purpose hypervisor key."""
+    import backend.keydist as keydist
+    priv, pub = keydist._key_paths()
+    priv.parent.mkdir(parents=True, exist_ok=True)
+    priv.write_text("PRIV")
+    pub.write_text("ssh-ed25519 AAAAMANAGED slep-managed\n")
+    try:
+        r = client.post("/infra/hypervisor-key").json()
+        assert r["public_key"] == "ssh-ed25519 AAAAMANAGED slep-managed"
+        assert r["keyfile"] == keydist.managed_key_path() == str(priv)
+    finally:
+        # DATA_DIR is shared across tests; don't leave the managed key behind (the
+        # keydist generate-once test asserts on its absence).
+        priv.unlink(missing_ok=True)
+        pub.unlink(missing_ok=True)
+
+
 def test_install_hypervisor_key_with_password(client, monkeypatch):
     """Installing SLEP's hypervisor key with a one-time password: resolves a Vault
     ref, shells out via sshpass with the password in the env (never argv), and
@@ -941,10 +961,13 @@ def test_install_hypervisor_key_with_password(client, monkeypatch):
     r = client.post("/infra/install-hypervisor-key",
                     json={"host": "192.168.8.212", "user": "admin", "password": "vault.kvm_pw"}).json()
     assert r["ok"] is True
+    assert r["keyfile"] == "/k"          # URI can now point keyfile= at the installed key
     # Password went through the env (SSHPASS), never on the command line.
     assert captured["env"].get("SSHPASS") == "hunter2"
     assert "hunter2" not in " ".join(captured["cmd"])
     assert "admin@192.168.8.212" in captured["cmd"]
+    # The remote command grants libvirt access so qemu+ssh can manage VMs.
+    assert any("usermod -aG" in a and "libvirt" in a for a in captured["cmd"])
 
     # Unknown vault ref → rejected, not used literally.
     assert client.post("/infra/install-hypervisor-key",
