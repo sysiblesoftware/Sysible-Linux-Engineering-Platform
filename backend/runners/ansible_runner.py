@@ -241,6 +241,15 @@ def launch(run_id: int) -> None:
     inventory = db.get_inventory(run["inventory_id"]) if run.get("inventory_id") else None
     hosts = db.list_hosts(run["inventory_id"]) if run.get("inventory_id") else []
     bastion = (inventory or {}).get("bastion") or ""
+    # Fall back to the project's hypervisor jump host when the inventory itself has
+    # none — infra VMs live on the hypervisor's private network, unreachable
+    # directly. Covers inventories built before the jump host was known.
+    if not bastion and run.get("project_id"):
+        try:
+            from .. import app as _app
+            bastion = _app._project_hypervisor_bastion(run["project_id"])
+        except Exception:  # noqa: BLE001
+            bastion = ""
     credential = (
         db.get_credential(run["credential_id"], include_secret=True)
         if run.get("credential_id") else None

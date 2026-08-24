@@ -1776,6 +1776,28 @@ def _bastion_from_libvirt_uri(uri: str) -> str:
     return hostpart
 
 
+def _project_hypervisor_bastion(project_id: int) -> str:
+    """Best-effort: derive the hypervisor SSH jump host for a libvirt infra project
+    from the qemu+ssh connection URI baked into its generated Terraform on disk.
+    Lets projects created BEFORE auto-jump-host (whose infra row has no stored
+    bastion) still reach their VMs through the hypervisor — the URI is right there
+    in the project's .tf files. Returns '' for local/non-ssh or a missing URI."""
+    import re
+    workdir = db.project_dir(project_id)
+    for fn in ("variables.tf", "terraform.tfvars", "main.tf"):
+        p = workdir / fn
+        if not p.exists():
+            continue
+        try:
+            txt = p.read_text()
+        except OSError:
+            continue
+        m = re.search(r'qemu\+ssh://[^\s"\'&]+', txt)
+        if m:
+            return _bastion_from_libvirt_uri(m.group(0))
+    return ""
+
+
 @app.post("/infra/test-hypervisor")
 def infra_test_hypervisor(body: dict = Body(...), user: str = Depends(current_user)):
     """Probe a libvirt (KVM/QEMU) hypervisor connection before applying — runs a
@@ -2145,10 +2167,13 @@ def _build_infra_inventory(project, meta, target_inventory_id=None):
     if meta.get("inventory_id") != iid:
         db.set_infra_inventory(project["id"], iid)
     # Reach the VMs through the hypervisor jump host: they're on its private NAT
-    # network, which SLEP can't route to directly. Set it on the inventory when it
-    # has none of its own, so Ansible/Salt hop through the hypervisor.
-    hv_bastion = (meta.get("bastion") or "").strip()
+    # network, which SLEP can't route to directly. Use the stored bastion, or —
+    # for projects created before auto-jump-host — derive it from the project's
+    # Terraform URI and remember it. Set it on the inventory when it has none.
+    hv_bastion = (meta.get("bastion") or "").strip() or _project_hypervisor_bastion(project["id"])
     if hv_bastion:
+        if not (meta.get("bastion") or "").strip():
+            db.set_infra_bastion(project["id"], hv_bastion)
         inv_row = db.get_inventory(iid)
         if inv_row and not (inv_row.get("bastion") or "").strip():
             db.set_inventory_bastion(iid, hv_bastion)

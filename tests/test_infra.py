@@ -635,6 +635,30 @@ def test_project_level_jump_host_propagates_to_inventories(client, monkeypatch):
     assert client.patch(f"/infra/{pid}", json={"bastion": "admin@192.168.300.1"}).status_code == 400
 
 
+def test_existing_project_derives_jump_host_from_terraform(client, monkeypatch):
+    """A project created before auto-jump-host (no stored bastion) still derives the
+    hypervisor jump host from the qemu+ssh URI in its Terraform, and the built
+    inventory + the ansible run pick it up."""
+    import backend.app as appmod
+    import backend.db as db
+    pid = client.post("/infra", json={"name": "old", "provider": "libvirt",
+                                      "options": {"count": 1, "base_image": "x",
+                                                  "uri": "qemu+ssh://admin@192.168.8.212/system?keyfile=/k&no_verify=1"}}).json()["project_id"]
+    # Simulate a pre-fix project: clear the stored bastion the create just set.
+    db.set_infra_bastion(pid, "")
+    assert appmod._project_hypervisor_bastion(pid) == "admin@192.168.8.212"
+
+    class Out:
+        returncode = 0
+        stdout = '{"sysible_hosts":{"value":[{"name":"vm-1","ip":"192.168.100.9","user":"clouduser"}]}}'
+        stderr = ""
+    monkeypatch.setattr(appmod.subprocess, "run", lambda *a, **k: Out())
+    iid, _n, _c = appmod._autobuild_infra_inventory(pid)
+    # The build derives + persists the jump host onto both the infra row and the inventory.
+    assert db.get_infra(pid)["bastion"] == "admin@192.168.8.212"
+    assert db.get_inventory(iid)["bastion"] == "admin@192.168.8.212"
+
+
 def test_local_libvirt_sets_no_jump_host(client):
     """A local hypervisor (qemu:///system) needs no jump host — the bastion stays
     empty rather than pointing at a non-routable address."""
