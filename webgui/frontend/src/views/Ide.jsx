@@ -922,7 +922,22 @@ export function RunModal({ project, currentFile, onClose, onLaunched, initial })
   // the modal opened (e.g. in Infrastructure) shows up without reopening.
   const loadInvs = () => api('inventories').then((d) => { setInvs(d.inventories); setInv((cur) => cur || (d.inventories[0] ? String(d.inventories[0].id) : '')) })
   useEffect(() => { loadInvs() }, [])
-  useEffect(() => { api('credentials').then((d) => setCreds(d.credentials)) }, [])
+  // Default the SSH credential to the ACCOUNT this project's VMs were built with —
+  // the deploy credential set in ⚙ Access (or SLEP's managed key) — so Ansible and
+  // Salt authenticate as the same account cloud-init created, with no re-picking.
+  useEffect(() => {
+    api('credentials').then((d) => {
+      setCreds(d.credentials)
+      if (ini.credential_id || !project?.id) return
+      api('infra').then((f) => {
+        const row = (f.infra || []).find((x) => x.project_id === project.id)
+        if (!row) return
+        const managed = (d.credentials || []).find((c) => c.name === 'SLEP managed key')
+        const def = row.login_credential_id || row.deploy_credential_id || (managed && managed.id)
+        if (def) setCred((cur) => cur || String(def))
+      }).catch(() => {})
+    })
+  }, [])   // eslint-disable-line
   useEffect(() => { if (project?.id) api(`projects/${project.id}/files`)
     .then((d) => setFiles((d.files || []).filter((f) => f.type === 'file').map((f) => f.path))).catch(() => {}) }, [project?.id])
   const targetFiles = files.filter((p) => (engine === 'salt' ? p.endsWith('.sls') : (p.endsWith('.yml') || p.endsWith('.yaml'))))
@@ -1073,7 +1088,23 @@ export function PipelineModal({ project, currentFile, initialSteps, initialName,
   const loadInvs = () => api('inventories').then((d) => { setInvs(d.inventories)
     setSteps((s) => s.map((st) => ({ ...st, inventory_id: st.inventory_id || (d.inventories[0] ? String(d.inventories[0].id) : '') }))) })
   useEffect(() => { loadInvs() }, [])
-  useEffect(() => { api('credentials').then((d) => setCreds(d.credentials)) }, [])
+  // Default each Ansible/Salt step's credential to the account this project's VMs
+  // were built with (⚙ Access deploy credential, or SLEP's managed key), so the
+  // whole cadence authenticates as one account with no per-step re-picking.
+  useEffect(() => {
+    api('credentials').then((d) => {
+      setCreds(d.credentials)
+      if (!project?.id) return
+      api('infra').then((f) => {
+        const row = (f.infra || []).find((x) => x.project_id === project.id)
+        if (!row) return
+        const managed = (d.credentials || []).find((c) => c.name === 'SLEP managed key')
+        const def = row.login_credential_id || row.deploy_credential_id || (managed && managed.id)
+        if (def) setSteps((s) => s.map((st) => (st.kind === 'ansible' || st.kind === 'salt')
+          ? { ...st, credential_id: st.credential_id || String(def) } : st))
+      }).catch(() => {})
+    })
+  }, [])   // eslint-disable-line
   useEffect(() => { if (project?.id) api(`projects/${project.id}/files`)
     .then((d) => setFiles((d.files || []).filter((f) => f.type === 'file').map((f) => f.path))).catch(() => {}) }, [project?.id])
   // Files that make sense as a run target for each engine — playbooks for Ansible,

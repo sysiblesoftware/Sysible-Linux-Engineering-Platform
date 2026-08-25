@@ -1532,3 +1532,24 @@ def test_infra_has_password_flag_no_ciphertext_leak(client):
     client.patch(f"/infra/{pid}", json={"ssh_password": "admin_pass"})
     row = next(r for r in client.get("/infra").json()["infra"] if r["project_id"] == pid)
     assert row["has_password"] is True and "ssh_password_enc" not in row
+
+
+def test_access_creates_login_credential_for_runs(client):
+    """Setting a login user + password in Access maintains a single password
+    credential (username+password) that runs use — the Controller model (login +
+    controlled sudo)."""
+    import backend.db as db
+    pid = client.post("/infra", json={"name": "Apps", "provider": "libvirt",
+                                      "options": {"count": 1, "base_image": "x", "ssh_user": "admin"}}).json()["project_id"]
+    client.patch(f"/infra/{pid}", json={"ssh_password": "admin_pass"})
+    row = db.get_infra(pid)
+    lcid = row["login_credential_id"]
+    assert lcid
+    cred = db.get_credential(lcid, include_secret=True)
+    assert cred["kind"] == "ssh_password" and cred["username"] == "admin" and cred["secret"] == "admin_pass"
+    # It shows in the credentials list (so runs can select it) and is the run default.
+    names = [c["name"] for c in client.get("/credentials").json()["credentials"]]
+    assert any("login" in n for n in names)
+    # Changing the user updates the same credential in place.
+    client.patch(f"/infra/{pid}", json={"ssh_user": "ansible"})
+    assert db.get_credential(lcid, include_secret=True)["username"] == "ansible"

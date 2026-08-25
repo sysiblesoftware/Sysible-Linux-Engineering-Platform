@@ -2447,6 +2447,25 @@ def _resolve_secret_ref(value: str) -> str:
     return "" if m else s
 
 
+def _sync_login_credential(project_id: int):
+    """Keep a single 'login account' credential (username + password) for this infra
+    project in step with ⚙ Access — the Controller model: one local account used to
+    log in AND for controlled sudo. A password credential carries BOTH ansible_password
+    and ansible_become_password, so Ansible/Salt authenticate and sudo as that account.
+    Created/updated when a user + password are set; nothing happens without a password
+    (key-only projects keep using the key credential)."""
+    meta = db.get_infra(project_id) or {}
+    user = (meta.get("ssh_user") or "").strip()
+    password = _infra_login_password(meta)
+    proj = db.get_project(project_id)
+    if not (user and password and proj):
+        return
+    name = f"{proj['name']} — login"
+    cid = db.upsert_credential(name, kind="ssh_password", username=user, secret=password)
+    db.set_infra_login_credential(project_id, cid)
+    return cid
+
+
 def _infra_login_password(meta: dict) -> str:
     """The VMs' login plaintext password for SLEP's own use (Fix SSH / reachability),
     from whatever was stored: the encrypted copy first (covers a literal too), else
@@ -2617,6 +2636,8 @@ def infra_create(body: dict = Body(...), user: str = Depends(require_operator)):
     _pw_plain = str(options.get("ssh_password") or "").strip()
     if _pw_plain:
         db.set_infra_ssh_password_enc(pid, vault.encrypt(_pw_plain))
+    # Auto-maintain the login-account credential (username + password) so runs use it.
+    _sync_login_credential(pid)
     # If the VMs land in an inventory that has no jump host yet, give it the
     # hypervisor as one so Ansible/Salt hop through it (no-op when there's none).
     if hv_bastion and inv_target:
@@ -2982,6 +3003,10 @@ def infra_update(project_id: int, body: dict = Body(...), user: str = Depends(re
             db.set_infra_ssh_password_enc(project_id, vault.encrypt(pw))
             db.log_audit("infra_ssh_password_set", user,
                          f"project #{project_id} ({'vault' if raw != pw else 'literal'})")
+    # Keep the single login-account credential (username + password) in step, so
+    # Ansible/Salt authenticate + sudo as that account (the Controller model).
+    if "ssh_user" in body or "ssh_password" in body:
+        _sync_login_credential(project_id)
     if "deploy_credential_id" in body or "deploy_public_key" in body:
         # The key baked into the VMs, from EITHER a stored SSH credential (pick from
         # the Credentials tab) OR a literal public key pasted in Access. Setting one

@@ -319,6 +319,11 @@ def init_db() -> None:
         # stored credential) — baked into the VMs' cloud-init so its holder can log in.
         if "deploy_public_key" not in infra_cols:
             c.execute("ALTER TABLE infra ADD COLUMN deploy_public_key TEXT DEFAULT ''")
+        # The auto-maintained password credential for the project's login account
+        # (username + password from ⚙ Access) — the Controller-style single account
+        # used to log in AND for controlled sudo. Ansible/Salt default to it.
+        if "login_credential_id" not in infra_cols:
+            c.execute("ALTER TABLE infra ADD COLUMN login_credential_id INTEGER")
         # Multi-tenancy: every owned resource carries an org_id. Add the column
         # where missing, then adopt any orphaned rows + existing users into a
         # 'Default' organization so pre-tenancy installs keep working unchanged.
@@ -698,6 +703,12 @@ def set_infra_deploy_public_key(project_id, pubkey):
     credential). Empty clears it."""
     with _connect() as c:
         c.execute("UPDATE infra SET deploy_public_key=? WHERE project_id=?", (pubkey or "", project_id))
+
+
+def set_infra_login_credential(project_id, credential_id):
+    """Point the infra at its auto-maintained login (username+password) credential."""
+    with _connect() as c:
+        c.execute("UPDATE infra SET login_credential_id=? WHERE project_id=?", (credential_id, project_id))
 
 
 def list_infra():
