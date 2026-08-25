@@ -1197,3 +1197,29 @@ def test_orphan_domain_parse_and_delete(tmp_path, monkeypatch):
     assert any(c[-2:] == ["destroy", "app-1"] or ("destroy" in c and "app-1" in c) for c in calls)
     assert any("undefine" in c for c in calls)
     assert not any("--remove-all-storage" in c for c in calls)
+
+
+def test_cleanup_empty_infra_inventory_on_failed_apply(client):
+    """A failed apply removes the project's EMPTY infra inventory (so retries don't
+    pile up doubles) but keeps one that already has hosts."""
+    from backend.runners import terraform_runner as tr
+    import backend.db as db
+    msgs = []
+    emit = lambda m: msgs.append(m)
+    # Empty infra inventory → removed, and the infra ref is cleared.
+    pid = client.post("/infra", json={"name": "clean", "provider": "libvirt",
+                                      "options": {"count": 1, "base_image": "x"}}).json()["project_id"]
+    iid = db.create_inventory("clean (VMs)", project_id=pid, source="infra")
+    db.set_infra_inventory(pid, iid)
+    assert tr._cleanup_empty_infra_inventory(pid, emit) is True
+    assert db.get_inventory(iid) is None
+    assert (db.get_infra(pid) or {}).get("inventory_id") in (None, 0)
+
+    # An inventory WITH hosts is left alone.
+    pid2 = client.post("/infra", json={"name": "keep", "provider": "libvirt",
+                                       "options": {"count": 1, "base_image": "x"}}).json()["project_id"]
+    iid2 = db.create_inventory("keep (VMs)", project_id=pid2, source="infra")
+    db.set_infra_inventory(pid2, iid2)
+    db.upsert_host(iid2, "vm-1", "10.0.0.5", source="infra")
+    assert tr._cleanup_empty_infra_inventory(pid2, emit) is False
+    assert db.get_inventory(iid2) is not None

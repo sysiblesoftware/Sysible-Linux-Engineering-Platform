@@ -151,6 +151,29 @@ def _delete_libvirt_domains(project_id: int, names: list[str], emit) -> bool:
     return any_ok
 
 
+def _cleanup_empty_infra_inventory(project_id: int, emit) -> bool:
+    """After a FAILED Create-Infrastructure apply, delete this project's inventory if
+    it was created for the provision but never got hosts (the apply died before any
+    VM came up) — so retrying doesn't pile up empty "double" inventories. Strictly
+    bounded: only an EMPTY, infra-sourced inventory is removed; one already holding
+    hosts from a prior good apply is left untouched. Returns True if it deleted one."""
+    try:
+        meta = db.get_infra(project_id)
+        iid = (meta or {}).get("inventory_id")
+        if not iid:
+            return False
+        inv = db.get_inventory(iid)
+        if inv and inv.get("source") == "infra" and not db.list_hosts(iid):
+            db.delete_inventory(iid)
+            db.set_infra_inventory(project_id, None)
+            emit(f"\n-- SLEP: removed the empty inventory “{inv.get('name')}” (#{iid}) — "
+                 f"the apply failed before any VM came up, so it had no hosts to keep.")
+            return True
+    except Exception:  # noqa: BLE001 — never let cleanup mask the real failure
+        pass
+    return False
+
+
 def _libvirt_uri_for(project_id: int) -> str:
     """The project's libvirt connection URI (from app), or '' if unavailable."""
     try:
@@ -386,6 +409,11 @@ def launch(run_id: int) -> None:
                              f"re-run the Ansible/Salt step (or the '→ Inventory' action).")
             except Exception:  # noqa: BLE001 — never fail the apply over this
                 pass
+
+        # A Create-Infrastructure apply that FAILED: drop an inventory that was
+        # created for this provision but never got hosts (see _cleanup_empty_infra_inventory).
+        if action == "apply" and rc != 0:
+            _cleanup_empty_infra_inventory(run["project_id"], emit)
 
         emit(f"\n== finished: exit code {rc} ==")
         db.set_run_status(run_id, "success" if rc == 0 else "failed",
