@@ -318,6 +318,30 @@ def probe_cmd(bastion: str, target: str, *, keyfile: str = "", sshpass: str = ""
     return _pw_cmd(sshpass, bastion, target, PROBE_REMOTE)
 
 
+def run_on_host_cmd(host: str, remote: str):
+    """argv to SSH directly TO `host` (user@host[:port]) with SLEP's managed key and
+    run `remote` there — used to run diagnostics ON the hypervisor (libguestfs can't
+    read a remote domain's disk over qemu+ssh, so virt-cat must run on the host).
+    Returns None when there's no managed key."""
+    mk = managed_key_path()
+    if not mk:
+        return None
+    user = ""
+    rest = host or ""
+    if "@" in rest:
+        user, rest = rest.split("@", 1)
+    port = ""
+    if ":" in rest:
+        h, p = rest.rsplit(":", 1)
+        if p.isdigit():
+            rest, port = h, p
+    dest = (f"{user}@" if user else "") + rest
+    opts = [*_HOSTKEY, "-o", "ConnectTimeout=20", "-o", "BatchMode=yes", "-i", mk]
+    if port:
+        opts += ["-p", port]
+    return ["ssh", *opts, dest, remote]
+
+
 def parse_probe(stdout: str) -> tuple[str, str]:
     """Pull (login_user, cloud_init_line) out of a PROBE_REMOTE stdout."""
     who, ci = "", ""

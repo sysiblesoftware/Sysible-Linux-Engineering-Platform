@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import secrets
 import subprocess
 import threading
@@ -3043,6 +3044,101 @@ def infra_test_auth(project_id: int, body: dict = Body(default={}), user: str = 
     db.log_audit("infra_test_auth", user, f"project #{project_id} via {label}: {n_ok}/{len(results)} ok")
     return {"results": results, "note": note, "method": method, "label": label, "bastion": bastion,
             "ok": n_ok, "total": len(results)}
+
+
+_SAFE_ID = re.compile(r"[^A-Za-z0-9_.-]")
+
+
+def _diag_remote_script(domain: str, vmuser: str) -> str:
+    """A read-only shell script run ON the hypervisor to inspect one VM's disk with
+    libguestfs (virt-cat) — no VM login needed. Reports domain state, whether cloud-init
+    is present and ran, and whether the login account exists with a password."""
+    d = _SAFE_ID.sub("", domain)
+    u = _SAFE_ID.sub("", vmuser) or "root"
+    return (
+        f"d='{d}'; u='{u}'; "
+        "printf 'STATE='; (virsh domstate \"$d\" 2>/dev/null || sudo -n virsh domstate \"$d\" 2>/dev/null || echo unknown) | head -1; "
+        "if ! command -v virt-cat >/dev/null 2>&1; then echo VIRTCAT=missing; exit 0; fi; "
+        "vc(){ virt-cat -d \"$d\" \"$1\" 2>/dev/null || sudo -n virt-cat -d \"$d\" \"$1\" 2>/dev/null; }; "
+        "if ! vc /etc/hostname >/dev/null 2>&1; then echo ACCESS=denied; exit 0; fi; "
+        "if vc /etc/cloud/cloud.cfg >/dev/null 2>&1; then echo CLOUDINIT=present; else echo CLOUDINIT=absent; fi; "
+        "if vc /var/lib/cloud/data/result.json >/dev/null 2>&1 || vc /var/lib/cloud/data/status.json >/dev/null 2>&1; then echo RAN=yes; else echo RAN=no; fi; "
+        "sl=$(vc /etc/shadow 2>/dev/null | grep \"^$u:\"); "
+        "if printf '%s\\n' \"$sl\" | grep -q \"^$u:[$]\"; then echo ACCT=haspass; elif [ -n \"$sl\" ]; then echo ACCT=locked; else echo ACCT=absent; fi; "
+        "vc /var/log/cloud-init.log 2>/dev/null | tail -4 | sed 's/^/LOG /'"
+    )
+
+
+def _diag_note(r: dict) -> str:
+    """Turn a parsed per-VM diagnosis into one plain-English sentence."""
+    if r.get("virtcat") == "missing":
+        return "Can't diagnose — install libguestfs-tools on the hypervisor (apt-get install -y libguestfs-tools)."
+    if r.get("access") == "denied":
+        return "Couldn't read the VM's disk on the hypervisor — the jump-host login needs sudo/root or libvirt access there."
+    if r.get("cloud_init") == "absent":
+        return "This base image has no cloud-init — so the account, password and keys SLEP configured were never applied. Rebuild from an Ubuntu cloud image."
+    if r.get("cloud_init") == "present" and r.get("ran") == "no":
+        return "cloud-init is installed but hasn't run — the NoCloud datasource is likely disabled on this image (datasource_list: [None])."
+    if r.get("account") == "absent":
+        return "cloud-init ran but the login account wasn't created — check the account name matches."
+    if r.get("account") == "locked":
+        return "The account exists but has no usable password (locked) — key login should work; for password login, set one and re-apply."
+    if r.get("account") == "haspass":
+        return "cloud-init created the account with a password. If login still fails, the password you're typing differs from the one configured, or sshd isn't up yet."
+    return "Inconclusive — see the cloud-init log lines."
+
+
+@app.post("/infra/{project_id}/diagnose")
+def infra_diagnose(project_id: int, user: str = Depends(require_operator)):
+    """Diagnose why a project's VMs are unreachable WITHOUT logging into them: SSH to
+    the hypervisor with SLEP's managed key and read each VM's disk with libguestfs
+    (virt-cat) — reporting whether cloud-init is present, whether it ran, and whether
+    the login account exists with a password. This is the ground truth behind
+    'password rejected at the console' / 'tunnel closed before login'."""
+    meta = db.get_infra(project_id)
+    if not meta:
+        raise HTTPException(status_code=404, detail="Not an infrastructure project.")
+    if (meta.get("provider") or "") != "libvirt":
+        return {"results": [], "note": "Disk diagnosis is only available for libvirt projects."}
+    iid = meta.get("inventory_id")
+    hosts = db.list_hosts(iid) if iid else []
+    if not hosts:
+        return {"results": [], "note": "No VMs in this project's inventory yet — apply first, then '→ Inventory'."}
+    bastion = (db.get_inventory(iid) or {}).get("bastion") or _project_hypervisor_bastion(project_id)
+    if not bastion:
+        return {"results": [], "note": ("No hypervisor SSH host is known for this project. Set the jump host (the "
+                                        "hypervisor) under ⚙ Access, then diagnose again.")}
+    if not keydist.managed_key_path():
+        return {"results": [], "note": "SLEP has no managed key. Reset it under Credentials, then run 'Prepare jump host'."}
+    results = []
+    for h in hosts:
+        vmuser = (h.get("variables") or {}).get("ansible_user") or meta.get("ssh_user") or "root"
+        cmd = keydist.run_on_host_cmd(bastion, _diag_remote_script(h["name"], vmuser))
+        r = {"name": h["name"], "ip": h["address"], "state": "", "cloud_init": "",
+             "ran": "", "account": "", "log": [], "virtcat": "", "access": ""}
+        if not cmd:
+            r["note"] = "No managed key."; results.append(r); continue
+        try:
+            p = subprocess.run(cmd, capture_output=True, text=True, timeout=45)
+            for ln in (p.stdout or "").splitlines():
+                if ln.startswith("STATE="): r["state"] = ln[6:].strip()
+                elif ln.startswith("CLOUDINIT="): r["cloud_init"] = ln[10:].strip()
+                elif ln.startswith("RAN="): r["ran"] = ln[4:].strip()
+                elif ln.startswith("ACCT="): r["account"] = ln[5:].strip()
+                elif ln.startswith("VIRTCAT="): r["virtcat"] = ln[8:].strip()
+                elif ln.startswith("ACCESS="): r["access"] = ln[7:].strip()
+                elif ln.startswith("LOG "): r["log"].append(ln[4:])
+            if p.returncode != 0 and not any([r["state"], r["cloud_init"], r["virtcat"], r["access"]]):
+                r["note"] = "Couldn't reach the hypervisor over SSH — " + keydist._err_line(p, has_bastion=False)
+            else:
+                r["note"] = _diag_note(r)
+        except subprocess.TimeoutExpired:
+            r["note"] = "Timed out reading the VM's disk on the hypervisor."
+        except Exception as e:  # noqa: BLE001
+            r["note"] = str(e)
+        results.append(r)
+    db.log_audit("infra_diagnose", user, f"project #{project_id}: {len(results)} VM(s)")
+    return {"results": results, "note": "", "bastion": bastion}
 
 
 @app.post("/infra/{project_id}/inventory")

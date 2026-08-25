@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import { api, canWrite } from '../api.js'
 import { PipelineModal } from './Ide.jsx'
-import { JumpHostEditor, EnrollPicker, VmsModal, TestAuthModal } from './Infrastructure.jsx'
+import { JumpHostEditor, EnrollPicker, VmsModal, TestAuthModal, DiagnoseModal } from './Infrastructure.jsx'
 
 // The infrastructure lifecycle actions (Plan/Apply/Destroy, → Inventory, Access,
 // Enroll, Configure/Maintain, Cadence) for ONE infra project — the workflow that
@@ -13,7 +13,7 @@ import { JumpHostEditor, EnrollPicker, VmsModal, TestAuthModal } from './Infrast
 
 // Build the handler set + the [label, fn, class, title] action list for an infra
 // row `r`, wired to the given modal setters / callbacks.
-function buildActions(r, { controllers, setPipe, setVms, setEnrollFor, setJumpFor, setTestFor, onOpenRun, onOpenProject, refresh }) {
+function buildActions(r, { controllers, setPipe, setVms, setEnrollFor, setJumpFor, setTestFor, setDiagFor, onOpenRun, onOpenProject, refresh }) {
   const openProj = (extra) => onOpenProject &&
     onOpenProject({ id: r.project_id, name: r.project_name, slug: r.project_slug, ...extra })
   const run = async (target) => {
@@ -80,6 +80,7 @@ function buildActions(r, { controllers, setPipe, setVms, setEnrollFor, setJumpFo
     ['VMs', listVms, 'ghost', "List the VMs on this project's hypervisor"],
     ['Inventory', toInventory, 'ghost', 'Read the applied VMs into a SLEP inventory'],
     ['Test login', () => setTestFor(r), 'ghost', 'Test whether a key or password authenticates to the VMs through the jump host (read-only)'],
+    ['Diagnose', () => setDiagFor(r), 'ghost', 'Read each VM\'s disk on the hypervisor to see if cloud-init ran and the account exists (no VM login)'],
     ['Fix SSH', fixSsh, 'ghost', "Install SLEP's current key on the VMs over the password login (repairs key drift, no rebuild)"],
     ['Access', () => setJumpFor(r), 'ghost', 'Login user, password (Vault) and jump host'],
     ['Enroll', () => enroll(), 'primary', 'Register the applied VMs into a Controller'],
@@ -97,8 +98,9 @@ function useInfraModals({ onOpenRun, refresh }) {
   const [enrollFor, setEnrollFor] = useState(null)
   const [jumpFor, setJumpFor] = useState(null)
   const [testFor, setTestFor] = useState(null)
+  const [diagFor, setDiagFor] = useState(null)
   useEffect(() => { api('controllers').then((d) => setControllers(d.controllers || [])).catch(() => {}) }, [])
-  const enrollPick = enrollFor && buildActions(enrollFor, { controllers, setPipe, setVms, setEnrollFor, setJumpFor, setTestFor, onOpenRun, refresh })[0].enroll
+  const enrollPick = enrollFor && buildActions(enrollFor, { controllers, setPipe, setVms, setEnrollFor, setJumpFor, setTestFor, setDiagFor, onOpenRun, refresh })[0].enroll
   const modals = (
     <>
       {pipe && <PipelineModal project={pipe.project} initialSteps={pipe.steps}
@@ -109,9 +111,10 @@ function useInfraModals({ onOpenRun, refresh }) {
       {jumpFor && <JumpHostEditor r={jumpFor} onClose={() => setJumpFor(null)}
         onSaved={() => { setJumpFor(null); refresh && refresh() }} />}
       {testFor && <TestAuthModal r={testFor} onClose={() => setTestFor(null)} />}
+      {diagFor && <DiagnoseModal r={diagFor} onClose={() => setDiagFor(null)} />}
     </>
   )
-  return { controllers, setPipe, setVms, setEnrollFor, setJumpFor, setTestFor, modals }
+  return { controllers, setPipe, setVms, setEnrollFor, setJumpFor, setTestFor, setDiagFor, modals }
 }
 
 // Bar on top of the IDE. Fetches this project's infra row; renders nothing for a

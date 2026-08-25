@@ -294,6 +294,59 @@ export function TestAuthModal({ r, onClose }) {
   )
 }
 
+// Ground-truth diagnosis WITHOUT logging into the VMs: SLEP SSHes to the hypervisor
+// with its managed key and reads each VM's disk (virt-cat) to report whether
+// cloud-init is present, whether it ran, and whether the login account exists with a
+// password. This is what settles "password rejected at the console" / "tunnel closed".
+export function DiagnoseModal({ r, onClose }) {
+  const [busy, setBusy] = useState(false)
+  const [res, setRes] = useState(null)
+  const [open, setOpen] = useState({})
+  const { wrap, node } = useErr()
+  const run = () => wrap(async () => {
+    setBusy(true); setRes(null)
+    try { setRes(await api(`infra/${r.project_id}/diagnose`, { method: 'POST' })) }
+    finally { setBusy(false) }
+  })
+  useEffect(() => { run() }, [])   // eslint-disable-line
+  const badge = (label, val, good) => <span style={{ color: good ? 'var(--green-bright)' : 'var(--danger)' }}>{label}: {val || '—'}</span>
+  return (
+    <Modal title={`Diagnose VMs — ${r.project_name}`} onClose={onClose} wide>
+      <p className="muted" style={{ marginTop: 0 }}>
+        Reads each VM's disk on the hypervisor (no VM login) to find out whether cloud-init ran and the login account exists. Needs <span className="mono">libguestfs-tools</span> on the hypervisor.
+      </p>
+      {node}
+      <div className="row" style={{ marginBottom: 10 }}>
+        <button className="ghost sm" disabled={busy} onClick={run}>{busy ? 'Diagnosing…' : 'Re-run'}</button>
+      </div>
+      {res && (res.note ? <div className="muted" style={{ whiteSpace: 'pre-wrap' }}>{res.note}</div> : (
+        <div className="col" style={{ gap: 10 }}>
+          {(res.results || []).map((h) => (
+            <div key={h.name} style={{ border: '1px solid var(--border)', borderRadius: 8, padding: '8px 10px' }}>
+              <div className="row" style={{ justifyContent: 'space-between' }}>
+                <b className="mono">{h.name}</b>
+                <span className="faint" style={{ fontSize: 11 }}>{h.state ? `domain: ${h.state}` : ''}</span>
+              </div>
+              <div className="row" style={{ gap: 14, fontSize: 12.5, margin: '4px 0' }}>
+                {badge('cloud-init', h.cloud_init, h.cloud_init === 'present')}
+                {h.cloud_init === 'present' && badge('ran', h.ran, h.ran === 'yes')}
+                {badge('account', h.account, h.account === 'haspass')}
+              </div>
+              <div style={{ fontSize: 12.5, color: /rebuild|no cloud-init|didn.t|needs|install|Timed|Couldn/i.test(h.note || '') ? 'var(--danger)' : 'var(--text)' }}>{h.note}</div>
+              {h.log && h.log.length > 0 && (
+                <div style={{ marginTop: 4 }}>
+                  <button className="ghost sm" onClick={() => setOpen((o) => ({ ...o, [h.name]: !o[h.name] }))}>{open[h.name] ? 'Hide' : 'Show'} cloud-init log</button>
+                  {open[h.name] && <pre className="mono" style={{ fontSize: 11, whiteSpace: 'pre-wrap', background: 'var(--bg-soft, rgba(0,0,0,0.15))', padding: 8, borderRadius: 6, marginTop: 4 }}>{h.log.join('\n')}</pre>}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      ))}
+    </Modal>
+  )
+}
+
 // The Sysible lifecycle cadence: create the machines (Terraform/OpenTofu), then
 // configure them (Ansible), then keep them in a known state over time (Salt).
 // Shown as a guide so the recommended flow is obvious from the Infrastructure page.
