@@ -279,6 +279,39 @@ def _install_cmd(pubkey: str) -> str:
             "echo SLEP_KEY_OK")
 
 
+# A read-only probe run after a successful login: report who we are and whether
+# cloud-init is even present on the VM. A missing/failed cloud-init is the usual
+# reason a password or key baked into the image never took, so surfacing it turns
+# a bare "login refused" into an actionable diagnosis.
+PROBE_REMOTE = (
+    "printf 'SLEP_AUTH_OK '; id -un 2>/dev/null || whoami 2>/dev/null; "
+    "if command -v cloud-init >/dev/null 2>&1; then "
+    "printf 'cloud-init: '; (cloud-init status 2>/dev/null | head -1 || echo '(status unavailable)'); "
+    "else echo 'cloud-init: not installed'; fi"
+)
+
+
+def probe_cmd(bastion: str, target: str, *, keyfile: str = "", sshpass: str = "") -> list[str]:
+    """Build a non-mutating SSH probe (PROBE_REMOTE) to `target` through `bastion`,
+    authenticating with a key (`keyfile`) or a password (`sshpass` binary, password
+    fed via the SSHPASS env by the caller)."""
+    if keyfile:
+        return _key_cmd(bastion, keyfile, target, PROBE_REMOTE)
+    return _pw_cmd(sshpass, bastion, target, PROBE_REMOTE)
+
+
+def parse_probe(stdout: str) -> tuple[str, str]:
+    """Pull (login_user, cloud_init_line) out of a PROBE_REMOTE stdout."""
+    who, ci = "", ""
+    for ln in (stdout or "").splitlines():
+        s = ln.strip()
+        if s.startswith("SLEP_AUTH_OK"):
+            who = s[len("SLEP_AUTH_OK"):].strip()
+        elif s.lower().startswith("cloud-init"):
+            ci = s
+    return who, ci
+
+
 def _run_distribute(inventory_id: int, only: set, username: str, password: str, bastion: str):
     log = _log_path(inventory_id)
     ok_hosts, fail_hosts = [], []

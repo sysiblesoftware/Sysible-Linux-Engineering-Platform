@@ -41,11 +41,11 @@ export default function Infrastructure({ onOpenProject }) {
       </div>
       <div className="muted" style={{ marginBottom: 12 }}>
         The machines SLEP has built, and their live status. Infrastructure lives inside a project:
-        open a project and use <b>☁ Build infra</b> to create it, then the lifecycle actions
+        open a project and use <b>Build infra</b> to create it, then the lifecycle actions
         (apply, configure, maintain, enroll) appear on top of the IDE and on the project’s row&nbsp;⋯ menu.
       </div>
       {rows.length === 0 ? (
-        <div className="muted">No infrastructure yet. Create a project in <b>Projects</b>, open it, and click <b>☁ Build infra</b>.</div>
+        <div className="muted">No infrastructure yet. Create a project in <b>Projects</b>, open it, and click <b>Build infra</b>.</div>
       ) : (
         <table>
           <thead><tr><th>Name</th><th>Provider</th><th>VMs on hypervisor</th><th>Jump host</th><th>Enroll target</th></tr></thead>
@@ -116,7 +116,7 @@ export function JumpHostEditor({ r, onClose, onSaved }) {
         borderRadius: 8, padding: '8px 10px', margin: '10px 0 2px', fontSize: 12, color: 'var(--warn, #e0a83a)' }}>
         ⚠ These settings take effect when a VM is <b>built</b>. Existing VMs keep the account they were created
         with — <b>re-apply</b> (Destroy → Apply, or Apply if the name changed) to rebuild them with these, or use
-        <b> 🔑 Fix SSH</b> if you can still log in.
+        <b> Fix SSH</b> if you can still log in.
       </div>
       {node}
       <div className="row" style={{ marginTop: 12, justifyContent: 'flex-end' }}>
@@ -182,6 +182,103 @@ export function VmsModal({ data, onClose }) {
             </table>
           ) : <div className="muted">No domains defined on this hypervisor.</div>}
       <div className="faint" style={{ fontSize: 11.5, marginTop: 8 }}>Read-only <span className="mono">virsh list --all</span> against this project's connection URI.</div>
+    </Modal>
+  )
+}
+
+// Test whether a key or a password actually logs in to this project's VMs THROUGH
+// the jump host — a read-only probe (nothing on the VMs changes). Also reports who
+// you logged in as and whether cloud-init is present, so a "login refused" turns
+// into a real diagnosis (e.g. the base image has no cloud-init, so the baked-in
+// account never got created).
+export function TestAuthModal({ r, onClose }) {
+  const [method, setMethod] = useState('key')
+  const [creds, setCreds] = useState([])
+  const [credId, setCredId] = useState('')
+  const [password, setPassword] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [res, setRes] = useState(null)
+  const { wrap, node } = useErr()
+  useEffect(() => { api('credentials').then((d) => setCreds((d.credentials || []).filter((c) => c.kind === 'ssh' || c.kind === 'ssh_password'))).catch(() => {}) }, [])
+  const keyCreds = creds.filter((c) => c.kind === 'ssh')
+  const pwCreds = creds.filter((c) => c.kind === 'ssh_password')
+  const run = () => wrap(async () => {
+    setBusy(true); setRes(null)
+    try {
+      const json = { method }
+      if (credId) json.credential_id = Number(credId)
+      if (method === 'password' && password) json.password = password
+      const d = await api(`infra/${r.project_id}/test-auth`, { method: 'POST', json })
+      setRes(d)
+    } finally { setBusy(false) }
+  })
+  return (
+    <Modal title={`Test VM login — ${r.project_name}`} onClose={onClose} wide>
+      <p className="muted" style={{ marginTop: 0 }}>
+        Check whether a key or password authenticates to the VMs {r.bastion ? <>through the jump host <span className="mono">{r.bastion}</span></> : '(no jump host set)'} — read-only, nothing on the VMs is changed.
+      </p>
+      <Field label="What to test">
+        <select value={method} onChange={(e) => { setMethod(e.target.value); setCredId('') }}>
+          <option value="key">A key</option>
+          <option value="password">A password</option>
+        </select>
+      </Field>
+      {method === 'key' ? (
+        <Field label="Key">
+          <select value={credId} onChange={(e) => setCredId(e.target.value)}>
+            <option value="">SLEP managed key (the one baked into the VMs)</option>
+            {keyCreds.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+          </select>
+        </Field>
+      ) : (
+        <>
+          <Field label="Password credential">
+            <select value={credId} onChange={(e) => { setCredId(e.target.value); if (e.target.value) setPassword('') }}>
+              <option value="">— the project's saved login password —</option>
+              {pwCreds.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+            </select>
+          </Field>
+          {!credId && (
+            <Field label="…or type a password to test">
+              <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="leave blank to use the saved one" autoComplete="off" />
+            </Field>
+          )}
+        </>
+      )}
+      {node}
+      <div className="row" style={{ marginTop: 12, justifyContent: 'flex-end' }}>
+        <button className="ghost sm" onClick={onClose}>Close</button>
+        <button className="primary sm" disabled={busy} onClick={run}>{busy ? 'Testing…' : 'Test login'}</button>
+      </div>
+      {res && (
+        <div style={{ marginTop: 14 }}>
+          {res.note ? <div className="muted" style={{ whiteSpace: 'pre-wrap' }}>{res.note}</div> : (
+            <>
+              <div className="muted" style={{ marginBottom: 6 }}>
+                {res.ok}/{res.total} host(s) accepted the {res.label}{res.bastion ? <> via <span className="mono">{res.bastion}</span></> : ''}.
+              </div>
+              <table style={{ width: '100%' }}>
+                <thead><tr><th>Host</th><th>Result</th><th>Logged in as</th><th>cloud-init</th></tr></thead>
+                <tbody>
+                  {(res.results || []).map((h) => (
+                    <tr key={h.name}>
+                      <td className="mono">{h.name}<br /><span className="faint" style={{ fontSize: 11 }}>{h.target || h.ip}</span></td>
+                      <td style={{ color: h.ok ? 'var(--green-bright)' : 'var(--danger)' }}>{h.ok ? '✓ authenticated' : '✗ ' + h.detail}</td>
+                      <td className="mono">{h.who || '—'}</td>
+                      <td className="mono" style={{ fontSize: 12, color: /not installed|absent/i.test(h.cloud_init || '') ? 'var(--danger)' : 'var(--muted)' }}>{h.cloud_init ? h.cloud_init.replace(/^cloud-init:?\s*/i, '') : '—'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <div className="faint" style={{ fontSize: 11.5, marginTop: 8 }}>
+                If login fails and cloud-init shows <span className="mono">not installed</span>, the base image has no cloud-init — the admin
+                account, password and keys SLEP put in the config were never applied. Rebuild from an image that ships cloud-init (most
+                cloud/“-cloudimg” images do), or bake the account into the base image yourself.
+              </div>
+            </>
+          )}
+        </div>
+      )}
     </Modal>
   )
 }
@@ -382,7 +479,7 @@ function PoolVolumePicker({ values, set }) {
             : <input value={cur} onChange={(e) => set('base_volume', e.target.value)} style={{ flex: 1 }}
                      placeholder="e.g. jammy.qcow2 — or click “Load images” to pick" />}
           <button type="button" className="ghost sm" disabled={busy || !values.uri} title="List images in the pool on the hypervisor"
-            onClick={load}>{busy ? 'Loading…' : '↻ Load images'}</button>
+            onClick={load}>{busy ? 'Loading…' : 'Load images'}</button>
         </div>
         {vols && vols.length === 0 && !err && <div className="faint" style={{ fontSize: 11 }}>No images in pool “{values.pool || 'default'}”. Type a name, or leave blank to download the URL below.</div>}
         {err && <div className="faint" style={{ fontSize: 11, color: 'var(--danger)' }}>{err}</div>}
@@ -432,7 +529,7 @@ function NetworkPoolPicker({ values, set }) {
         <Field label="Storage pool"><div className="row" style={{ gap: 6 }}>{sel(pool, pools, 'pool', 'e.g. default')}</div></Field>
         <button type="button" className="ghost sm" style={{ alignSelf: 'flex-end', whiteSpace: 'nowrap' }}
           disabled={busy || !values.uri} title="List the networks and pools on the hypervisor"
-          onClick={load}>{busy ? 'Loading…' : '↻ Load from host'}</button>
+          onClick={load}>{busy ? 'Loading…' : 'Load from host'}</button>
       </div>
       {poolObj && !poolObj.active && (
         <div className="faint" style={{ fontSize: 11.5, color: 'var(--danger)', marginTop: 2 }}>
@@ -525,13 +622,13 @@ function LibvirtConnect({ values, set }) {
           )}
           <div className="row" style={{ gap: 10, alignItems: 'center', marginTop: 8 }}>
             {!key
-              ? <button className="ghost sm" onClick={() => wrap(async () => setKey(await api('infra/hypervisor-key', { method: 'POST' })))}>🔑 Get deploy key</button>
+              ? <button className="ghost sm" onClick={() => wrap(async () => setKey(await api('infra/hypervisor-key', { method: 'POST' })))}>Get deploy key</button>
               : <button className="ghost sm" title="Mint a brand-new SLEP key — the old one stops working; re-install it here or with the password button"
                   onClick={() => wrap(async () => {
                     if (!window.confirm('Regenerate SLEP’s managed key?\n\nA brand-new key is minted and the OLD one stops working immediately — you must re-install it on this (and every other) hypervisor. Continue?')) return
                     const r = await api('infra/managed-key/regenerate', { method: 'POST' })
                     setKey({ public_key: r.public_key, keyfile: (key && key.keyfile) || '' })
-                  })}>🔑 Regenerate deploy key</button>}
+                  })}>Regenerate deploy key</button>}
             <span className="faint" style={{ fontSize: 12 }}>No password? Install SLEP’s key by hand once — then this and every future hypervisor just works.</span>
           </div>
           {key && cmd && (

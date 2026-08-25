@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import { api, canWrite } from '../api.js'
 import { PipelineModal } from './Ide.jsx'
-import { JumpHostEditor, EnrollPicker, VmsModal } from './Infrastructure.jsx'
+import { JumpHostEditor, EnrollPicker, VmsModal, TestAuthModal } from './Infrastructure.jsx'
 
 // The infrastructure lifecycle actions (Plan/Apply/Destroy, → Inventory, Access,
 // Enroll, Configure/Maintain, Cadence) for ONE infra project — the workflow that
@@ -13,7 +13,7 @@ import { JumpHostEditor, EnrollPicker, VmsModal } from './Infrastructure.jsx'
 
 // Build the handler set + the [label, fn, class, title] action list for an infra
 // row `r`, wired to the given modal setters / callbacks.
-function buildActions(r, { controllers, setPipe, setVms, setEnrollFor, setJumpFor, onOpenRun, onOpenProject, refresh }) {
+function buildActions(r, { controllers, setPipe, setVms, setEnrollFor, setJumpFor, setTestFor, onOpenRun, onOpenProject, refresh }) {
   const openProj = (extra) => onOpenProject &&
     onOpenProject({ id: r.project_id, name: r.project_name, slug: r.project_slug, ...extra })
   const run = async (target) => {
@@ -77,14 +77,15 @@ function buildActions(r, { controllers, setPipe, setVms, setEnrollFor, setJumpFo
     ['Plan', () => run('plan'), 'ghost', 'Terraform/OpenTofu plan'],
     ['Apply', () => run('apply'), 'primary', 'Terraform/OpenTofu apply — create the VMs'],
     ['Destroy', () => run('destroy'), 'danger ghost', 'Terraform/OpenTofu destroy', true],
-    ['🖥 VMs', listVms, 'ghost', "List the VMs on this project's hypervisor"],
-    ['→ Inventory', toInventory, 'ghost', 'Read the applied VMs into a SLEP inventory'],
-    ['🔑 Fix SSH', fixSsh, 'ghost', "Install SLEP's current key on the VMs over the password login (repairs key drift, no rebuild)"],
-    ['⚙ Access', () => setJumpFor(r), 'ghost', 'Login user, password (Vault) and jump host'],
-    ['Enroll → Controller', () => enroll(), 'primary', 'Register the applied VMs into a Controller'],
+    ['VMs', listVms, 'ghost', "List the VMs on this project's hypervisor"],
+    ['Inventory', toInventory, 'ghost', 'Read the applied VMs into a SLEP inventory'],
+    ['Test login', () => setTestFor(r), 'ghost', 'Test whether a key or password authenticates to the VMs through the jump host (read-only)'],
+    ['Fix SSH', fixSsh, 'ghost', "Install SLEP's current key on the VMs over the password login (repairs key drift, no rebuild)"],
+    ['Access', () => setJumpFor(r), 'ghost', 'Login user, password (Vault) and jump host'],
+    ['Enroll', () => enroll(), 'primary', 'Register the applied VMs into a Controller'],
     ['Configure', () => scaffold('configure'), 'ghost', 'Scaffold an Ansible playbook and open it'],
     ['Maintain', () => scaffold('maintain'), 'ghost', 'Scaffold a Salt state and open it'],
-    ['▶ Cadence', cadence, 'primary', 'Run the whole cadence: apply → configure → maintain'],
+    ['Cadence', cadence, 'primary', 'Run the whole cadence: apply → configure → maintain'],
   ].map(([label, fn, cls, title, danger]) => ({ label, fn, cls, title, danger, enroll }))
 }
 
@@ -95,8 +96,9 @@ function useInfraModals({ onOpenRun, refresh }) {
   const [vms, setVms] = useState(null)
   const [enrollFor, setEnrollFor] = useState(null)
   const [jumpFor, setJumpFor] = useState(null)
+  const [testFor, setTestFor] = useState(null)
   useEffect(() => { api('controllers').then((d) => setControllers(d.controllers || [])).catch(() => {}) }, [])
-  const enrollPick = enrollFor && buildActions(enrollFor, { controllers, setPipe, setVms, setEnrollFor, setJumpFor, onOpenRun, refresh })[0].enroll
+  const enrollPick = enrollFor && buildActions(enrollFor, { controllers, setPipe, setVms, setEnrollFor, setJumpFor, setTestFor, onOpenRun, refresh })[0].enroll
   const modals = (
     <>
       {pipe && <PipelineModal project={pipe.project} initialSteps={pipe.steps}
@@ -106,9 +108,10 @@ function useInfraModals({ onOpenRun, refresh }) {
         onClose={() => setEnrollFor(null)} onPick={(cid) => enrollPick(cid)} />}
       {jumpFor && <JumpHostEditor r={jumpFor} onClose={() => setJumpFor(null)}
         onSaved={() => { setJumpFor(null); refresh && refresh() }} />}
+      {testFor && <TestAuthModal r={testFor} onClose={() => setTestFor(null)} />}
     </>
   )
-  return { controllers, setPipe, setVms, setEnrollFor, setJumpFor, modals }
+  return { controllers, setPipe, setVms, setEnrollFor, setJumpFor, setTestFor, modals }
 }
 
 // Bar on top of the IDE. Fetches this project's infra row; renders nothing for a
@@ -125,7 +128,7 @@ export function InfraActions({ project, onOpenRun, onOpenProject, onReload, refr
   const actions = buildActions(r, { ...m, onOpenRun, onOpenProject, refresh })
   return (
     <div className="infra-bar">
-      <span className="infra-bar-label" title="Infrastructure project">☁ {r.provider}{r.bastion ? ` · via ${r.bastion}` : ''}</span>
+      <span className="infra-bar-label" title="Infrastructure project">{r.provider}{r.bastion ? ` · via ${r.bastion}` : ''}</span>
       <div className="infra-bar-actions">
         {actions.map((a) => <button key={a.label} className={a.cls + ' sm'} title={a.title} onClick={a.fn}>{a.label}</button>)}
       </div>

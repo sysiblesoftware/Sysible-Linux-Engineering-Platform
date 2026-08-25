@@ -2924,6 +2924,93 @@ def infra_distribute_key(project_id: int, user: str = Depends(require_operator))
     return {"results": results, "note": note, "installed": sum(1 for r in results if r["ok"]), "total": len(results)}
 
 
+@app.post("/infra/{project_id}/test-auth")
+def infra_test_auth(project_id: int, body: dict = Body(default={}), user: str = Depends(require_operator)):
+    """Read-only auth probe: does a key or password actually log in to this project's
+    VMs THROUGH the jump host? Nothing is changed on the VMs. Pick a method:
+      • method='key'      → SLEP's managed key (default) or a stored ssh credential's key
+      • method='password' → a typed password, a stored credential's password, or the
+                            project's saved (Vault) login password
+    Per host it reports ok, a plain-English reason, who you logged in as, and whether
+    cloud-init is present — a missing cloud-init is why a baked-in password/key never
+    took."""
+    import shutil, tempfile
+    from . import keydist
+    meta = db.get_infra(project_id)
+    if not meta:
+        raise HTTPException(status_code=404, detail="Not an infrastructure project.")
+    iid = meta.get("inventory_id")
+    hosts = db.list_hosts(iid) if iid else []
+    if not hosts:
+        return {"results": [], "note": "No VMs in this project's inventory yet — apply first, then '→ Inventory'."}
+    bastion = (db.get_inventory(iid) or {}).get("bastion") or ""
+    method = (body.get("method") or "key").strip().lower()
+    cred_id = body.get("credential_id")
+    cred = db.get_credential(int(cred_id), include_secret=True) if cred_id else None
+
+    keyfile, tmp_key, sshpass, password = "", None, "", ""
+    try:
+        if method == "key":
+            if cred:
+                if (cred.get("kind") or "") != "ssh" or not (cred.get("secret") or "").strip():
+                    return {"results": [], "note": f"Credential “{cred.get('name')}” has no SSH private key to test."}
+                tmp_key = tempfile.NamedTemporaryFile("w", delete=False, prefix="slep-test-", suffix=".key")
+                tmp_key.write(cred["secret"] if cred["secret"].endswith("\n") else cred["secret"] + "\n")
+                tmp_key.close(); os.chmod(tmp_key.name, 0o600); keyfile = tmp_key.name
+            else:
+                keyfile = keydist.managed_key_path()
+                if not keyfile:
+                    return {"results": [], "note": "SLEP has no managed key. Reset it under Credentials, then try again."}
+        else:  # password
+            if (body.get("password") or "").strip():
+                password = body["password"]
+            elif cred:
+                password = (cred.get("secret") or "")
+            else:
+                password = _infra_login_password(meta)
+            if not password:
+                return {"results": [], "note": "No password to test — type one, pick a password credential, or set one under ⚙ Access."}
+            sshpass = shutil.which("sshpass") or ""
+            if not sshpass:
+                return {"results": [], "note": "`sshpass` isn't installed on the SLEP host — can't test a password here."}
+
+        results = []
+        for h in hosts:
+            u = (h.get("variables") or {}).get("ansible_user") or meta.get("ssh_user") or ""
+            target = (f"{u}@" if u else "") + h["address"]
+            cmd = keydist.probe_cmd(keydist.hop_for(bastion, h["address"]), target, keyfile=keyfile, sshpass=sshpass)
+            env = dict(os.environ)
+            if sshpass:
+                env["SSHPASS"] = password
+            ok, detail, who, ci = False, "", "", ""
+            try:
+                r = subprocess.run(cmd, capture_output=True, text=True, timeout=30, env=env)
+                ok = r.returncode == 0 and "SLEP_AUTH_OK" in (r.stdout or "")
+                if ok:
+                    who, ci = keydist.parse_probe(r.stdout)
+                    detail = "authenticated"
+                else:
+                    detail = keydist._err_line(r, bool(bastion))
+            except subprocess.TimeoutExpired:
+                detail = "timed out"
+            except Exception as e:  # noqa: BLE001
+                detail = str(e)
+            results.append({"name": h["name"], "ip": h["address"], "target": target,
+                            "ok": ok, "detail": detail, "who": who, "cloud_init": ci})
+    finally:
+        if tmp_key:
+            try:
+                os.unlink(tmp_key.name)
+            except OSError:
+                pass
+
+    label = "SLEP managed key" if method == "key" and not cred else \
+            (f"credential “{cred['name']}”" if cred else "typed password" if method == "password" else "key")
+    db.log_audit("infra_test_auth", user, f"project #{project_id} via {label}: {sum(1 for r in results if r['ok'])}/{len(results)} ok")
+    return {"results": results, "note": "", "method": method, "label": label, "bastion": bastion,
+            "ok": sum(1 for r in results if r["ok"]), "total": len(results)}
+
+
 @app.post("/infra/{project_id}/inventory")
 def infra_to_inventory(project_id: int, user: str = Depends(require_operator)):
     """After apply, read the created VMs (sysible_hosts) into a SLEP Ansible
