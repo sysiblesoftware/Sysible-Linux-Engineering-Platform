@@ -379,8 +379,18 @@ def launch(run_id: int) -> None:
             if opts.get("start_at_task"):
                 cmd += ["--start-at-task", str(opts["start_at_task"])]
                 emit(f"-- starting at task: {opts['start_at_task']}")
-            for k, v in extra_vars.items():
-                cmd += ["-e", f"{k}={v}"]
+            # Extra vars go through a 0600 @file, not `-e k=v` on argv — a value the
+            # operator typed into the Variables box may be a secret, and argv is visible
+            # in the process list (`ps`) to any local user. Matches the vault/become
+            # handling below.
+            if extra_vars:
+                evfile = tmp / "extravars.json"
+                fd = os.open(str(evfile), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                try:
+                    os.write(fd, json.dumps(extra_vars).encode())
+                finally:
+                    os.close(fd)
+                cmd += ["-e", "@" + str(evfile)]
 
             # Inject the secrets vault as `vault.<name>` via a 0600 vars file
             # (-e @file keeps the values out of the process list / ps).

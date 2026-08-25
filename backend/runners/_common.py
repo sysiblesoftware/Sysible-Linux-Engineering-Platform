@@ -71,17 +71,23 @@ def clear_stop(run_id) -> None:
         _STOP.discard(run_id)
 
 
-def shown_cmd(cmd, redact=()) -> str:
-    """Render a command line for the run log with secret substrings masked. Run
-    logs are readable by any authenticated user (viewers included), so values
-    passed inline (e.g. `-var k=secret` / `-e k=secret` / salt `k=secret`) must not
-    be echoed verbatim. `redact` is the list of secret VALUE strings to mask."""
-    s = " ".join(cmd)
+def mask(s: str, redact=()) -> str:
+    """Replace each secret VALUE in `s` with ***. Used for both the echoed command
+    and every streamed output line (a playbook/terraform/salt task can print a secret
+    it was given, and the run log is readable by any authenticated viewer)."""
     for r in redact:
         r = str(r)
         if len(r) >= 3:                 # don't mask trivially-short/empty values
             s = s.replace(r, "***")
     return s
+
+
+def shown_cmd(cmd, redact=()) -> str:
+    """Render a command line for the run log with secret substrings masked. Run
+    logs are readable by any authenticated user (viewers included), so values
+    passed inline (e.g. `-var k=secret` / `-e k=secret` / salt `k=secret`) must not
+    be echoed verbatim. `redact` is the list of secret VALUE strings to mask."""
+    return mask(" ".join(cmd), redact)
 
 
 def stream(cmd, cwd, env, log, redact=(), run_id=None) -> int:
@@ -109,7 +115,9 @@ def stream(cmd, cwd, env, log, redact=(), run_id=None) -> int:
     register(run_id, proc)
     try:
         for line in proc.stdout:
-            log.write(line)
+            # Redact secret values the child may echo (e.g. a debug task, a rendered
+            # template, terraform plan output) before they hit the viewer-readable log.
+            log.write(mask(line, redact) if redact else line)
             log.flush()
         return proc.wait()
     finally:

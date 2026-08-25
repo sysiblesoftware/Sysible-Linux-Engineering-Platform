@@ -357,10 +357,22 @@ def launch(run_id: int) -> None:
         env = _common.credential_env(credential, os.environ)
         env.setdefault("TF_IN_AUTOMATION", "1")
 
+        # Pass variables through a 0600 -var-file (JSON), NOT `-var k=v` on argv: a
+        # value may be a secret and argv is visible to any local user via `ps`. The
+        # file lives in the project workdir (already access-controlled) and is written
+        # per apply; terraform reads *.auto.tfvars.json automatically, but we pass it
+        # explicitly so plan/apply/destroy all see it.
         var_args = []
-        for k, v in extra_vars.items():
-            var_args += ["-var", f"{k}={v}"]
-        # Secret -var values must not be echoed into the (viewer-readable) run log.
+        if extra_vars:
+            import json as _json
+            vf = workdir / "slep.auto.tfvars.json"
+            fd = os.open(str(vf), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            try:
+                os.write(fd, _json.dumps(extra_vars).encode())
+            finally:
+                os.close(fd)
+            var_args = ["-var-file", str(vf)]
+        # Secret values must not be echoed into the (viewer-readable) run log.
         redact = [str(v) for v in extra_vars.values() if str(v)]
 
         def run_action(upgrade: bool) -> int:

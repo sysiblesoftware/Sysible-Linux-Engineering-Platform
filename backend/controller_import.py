@@ -14,10 +14,16 @@ with their address + Controller environment as an Ansible group. The Controller
 `environment` tag becomes the host's group. Idempotent: re-importing refreshes
 addresses/groups/vars, never duplicates (upsert by name).
 
-The Controller's TLS is self-signed and operator-directed here (the operator
-typed the address + key), so the fetch is unverified — mirroring the handoff pull.
+TLS is verified by default; a self-signed on-prem Controller can opt out with
+SLEP_CONTROLLER_INSECURE=1. Target hosts are SSRF-guarded (loopback/link-local/
+metadata blocked) so 'import from Controller' can't be aimed at internal services.
 """
 from __future__ import annotations
+
+import ipaddress
+import os
+import socket
+from urllib.parse import urlparse
 
 import requests
 
@@ -26,6 +32,38 @@ from . import db
 
 class ControllerImportError(Exception):
     pass
+
+
+def _tls_verify():
+    """Verify the Controller's TLS certificate by default. A self-signed on-prem
+    Controller can opt out with SLEP_CONTROLLER_INSECURE=1 — but never silently, and
+    never as the default (the old behaviour leaked the API key + credentials to any
+    on-path attacker)."""
+    return os.environ.get("SLEP_CONTROLLER_INSECURE", "").lower() not in ("1", "true", "yes")
+
+
+def _guard_url(url: str) -> None:
+    """SSRF guard: resolve the target host and refuse loopback, link-local (cloud
+    metadata at 169.254.169.254 / fd00:ec2::), unspecified, multicast, and reserved
+    addresses — so a caller can't point 'import from Controller' at internal metadata
+    or localhost admin services. Private LAN ranges stay allowed (real on-prem
+    Controllers). Resolving here also blocks DNS-rebinding to a metadata IP."""
+    host = urlparse(url).hostname or ""
+    if not host:
+        raise ControllerImportError("Invalid Controller URL.")
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except socket.gaierror:
+        return  # let the actual request surface a clean DNS error
+    for info in infos:
+        try:
+            ip = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            continue
+        if ip.is_loopback or ip.is_link_local or ip.is_unspecified or ip.is_multicast or ip.is_reserved:
+            raise ControllerImportError(
+                f"Refusing to connect to {host} ({ip}): loopback/link-local/reserved addresses "
+                "(including cloud metadata) are blocked.")
 
 
 def _normalize_base(url: str) -> str:
@@ -42,8 +80,9 @@ def _get(base_url: str, path: str, api_key: str, allow_404: bool = False):
     on 404 when allow_404 (an older Controller may lack an endpoint). Raises
     ControllerImportError on auth/network/other failures."""
     url = base_url + path
+    _guard_url(url)
     try:
-        resp = requests.get(url, headers={"X-API-Key": api_key}, verify=False, timeout=20)
+        resp = requests.get(url, headers={"X-API-Key": api_key}, verify=_tls_verify(), timeout=20)
     except requests.exceptions.RequestException as e:
         raise ControllerImportError(f"Could not reach the Controller at {url}: {e}")
     if resp.status_code in (401, 403):
@@ -81,7 +120,8 @@ def exchange_credentials_for_key(controller_url: str, username: str, password: s
     if totp_code:
         payload["totp_code"] = totp_code
     try:
-        resp = requests.post(url, json=payload, verify=False, timeout=20)
+        _guard_url(url)
+        resp = requests.post(url, json=payload, verify=_tls_verify(), timeout=20)
     except requests.exceptions.RequestException as e:
         raise ControllerImportError(f"Could not reach the Controller at {url}: {e}")
     if resp.status_code == 404:
@@ -128,7 +168,7 @@ def register_ssh_host(controller_url: str, api_key: str, name: str, ip: str,
     try:
         resp = requests.post(url, headers={"X-API-Key": api_key},
                              json={"name": name, "ip": ip, "user": user, "environment": environment},
-                             verify=False, timeout=20)
+                             verify=_tls_verify(), timeout=20)
     except requests.exceptions.RequestException as e:
         return False, f"could not reach Controller: {e}"
     if resp.status_code == 200:

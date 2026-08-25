@@ -1047,6 +1047,45 @@ def _valid_user(s: str) -> bool:
     return bool(s) and not s.startswith("-") and bool(_RE_USER.fullmatch(s))
 
 
+def _validate_base_image_url(url: str) -> None:
+    """A libvirt base_image is fetched by Terraform (the libvirt provider) on the SLEP
+    host at apply time — from a URL, or a path relative to the project. Block the two
+    ways that turns into host-file disclosure or SSRF: an absolute/traversal LOCAL path
+    (e.g. /data/vault.key, ../x), and any non-http(s) scheme or an http(s) URL that
+    resolves to a loopback/link-local/metadata address. A bare relative name (a pool
+    image like jammy.qcow2) is left alone."""
+    import ipaddress
+    import socket
+    from urllib.parse import urlparse
+    s = (url or "").strip()
+    if "://" not in s:
+        # A local/relative reference — block absolute paths and traversal, which the
+        # provider would read straight off the SLEP host's filesystem.
+        if s.startswith("/") or ".." in s.split("/"):
+            raise HTTPException(status_code=400,
+                                detail="Base image must be an http(s) URL or a pool image name, not a local file path.")
+        return
+    u = urlparse(s)
+    if u.scheme not in ("http", "https"):
+        raise HTTPException(status_code=400,
+                            detail="Base image must be an http(s) URL (file:// and other schemes are not allowed).")
+    host = u.hostname or ""
+    if not host:
+        raise HTTPException(status_code=400, detail="Invalid base image URL.")
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except socket.gaierror:
+        return  # let terraform surface the DNS error
+    for info in infos:
+        try:
+            ip = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            continue
+        if ip.is_loopback or ip.is_link_local or ip.is_unspecified or ip.is_multicast or ip.is_reserved:
+            raise HTTPException(status_code=400,
+                                detail=f"Refusing a base image URL that resolves to {ip} (loopback/link-local/metadata).")
+
+
 def _validate_bastion(bastion: str) -> str:
     """A jump host is `[user@]host[:port]`. Strictly validate each part: the user and
     host against a safe charset (no shell metacharacters, spaces, or leading '-') and
@@ -2615,6 +2654,11 @@ def infra_create(body: dict = Body(...), user: str = Depends(require_operator)):
     # (scheme allowlist + reject exec-capable params) at the boundary.
     if provider == "libvirt" and str(options.get("uri") or "").strip():
         _validate_libvirt_uri(options.get("uri"))
+    # The base_image is a URL Terraform (the libvirt provider) fetches at apply time
+    # ON the SLEP host. Reject file:// (local-file disclosure — e.g. the vault key) and
+    # internal/metadata hosts (SSRF), allowing only http(s) to a non-internal address.
+    if str(options.get("base_image") or "").strip():
+        _validate_base_image_url(str(options.get("base_image")).strip())
 
     controller_key = ""
     if controller_id:
