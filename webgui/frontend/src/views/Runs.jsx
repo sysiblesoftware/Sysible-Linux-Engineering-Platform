@@ -91,6 +91,8 @@ export function RunLog({ runId, onBack, onOpenRun }) {
   const [engine, setEngine] = useState('ansible')
   const [seedHosts, setSeedHosts] = useState([])
   const [leftPct, setLeftPct] = useState(50)   // Visualize/Log split, % of width
+  const [showLog, setShowLog] = useState(() => { try { return localStorage.getItem('slep_run_showlog') !== '0' } catch { return true } })
+  const toggleLog = () => setShowLog((v) => { const n = !v; try { localStorage.setItem('slep_run_showlog', n ? '1' : '0') } catch { /* ignore */ } return n })
   const [groupId, setGroupId] = useState('')   // pipeline group this run belongs to
   const [seq, setSeq] = useState([])           // the sibling runs of that pipeline
   const [projectId, setProjectId] = useState(null)  // this run's project (for enroll)
@@ -247,6 +249,8 @@ export function RunLog({ runId, onBack, onOpenRun }) {
         <span className="muted">{engine}</span>
         <span className={'pill ' + status}>{status}</span>
         <div className="spacer" />
+        <button className="ghost sm" title={showLog ? 'Hide the log pane' : 'Show the log pane'}
+          onClick={toggleLog}>{showLog ? '🙈 Hide log' : '📄 Show log'}</button>
         {!done && (
           <button className="danger sm" disabled={stopping} title="Terminate this run"
             onClick={stopRun}>{stopping ? 'Stopping…' : '■ Stop'}</button>
@@ -295,7 +299,8 @@ export function RunLog({ runId, onBack, onOpenRun }) {
       )}
       {/* Visualize and Log together, with a draggable divider to size them (they
           stack on narrow screens). Each pane scrolls on its own. */}
-      <div className="run-split" ref={splitRef} style={{ gridTemplateColumns: `minmax(0,${leftPct}fr) 8px minmax(0,${100 - leftPct}fr)` }}>
+      <div className="run-split" ref={splitRef}
+        style={{ gridTemplateColumns: showLog ? `minmax(0,${leftPct}fr) 8px minmax(0,${100 - leftPct}fr)` : '1fr' }}>
         <div className="run-pane">
           <div className="pane-title">Visualize</div>
           <div className="run-scroll">
@@ -303,11 +308,13 @@ export function RunLog({ runId, onBack, onOpenRun }) {
               : <div className="muted" style={{ padding: 8 }}>connecting…</div>}
           </div>
         </div>
-        <div className="run-gutter" onMouseDown={startDrag} title="Drag to resize" />
-        <div className="run-pane">
-          <div className="pane-title">Log</div>
-          <div className="log run-scroll" ref={boxRef}>{text ? ansiToSpans(text) : 'connecting…'}</div>
-        </div>
+        {showLog && <div className="run-gutter" onMouseDown={startDrag} title="Drag to resize" />}
+        {showLog && (
+          <div className="run-pane">
+            <div className="pane-title">Log</div>
+            <div className="log run-scroll" ref={boxRef}>{text ? ansiToSpans(text) : 'connecting…'}</div>
+          </div>
+        )}
       </div>
       {rerun && (
         <RunModal project={{ id: rerun.run.project_id }} onClose={() => setRerun(null)}
