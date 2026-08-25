@@ -2523,13 +2523,26 @@ def infra_create(body: dict = Body(...), user: str = Depends(require_operator)):
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    # New project (unique slug), then write the generated files to its workdir.
-    base = _slugify(name)
-    slug, n = base, 1
-    while any(p["slug"] == slug for p in db.list_projects()):
-        n += 1
-        slug = f"{base}-{n}"
-    pid = db.create_project(name, slug, f"Terraform ({infra.PROVIDERS[provider]['label']}) — built with Create Infrastructure", "", "")
+    # Generate INTO an existing project when project_id is given (the "build infra
+    # here" flow from the IDE), else create a new project. Targeting an existing
+    # project is refused if it already carries infra (so a wizard can't silently
+    # overwrite a live one) — the caller should destroy/clear it first.
+    target_pid = body.get("project_id")
+    if target_pid:
+        proj = db.get_project(int(target_pid))
+        if not proj:
+            raise HTTPException(status_code=404, detail="Target project not found.")
+        if db.get_infra(int(target_pid)):
+            raise HTTPException(status_code=400, detail="That project is already an infrastructure project.")
+        pid, slug = int(target_pid), proj["slug"]
+    else:
+        # New project (unique slug), then write the generated files to its workdir.
+        base = _slugify(name)
+        slug, n = base, 1
+        while any(p["slug"] == slug for p in db.list_projects()):
+            n += 1
+            slug = f"{base}-{n}"
+        pid = db.create_project(name, slug, f"Terraform ({infra.PROVIDERS[provider]['label']}) — built with Create Infrastructure", "", "")
     workdir = db.project_dir(pid)
     workdir.mkdir(parents=True, exist_ok=True)
     for fn, content in files.items():

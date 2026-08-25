@@ -40,12 +40,12 @@ export default function Infrastructure({ onOpenProject }) {
         <h2 style={{ margin: 0 }}>Infrastructure</h2>
       </div>
       <div className="muted" style={{ marginBottom: 12 }}>
-        The machines SLEP has built, and their live status. To build new infrastructure or run its
-        lifecycle (apply, configure, maintain, enroll), open the project — the actions live on the
-        project’s row&nbsp;⋯ menu and on top of the IDE, or use “Create infrastructure” in <b>Projects</b>.
+        The machines SLEP has built, and their live status. Infrastructure lives inside a project:
+        open a project and use <b>☁ Build infra</b> to create it, then the lifecycle actions
+        (apply, configure, maintain, enroll) appear on top of the IDE and on the project’s row&nbsp;⋯ menu.
       </div>
       {rows.length === 0 ? (
-        <div className="muted">No infrastructure yet. Go to <b>Projects → Create infrastructure</b> to build some.</div>
+        <div className="muted">No infrastructure yet. Create a project in <b>Projects</b>, open it, and click <b>☁ Build infra</b>.</div>
       ) : (
         <table>
           <thead><tr><th>Name</th><th>Provider</th><th>VMs on hypervisor</th><th>Jump host</th><th>Enroll target</th></tr></thead>
@@ -183,10 +183,12 @@ export function CadenceBar() {
   )
 }
 
-export function CreateWizard({ onClose, onDone }) {
+// When `project` is passed, the wizard generates the Terraform INTO that existing
+// project (the "build infra here" flow from the IDE) instead of creating a new one.
+export function CreateWizard({ onClose, onDone, project }) {
   const [schema, setSchema] = useState(null)
   const [controllers, setControllers] = useState([])
-  const [name, setName] = useState('')
+  const [name, setName] = useState(project?.name || '')
   const [provider, setProvider] = useState('')
   const [values, setValues] = useState({})
   const [controllerId, setControllerId] = useState('')
@@ -222,8 +224,10 @@ export function CreateWizard({ onClose, onDone }) {
   const opts = schema[provider]?.options || []
 
   return (
-    <Modal title="Create infrastructure" onClose={onClose} wide>
-      <Field label="Name"><input value={name} onChange={(e) => setName(e.target.value)} placeholder="prod-web" autoFocus /></Field>
+    <Modal title={project ? `Build infrastructure in “${project.name}”` : 'Create infrastructure'} onClose={onClose} wide>
+      {project
+        ? <div className="faint" style={{ fontSize: 12, marginBottom: 8 }}>Generates the Terraform (and cloud-init) into this project, then it gets the infra lifecycle actions.</div>
+        : <Field label="Name"><input value={name} onChange={(e) => setName(e.target.value)} placeholder="prod-web" autoFocus /></Field>}
       <Field label="Provider">
         <select value={provider} onChange={(e) => pickProvider(e.target.value)}>
           {Object.entries(schema).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
@@ -283,15 +287,17 @@ export function CreateWizard({ onClose, onDone }) {
       <div className="faint" style={{ fontSize: 12 }}>If chosen, the Controller’s SSH key is also baked into the VMs’ cloud-init so it can reach them, and “Enroll →” registers them after apply.</div>
       {node}
       <button className="primary" onClick={() => wrap(async () => {
-        if (!name.trim()) throw new Error('Give it a name.')
+        if (!project && !name.trim()) throw new Error('Give it a name.')
         const d = await api('infra', { method: 'POST', json: {
-          name, provider, options: values, controller_id: controllerId ? Number(controllerId) : null,
+          name: name || project?.name, provider, options: values,
+          project_id: project ? project.id : undefined,
+          controller_id: controllerId ? Number(controllerId) : null,
           deploy_credential_id: deployCredId ? Number(deployCredId) : null,
           inventory_id: (invTarget && invTarget !== '__new') ? Number(invTarget) : null,
           inventory_name: invTarget === '__new' ? invName.trim() : '',
         } })
-        onDone(d.project_id, name, d.slug)
-      })}>Generate Terraform</button>
+        onDone(d.project_id, name || project?.name, d.slug)
+      })}>{project ? 'Build in this project' : 'Generate Terraform'}</button>
     </Modal>
   )
 }

@@ -7,6 +7,7 @@ import CollectionsInstall from '../components/CollectionsInstall.jsx'
 import { SNIPPET_GROUPS as TERRAFORM_SNIPPETS } from '../terraformSnippets.js'
 import { SNIPPET_GROUPS as SALT_SNIPPETS } from '../saltSnippets.js'
 import { SNIPPET_GROUPS as ANSIBLECFG_SNIPPETS } from '../ansibleCfgSnippets.js'
+import { CreateWizard } from './Infrastructure.jsx'
 
 // Mirror of backend/_ansible_group: INI group names allow only letters, digits
 // and underscores, and can't start with a digit. Keep in sync so the play-target
@@ -177,7 +178,7 @@ const snippetsFor = (path) => {
   return { groups: [...PLAY_GROUPS, ...ANSIBLE_SNIPPETS], verb: 'Task', engine: 'ansible' }
 }
 
-export default function Ide({ project, onBack, onRun }) {
+export default function Ide({ project, onBack, onRun, onInfraChanged }) {
   const [tree, setTree] = useState([])
   const [path, setPath] = useState(null)
   const [content, setContent] = useState('')
@@ -186,6 +187,9 @@ export default function Ide({ project, onBack, onRun }) {
   const [runOpen, setRunOpen] = useState(false)
   const [pipeOpen, setPipeOpen] = useState(false)
   const [newOpen, setNewOpen] = useState(false)
+  const [infraWizOpen, setInfraWizOpen] = useState(false)   // Build-infrastructure wizard for THIS project
+  const [isInfra, setIsInfra] = useState(false)             // already an infra project? (hides "Build infra")
+  useEffect(() => { api('infra').then((d) => setIsInfra((d.infra || []).some((x) => x.project_id === project.id))).catch(() => {}) }, [project.id])
   const [taskOpen, setTaskOpen] = useState(false)
   const [playOpen, setPlayOpen] = useState(false)
   const [collOpen, setCollOpen] = useState(false)
@@ -453,6 +457,10 @@ export default function Ide({ project, onBack, onRun }) {
         <div className="ide-actions">
           <div className="ide-actions-h">Actions</div>
           <button className="ghost sm" onClick={() => setNewOpen(true)}>＋ New file</button>
+          {!isInfra && (
+            <button className="ghost sm" title="Generate a full, working Terraform project here with the infrastructure wizard"
+              onClick={() => setInfraWizOpen(true)}>☁ Build infra</button>
+          )}
           {snip.engine === 'ansible' && (
             <button className="ghost sm" onClick={() => setPlayOpen(true)} disabled={path == null}
               title="Wrap this file in a play, or insert a play header (hosts, become, tasks)">Add Play</button>
@@ -505,6 +513,8 @@ export default function Ide({ project, onBack, onRun }) {
         </div>
       </div>
       {newOpen && <NewFile project={project} onClose={() => setNewOpen(false)} onCreated={(p) => { setNewOpen(false); loadTree(); open(p) }} />}
+      {infraWizOpen && <CreateWizard project={project} onClose={() => setInfraWizOpen(false)}
+        onDone={() => { setInfraWizOpen(false); setIsInfra(true); loadTree(); open('main.tf'); onInfraChanged && onInfraChanged() }} />}
       {taskOpen && <TaskPalette groups={snip.groups} verb={snip.verb} onClose={() => setTaskOpen(false)} onInsert={insertTask} />}
       {playOpen && <PlayModal targets={targets} hasContent={(content || '').trim().length > 0}
         onClose={() => setPlayOpen(false)} onWrap={wrapInPlay} onInsert={insertPlayHeader} />}

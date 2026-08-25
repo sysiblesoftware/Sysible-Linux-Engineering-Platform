@@ -100,12 +100,12 @@ function useInfraModals({ onOpenRun, refresh }) {
 
 // Bar on top of the IDE. Fetches this project's infra row; renders nothing for a
 // non-infra project or a viewer, so it's safe to mount above every open project.
-export function InfraActions({ project, onOpenRun, onOpenProject, onReload }) {
+export function InfraActions({ project, onOpenRun, onOpenProject, onReload, refreshKey }) {
   const [r, setR] = useState(null)
   const loadRow = () => api('infra')
     .then((d) => setR((d.infra || []).find((x) => x.project_id === project.id) || null))
     .catch(() => setR(null))
-  useEffect(() => { loadRow() }, [project.id])   // eslint-disable-line
+  useEffect(() => { loadRow() }, [project.id, refreshKey])   // eslint-disable-line
   const refresh = () => { loadRow(); onReload && onReload() }
   const m = useInfraModals({ onOpenRun, refresh })
   if (!canWrite() || !r) return null

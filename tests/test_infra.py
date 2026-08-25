@@ -1367,3 +1367,21 @@ def test_projects_flag_infra(client):
     rows = {r["id"]: r for r in client.get("/projects").json()["projects"]}
     assert rows[p_infra]["is_infra"] is True and rows[p_infra]["infra_provider"] == "libvirt"
     assert rows[p_plain]["is_infra"] is False and rows[p_plain]["infra_provider"] == ""
+
+
+def test_infra_create_into_existing_project(client):
+    """The wizard can build into an EXISTING project (project_id) instead of making
+    a new one; a project that's already infra is refused."""
+    import backend.db as db
+    pid = client.post("/projects", json={"name": "Apps", "slug": "apps-x"}).json()["id"]
+    r = client.post("/infra", json={"name": "Apps", "provider": "libvirt",
+                                    "project_id": pid, "options": {"count": 1, "base_image": "x"}})
+    assert r.status_code == 200, r.text
+    assert r.json()["project_id"] == pid          # same project, not a new one
+    assert db.get_infra(pid) is not None
+    # main.tf was generated into it.
+    files = {f["path"] for f in client.get(f"/projects/{pid}/files").json()["files"]}
+    assert "main.tf" in files
+    # Building again into an already-infra project is refused.
+    assert client.post("/infra", json={"name": "Apps", "provider": "libvirt",
+                                       "project_id": pid, "options": {"count": 1, "base_image": "x"}}).status_code == 400

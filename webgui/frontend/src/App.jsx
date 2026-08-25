@@ -67,6 +67,7 @@ export default function App() {
   const [view, setView] = useState('projects')
   const [project, setProject] = useState(null)
   const [runId, setRunId] = useState(null)
+  const [infraBump, setInfraBump] = useState(0)   // bump → the IDE's infra bar refetches (e.g. after "Build infra")
   const [theme, setTheme] = useState(getTheme())
   useEffect(() => { applyTheme(theme) }, [theme])
 
@@ -121,7 +122,7 @@ export default function App() {
       <main className="view">
         {runId == null && !project && <HealthBanner />}
         {runId != null ? <RunLog runId={runId} onBack={() => setRunId(null)} onOpenRun={setRunId} />
-          : project ? <><InfraActions project={project} variant="bar" onOpenRun={setRunId} onOpenProject={setProject} /><Ide project={project} onBack={() => setProject(null)} onRun={(id) => setRunId(id)} /></>
+          : project ? <><InfraActions project={project} refreshKey={infraBump} onOpenRun={setRunId} onOpenProject={setProject} /><Ide project={project} onBack={() => setProject(null)} onRun={(id) => setRunId(id)} onInfraChanged={() => setInfraBump((n) => n + 1)} /></>
             : view === 'organizations' ? <Organizations />
             : view === 'projects' ? <Projects onOpen={setProject} onOpenRun={setRunId} />
               : view === 'inventories' ? <Inventories />

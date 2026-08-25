@@ -2,7 +2,6 @@ import React, { useEffect, useRef, useState } from 'react'
 import { api } from '../api.js'
 import { Field, Modal, useErr } from '../ui.jsx'
 import { useInfraRowActions } from './InfraActions.jsx'
-import { CreateWizard } from './Infrastructure.jsx'
 
 // Projects are the top-level unit; each can nest sub-projects (folders) via
 // parent_id, rendered here as an expandable tree. Organizations still exist for
@@ -14,7 +13,6 @@ export default function Projects({ onOpen, onOpenRun }) {
   const [orgs, setOrgs] = useState([])
   const [infraByPid, setInfraByPid] = useState({})  // project_id → infra row (for the ⋯ menu actions)
   const [newFor, setNewFor] = useState(undefined)   // undefined=closed; null=top-level; id=sub-project parent
-  const [wizOpen, setWizOpen] = useState(false)     // Create-Infrastructure wizard
   const [moveP, setMoveP] = useState(null)          // project being reparented
   const [menuId, setMenuId] = useState(null)        // project whose ⋯ menu is open
   const [collapsed, setCollapsed] = useState({})    // {projectId: true} → children hidden
@@ -99,7 +97,6 @@ export default function Projects({ onOpen, onOpenRun }) {
       <div className="row" style={{ marginBottom: 14 }}>
         <h2 style={{ margin: 0 }}>Projects</h2>
         <div className="spacer" />
-        <button className="ghost" onClick={() => setWizOpen(true)}>+ Create infrastructure</button>
         <button className="primary" onClick={() => setNewFor(null)}>+ New project</button>
       </div>
       {node}
@@ -124,10 +121,6 @@ export default function Projects({ onOpen, onOpenRun }) {
         <MoveProject p={moveP} targets={moveTargetsFor(moveP)}
           onClose={() => setMoveP(null)}
           onMove={(parentId) => { setMoveP(null); move(moveP, parentId) }} />
-      )}
-      {wizOpen && (
-        <CreateWizard onClose={() => setWizOpen(false)}
-          onDone={(pid, name, slug) => { setWizOpen(false); load(); loadInfra(); onOpen({ id: pid, name, slug }) }} />
       )}
       {infraModals}
     </>
