@@ -1961,6 +1961,10 @@ def _refresh_infra_cloudinit(project_id: int, emit=None, password=None) -> bool:
             dpub = _derive_public_key(cred.get("secret") or "")
             if dpub:
                 keys.append(dpub)
+    # A literal public key pasted in Access (deduped/sanitised by _cloudinit).
+    lit = (meta.get("deploy_public_key") or "").strip()
+    if lit:
+        keys.append(lit)
     ssh_user = (meta.get("ssh_user") or "").strip()
     if not ssh_user:
         m = re.search(r"name:\s*(\S+)", text)
@@ -2402,9 +2406,21 @@ def infra_scaffold(project_id: int, body: dict = Body(...), user: str = Depends(
     return {"path": fname, "created": created}
 
 
+def _mask_infra(row: dict) -> dict:
+    """Prepare an infra row for the API: never send the stored password ciphertext;
+    expose a `has_password` flag instead so the UI can show one is set without
+    echoing it back (the Access field stays blank = 'keep unchanged')."""
+    if not row:
+        return row
+    row = dict(row)
+    has = bool((row.pop("ssh_password_enc", "") or "").strip() or (row.get("ssh_password_ref") or "").strip())
+    row["has_password"] = has
+    return row
+
+
 @app.get("/infra")
 def infra_list(user: str = Depends(current_user)):
-    return {"infra": db.list_infra()}
+    return {"infra": [_mask_infra(r) for r in db.list_infra()]}
 
 
 def _resolve_secret_ref(value: str) -> str:
@@ -2966,22 +2982,32 @@ def infra_update(project_id: int, body: dict = Body(...), user: str = Depends(re
             db.set_infra_ssh_password_enc(project_id, vault.encrypt(pw))
             db.log_audit("infra_ssh_password_set", user,
                          f"project #{project_id} ({'vault' if raw != pw else 'literal'})")
-    if "deploy_credential_id" in body:
-        # Pick a stored SSH credential whose public key is baked into the VMs, so
-        # that credential can log in. Empty/null clears it. Its key lands in the
-        # cloud-init on the rebuild below (re-apply to push it to existing VMs).
-        v = body.get("deploy_credential_id")
-        cid = int(v) if v not in (None, "", 0) else None
-        if cid is not None:
-            cred = db.get_credential(cid)
-            if not cred:
-                raise HTTPException(status_code=404, detail="Credential not found.")
-            if cred.get("kind") != "ssh":
-                raise HTTPException(status_code=400, detail="Pick an SSH key credential (not a password/cloud one).")
+    if "deploy_credential_id" in body or "deploy_public_key" in body:
+        # The key baked into the VMs, from EITHER a stored SSH credential (pick from
+        # the Credentials tab) OR a literal public key pasted in Access. Setting one
+        # clears the other; empty on both falls back to just the SLEP managed key.
+        # The key lands in the cloud-init on the rebuild below (re-apply, or Fix SSH,
+        # pushes it to existing VMs).
+        cid = None
+        if "deploy_credential_id" in body:
+            v = body.get("deploy_credential_id")
+            cid = int(v) if v not in (None, "", 0) else None
+            if cid is not None:
+                cred = db.get_credential(cid)
+                if not cred:
+                    raise HTTPException(status_code=404, detail="Credential not found.")
+                if cred.get("kind") != "ssh":
+                    raise HTTPException(status_code=400, detail="Pick an SSH key credential (not a password/cloud one).")
+        lit = ""
+        if "deploy_public_key" in body:
+            lit = infra._sanitize_pubkey(str(body.get("deploy_public_key") or ""))
+            if lit and not any(lit.startswith(t) for t in ("ssh-ed25519 ", "ssh-rsa ", "ecdsa-sha2-", "ssh-dss ", "sk-ssh-", "sk-ecdsa-")):
+                raise HTTPException(status_code=400, detail="That doesn't look like an SSH public key (should start with e.g. ssh-ed25519 or ssh-rsa).")
         db.set_infra_deploy_credential(project_id, cid)
+        db.set_infra_deploy_public_key(project_id, lit)
         _refresh_infra_cloudinit(project_id)
-        db.log_audit("infra_deploy_credential_set", user, f"project #{project_id} → {cid}")
-    return db.get_infra(project_id)
+        db.log_audit("infra_deploy_key_set", user, f"project #{project_id} cred={cid} literal={'yes' if lit else 'no'}")
+    return _mask_infra(db.get_infra(project_id))
 
 
 def _enroll_infra_hosts(project_id: int, controller_id=None):

@@ -315,6 +315,10 @@ def init_db() -> None:
         # whether the operator entered a literal or a Vault variable. Never plaintext.
         if "ssh_password_enc" not in infra_cols:
             c.execute("ALTER TABLE infra ADD COLUMN ssh_password_enc TEXT DEFAULT ''")
+        # A literal public key pasted in ⚙ Access (instead of, or besides, picking a
+        # stored credential) — baked into the VMs' cloud-init so its holder can log in.
+        if "deploy_public_key" not in infra_cols:
+            c.execute("ALTER TABLE infra ADD COLUMN deploy_public_key TEXT DEFAULT ''")
         # Multi-tenancy: every owned resource carries an org_id. Add the column
         # where missing, then adopt any orphaned rows + existing users into a
         # 'Default' organization so pre-tenancy installs keep working unchanged.
@@ -687,6 +691,13 @@ def set_infra_ssh_password_enc(project_id, ciphertext):
     'Fix SSH' can reuse it. Empty clears it."""
     with _connect() as c:
         c.execute("UPDATE infra SET ssh_password_enc=? WHERE project_id=?", (ciphertext or "", project_id))
+
+
+def set_infra_deploy_public_key(project_id, pubkey):
+    """Store a literal public key to bake into the VMs (alongside/instead of a
+    credential). Empty clears it."""
+    with _connect() as c:
+        c.execute("UPDATE infra SET deploy_public_key=? WHERE project_id=?", (pubkey or "", project_id))
 
 
 def list_infra():

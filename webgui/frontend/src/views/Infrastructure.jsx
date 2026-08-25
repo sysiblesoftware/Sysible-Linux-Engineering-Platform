@@ -76,7 +76,9 @@ export function JumpHostEditor({ r, onClose, onSaved }) {
   const [pw, setPw] = useState('')
   const [bastion, setBastion] = useState(r.bastion || '')
   const [creds, setCreds] = useState([])
-  const [credId, setCredId] = useState(r.deploy_credential_id ? String(r.deploy_credential_id) : '')
+  // Deploy key source: '' = SLEP managed key, a credential id, or '__literal' (paste)
+  const [credId, setCredId] = useState(r.deploy_public_key ? '__literal' : (r.deploy_credential_id ? String(r.deploy_credential_id) : ''))
+  const [litKey, setLitKey] = useState(r.deploy_public_key || '')
   useEffect(() => { api('credentials').then((d) => setCreds((d.credentials || []).filter((c) => c.kind === 'ssh'))) }, [])
   const { wrap, node } = useErr()
   return (
@@ -89,18 +91,26 @@ export function JumpHostEditor({ r, onClose, onSaved }) {
       <Field label="Login user — the account keys are installed on (e.g. admin)">
         <input value={sshUser} autoFocus onChange={(e) => setSshUser(e.target.value)} placeholder="admin" />
       </Field>
-      <Field label="Login password — a literal, or a Vault variable like vault.admin_pw (turns on password SSH; leave blank to keep unchanged)">
-        <input value={pw} onChange={(e) => setPw(e.target.value)} placeholder="admin_pass or vault.admin_pw" />
+      <Field label={`Login password — a literal, or a Vault variable like vault.admin_pw${r.has_password ? ' (a password is already set — leave blank to keep it)' : ' (turns on password SSH)'}`}>
+        <input value={pw} onChange={(e) => setPw(e.target.value)} placeholder={r.has_password ? '•••••••• (set — type to change)' : 'admin_pass or vault.admin_pw'} />
       </Field>
-      <Field label="Deploy SSH credential — a stored credential whose key is baked into the VMs (so it can log in)">
+      <Field label="Deploy SSH credential — whose public key is baked into the VMs (so it can log in)">
         <select value={credId} onChange={(e) => setCredId(e.target.value)}>
           <option value="">SLEP managed key (default)</option>
           {creds.map((c) => <option key={c.id} value={c.id}>{c.name}{c.username ? ` (${c.username})` : ''}</option>)}
+          <option value="__literal">＋ Paste a public key…</option>
         </select>
-        <div className="faint" style={{ fontSize: 11 }}>
-          {creds.length === 0 ? <>No stored SSH credentials — add one under <b>Credentials</b>.</>
-            : 'Its public key is added to the cloud-init; re-apply to push it to existing VMs.'}
-        </div>
+        {credId === '__literal'
+          ? <>
+              <textarea rows={2} value={litKey} onChange={(e) => setLitKey(e.target.value)}
+                placeholder="ssh-ed25519 AAAA… user@host"
+                style={{ fontFamily: 'ui-monospace,monospace', fontSize: 11.5, marginTop: 4 }} />
+              <div className="faint" style={{ fontSize: 11 }}>Paste an OpenSSH public key — baked into the cloud-init; re-apply (or Fix SSH) to push it to existing VMs.</div>
+            </>
+          : <div className="faint" style={{ fontSize: 11 }}>
+              {creds.length === 0 ? <>No stored SSH credentials — add one under <b>Credentials</b>, or paste a key.</>
+                : 'Pick a stored credential (from the Credentials tab) or paste a key; it’s added to the cloud-init.'}
+            </div>}
       </Field>
       <Field label="Jump host (user@host[:port]) — empty for a direct connection">
         <input value={bastion} onChange={(e) => setBastion(e.target.value)} placeholder="admin@192.168.8.212" />
@@ -112,7 +122,9 @@ export function JumpHostEditor({ r, onClose, onSaved }) {
           const body = { bastion: bastion.trim() }
           if (sshUser.trim() && sshUser.trim() !== (r.ssh_user || '')) body.ssh_user = sshUser.trim()
           if (pw.trim()) body.ssh_password = pw.trim()
-          if (credId !== (r.deploy_credential_id ? String(r.deploy_credential_id) : '')) body.deploy_credential_id = credId ? Number(credId) : null
+          // Deploy key: a stored credential, a pasted literal, or the managed key.
+          if (credId === '__literal') { body.deploy_public_key = litKey.trim(); body.deploy_credential_id = null }
+          else { body.deploy_credential_id = credId ? Number(credId) : null; body.deploy_public_key = '' }
           await api(`infra/${r.project_id}`, { method: 'PATCH', json: body })
           onSaved()
         })}>Save</button>

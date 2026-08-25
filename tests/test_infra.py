@@ -1500,3 +1500,35 @@ def test_literal_password_stored_and_usable_for_fix_ssh(client, monkeypatch):
     d = client.post(f"/infra/{pid}/distribute-key").json()
     assert d["total"] == 1 and d["installed"] == 1                    # no "no password" note
     assert seen["env"].get("SSHPASS") == "admin_pass"                 # the literal is used
+
+
+def test_access_literal_public_key_baked(client):
+    """Access can bake a LITERAL public key (pasted, no stored credential needed),
+    and picking one source clears the other."""
+    import backend.db as db
+    pid = client.post("/infra", json={"name": "litkey", "provider": "libvirt",
+                                      "options": {"count": 1, "base_image": "x", "ssh_user": "admin"}}).json()["project_id"]
+    key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILITERALKEY user@box"
+    r = client.patch(f"/infra/{pid}", json={"deploy_public_key": key})
+    assert r.status_code == 200
+    assert db.get_infra(pid)["deploy_public_key"].startswith("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILITERALKEY")
+    ci = (db.project_dir(pid) / "cloudinit.cfg").read_text()
+    assert "AAAAC3NzaC1lZDI1NTE5AAAAILITERALKEY" in ci      # baked in
+    # Garbage is rejected.
+    assert client.patch(f"/infra/{pid}", json={"deploy_public_key": "not a key"}).status_code == 400
+    # Switching to a credential clears the literal.
+    cid = client.post("/credentials", json={"name": "k2", "kind": "ssh", "username": "u", "secret": "PRIV"}).json()["id"]
+    client.patch(f"/infra/{pid}", json={"deploy_credential_id": cid, "deploy_public_key": ""})
+    assert (db.get_infra(pid)["deploy_public_key"] or "") == "" and db.get_infra(pid)["deploy_credential_id"] == cid
+
+
+def test_infra_has_password_flag_no_ciphertext_leak(client):
+    """GET /infra exposes has_password but never the stored ciphertext."""
+    import backend.db as db
+    pid = client.post("/infra", json={"name": "hp", "provider": "libvirt",
+                                      "options": {"count": 1, "base_image": "x", "ssh_user": "admin"}}).json()["project_id"]
+    row = next(r for r in client.get("/infra").json()["infra"] if r["project_id"] == pid)
+    assert row["has_password"] is False and "ssh_password_enc" not in row
+    client.patch(f"/infra/{pid}", json={"ssh_password": "admin_pass"})
+    row = next(r for r in client.get("/infra").json()["infra"] if r["project_id"] == pid)
+    assert row["has_password"] is True and "ssh_password_enc" not in row
