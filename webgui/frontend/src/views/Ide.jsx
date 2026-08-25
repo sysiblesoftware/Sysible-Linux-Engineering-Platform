@@ -178,7 +178,7 @@ const snippetsFor = (path) => {
   return { groups: [...PLAY_GROUPS, ...ANSIBLE_SNIPPETS], verb: 'Task', engine: 'ansible' }
 }
 
-export default function Ide({ project, onBack, onRun, onInfraChanged }) {
+export default function Ide({ project, onBack, onRun, onInfraChanged, theme }) {
   const [tree, setTree] = useState([])
   const [path, setPath] = useState(null)
   const [content, setContent] = useState('')
@@ -505,7 +505,7 @@ export default function Ide({ project, onBack, onRun, onInfraChanged }) {
         <div className="ide-gutter" onMouseDown={startTreeDrag} title="Drag to resize the Explorer" />
         <div className="edwrap" onContextMenu={(e) => { if (path != null) { e.preventDefault(); setMenu({ x: e.clientX, y: e.clientY }) } }}>
           <div className="edtool"><span className="muted">{path || 'No file open'}{!saved && ' •'}</span></div>
-          <Editor height="100%" theme={getTheme() === 'light' ? 'sysible-light' : 'sysible-dark'} path={path || 'untitled'} language={langFor(path || '')}
+          <Editor height="100%" theme={(theme || getTheme()) === 'light' ? 'sysible-light' : 'sysible-dark'} path={path || 'untitled'} language={langFor(path || '')}
             value={content} onChange={(v) => { setContent(v ?? ''); setSaved(false); validate() }}
             beforeMount={beforeMount}
             onMount={(ed, monaco) => { editorRef.current = ed; monacoRef.current = monaco; validate() }}

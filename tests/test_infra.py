@@ -305,7 +305,9 @@ def test_test_hypervisor_preflights_network_and_pool(client, monkeypatch):
         if "net-list" in cmd:
             return R(0, "homelab\n")                                   # what IS available
         if "pool-info" in cmd:
-            return R(0, "Name: default\nState: running\nActive:         yes\n")
+            # Real `virsh pool-info` reports "State: running" — NOT "Active: yes"
+            # (that's net-info). A running pool must read as active.
+            return R(0, "Name:           default\nUUID:           x\nState:          running\nPersistent:     yes\nAutostart:      yes\n")
         return R(0, "")
     monkeypatch.setattr(appmod.subprocess, "run", fake_run)
 
@@ -313,7 +315,28 @@ def test_test_hypervisor_preflights_network_and_pool(client, monkeypatch):
     assert d["ok"] is False
     assert "network 'default'" in d["output"] and "MISSING" in d["output"]
     assert "available: homelab" in d["output"]                        # points at the real one
-    assert "storage pool 'default': ✓" in d["output"]
+    assert "storage pool 'default': ✓" in d["output"]                 # running pool → active
+
+
+def test_test_hypervisor_pool_inactive_detected(client, monkeypatch):
+    """An actually-inactive pool (State: inactive) is flagged, not silently passed."""
+    import shutil
+    import backend.app as appmod
+    monkeypatch.setattr(shutil, "which", lambda b: "/usr/bin/virsh")
+
+    class R:
+        def __init__(self, rc, out):
+            self.returncode, self.stdout, self.stderr = rc, out, ""
+
+    def fake_run(cmd, **k):
+        if "version" in cmd:
+            return R(0, "libvirt 8.0.0")
+        if "pool-info" in cmd:
+            return R(0, "Name: default\nState:          inactive\n")
+        return R(0, "")
+    monkeypatch.setattr(appmod.subprocess, "run", fake_run)
+    d = client.post("/infra/test-hypervisor", json={"uri": "qemu:///system", "pool": "default"}).json()
+    assert d["ok"] is False and "INACTIVE" in d["output"]
 
 
 def test_pipeline_runs_steps_in_sequence(client, monkeypatch):

@@ -122,7 +122,7 @@ export default function App() {
       <main className="view">
         {runId == null && !project && <HealthBanner />}
         {runId != null ? <RunLog runId={runId} onBack={() => setRunId(null)} onOpenRun={setRunId} />
-          : project ? <><InfraActions project={project} refreshKey={infraBump} onOpenRun={setRunId} onOpenProject={setProject} /><Ide project={project} onBack={() => setProject(null)} onRun={(id) => setRunId(id)} onInfraChanged={() => setInfraBump((n) => n + 1)} /></>
+          : project ? <><InfraActions project={project} refreshKey={infraBump} onOpenRun={setRunId} onOpenProject={setProject} /><Ide project={project} theme={theme} onBack={() => setProject(null)} onRun={(id) => setRunId(id)} onInfraChanged={() => setInfraBump((n) => n + 1)} /></>
             : view === 'organizations' ? <Organizations />
             : view === 'projects' ? <Projects onOpen={setProject} onOpenRun={setRunId} />
               : view === 'inventories' ? <Inventories />

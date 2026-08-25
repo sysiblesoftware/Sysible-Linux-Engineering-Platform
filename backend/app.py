@@ -2021,9 +2021,12 @@ def infra_test_hypervisor(body: dict = Body(...), user: str = Depends(current_us
         # must exist and be active, or `libvirt_domain` / `libvirt_volume` fail. On a
         # miss, list what IS available so the operator knows what to use (e.g. this
         # host has 'homelab', not 'default').
-        for label, sub, listsub, name in (
-                ("network", "net-info", "net-list", network),
-                ("storage pool", "pool-info", "pool-list", pool)):
+        # Note the DIFFERENT liveness fields: `virsh net-info` prints "Active: yes",
+        # but `virsh pool-info` prints "State: running" (no Active line) — using one
+        # regex for both made every pool read as INACTIVE even when running.
+        for label, sub, listsub, name, active_re in (
+                ("network", "net-info", "net-list", network, r"Active:\s+yes"),
+                ("storage pool", "pool-info", "pool-list", pool, r"State:\s+running")):
             if not name:
                 continue
             try:
@@ -2036,7 +2039,7 @@ def infra_test_hypervisor(body: dict = Body(...), user: str = Depends(current_us
                 avail = avail_names(listsub)
                 out += f"\n• {label} '{name}': ✗ MISSING" + (f" — available: {', '.join(avail)}" if avail else " (none defined)")
                 ok = False
-            elif not re.search(r"Active:\s+yes", c2.stdout):
+            elif not re.search(active_re, c2.stdout):
                 out += f"\n• {label} '{name}': ✗ defined but INACTIVE — start it (virsh {sub.split('-')[0]}-start {name})"
                 ok = False
             else:

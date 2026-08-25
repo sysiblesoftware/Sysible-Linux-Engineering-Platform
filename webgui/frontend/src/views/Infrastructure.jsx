@@ -494,9 +494,14 @@ function LibvirtConnect({ values, set }) {
             </div>
           )}
           <div className="row" style={{ gap: 10, alignItems: 'center', marginTop: 8 }}>
-            <button className="ghost sm" onClick={() => wrap(async () => setKey(await api('infra/hypervisor-key', { method: 'POST' })))}>
-              🔑 {key ? 'Regenerate deploy key' : 'Get deploy key'}
-            </button>
+            {!key
+              ? <button className="ghost sm" onClick={() => wrap(async () => setKey(await api('infra/hypervisor-key', { method: 'POST' })))}>🔑 Get deploy key</button>
+              : <button className="ghost sm" title="Mint a brand-new SLEP key — the old one stops working; re-install it here or with the password button"
+                  onClick={() => wrap(async () => {
+                    if (!window.confirm('Regenerate SLEP’s managed key?\n\nA brand-new key is minted and the OLD one stops working immediately — you must re-install it on this (and every other) hypervisor. Continue?')) return
+                    const r = await api('infra/managed-key/regenerate', { method: 'POST' })
+                    setKey({ public_key: r.public_key, keyfile: (key && key.keyfile) || '' })
+                  })}>🔑 Regenerate deploy key</button>}
             <span className="faint" style={{ fontSize: 12 }}>No password? Install SLEP’s key by hand once — then this and every future hypervisor just works.</span>
           </div>
           {key && cmd && (
