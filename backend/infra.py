@@ -310,6 +310,12 @@ resource "aws_instance" "vm" {{
   ami           = var.ami
   instance_type = var.instance_type
   user_data     = file("${{path.module}}/cloudinit.cfg")
+  # cloud-init (user_data) only runs on an instance's FIRST boot, and AWS keeps a
+  # stable per-instance id — so editing the account/password and re-applying would
+  # otherwise update the attribute but never re-run it on the running box (the same
+  # trap the libvirt instance-id hash avoids). Replace the instance when the
+  # cloud-init changes so the new account is actually applied.
+  user_data_replace_on_change = true
 
   root_block_device {{
     volume_size = var.disk_size
@@ -351,6 +357,8 @@ resource "digitalocean_droplet" "vm" {{
   region    = var.region
   size      = var.size
   image     = var.image
+  # user_data is force-new on digitalocean_droplet, so editing the account/password
+  # and re-applying recreates the droplet — cloud-init runs fresh and applies it.
   user_data = file("${{path.module}}/cloudinit.cfg")
   tags      = [var.environment, "slep"]
 }}
@@ -675,6 +683,8 @@ resource "azurerm_linux_virtual_machine" "vm" {{
   size                  = var.vm_size
   admin_username        = var.admin_user
   network_interface_ids = [azurerm_network_interface.nic[count.index].id]
+  # custom_data is force-new on azurerm_linux_virtual_machine, so editing the
+  # account/password and re-applying recreates the VM — cloud-init runs fresh.
   custom_data           = base64encode(file("${{path.module}}/cloudinit.cfg"))
 
   admin_ssh_key {{
