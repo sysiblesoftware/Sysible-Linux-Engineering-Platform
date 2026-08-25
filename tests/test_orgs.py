@@ -80,3 +80,39 @@ def test_only_system_admin_manages_orgs(client):
     assert op.post("/organizations", json={"name": "Nope"}).status_code == 403
     default_id = _default_org(client)
     assert op.delete(f"/organizations/{default_id}").status_code in (400, 403)
+
+
+def test_cross_org_resource_isolation(client):
+    """An operator in org B cannot reach org A's project files, runs, credentials,
+    vault, or infra by guessing ids — the resource-route org guards."""
+    acme = client.post("/organizations", json={"name": "Isolate-Acme"}).json()
+    a_id = acme["id"]
+    default_id = _default_org(client)
+    # Victim resources live in Acme (created by the system admin).
+    proj = client.post("/projects", json={"name": "acme-proj", "org_id": a_id}).json()
+    pid = proj["id"]
+    client.put(f"/projects/{pid}/file", json={"path": "secret.yml", "content": "top: secret"})
+    cred = client.post("/credentials", json={"name": "acme-cred", "kind": "ssh_password",
+                                             "username": "admin", "secret": "pw", "org_id": a_id}).json()
+    client.post("/vault", json={"name": "acme_secret", "value": "v", "org_id": a_id})
+    # Attacker is an operator ONLY in Default.
+    client.post("/users", json={"username": "iso_op", "password": "iso-operator-pw", "role": "operator"})
+    op = _login("iso_op", "iso-operator-pw")
+
+    # Reads across the tenant boundary are refused.
+    assert op.get(f"/projects/{pid}").status_code == 403
+    assert op.get(f"/projects/{pid}/files").status_code == 403
+    assert op.get(f"/projects/{pid}/file?path=secret.yml").status_code == 403
+    # Writes/mutations are refused.
+    assert op.put(f"/projects/{pid}/file", json={"path": "x", "content": "y"}).status_code == 403
+    assert op.delete(f"/projects/{pid}").status_code == 403
+    assert op.patch(f"/credentials/{cred['id']}", json={"become_password": "x"}).status_code == 403
+    assert op.delete(f"/credentials/{cred['id']}").status_code == 403
+    # A run in the attacker's OWN project may not borrow Acme's credential.
+    myproj = op.post("/projects", json={"name": "mine", "org_id": default_id}).json()
+    r = op.post("/runs", json={"project_id": myproj["id"], "kind": "ansible",
+                               "target": "site.yml", "credential_id": cred["id"]})
+    assert r.status_code == 403
+    # The attacker's vault list never shows Acme's secret name.
+    names = {s["name"] for s in op.get("/vault").json()["secrets"]}
+    assert "acme_secret" not in names

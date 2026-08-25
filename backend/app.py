@@ -231,6 +231,48 @@ def _require_org(request: Request, org_id, min_role: str = "operator") -> str:
     return _session_or_401(request)["user"]
 
 
+def _guard_project(request: Request, project_id, min_role: str = "operator"):
+    """Ensure the caller may act on this project's organization, and return the project
+    row. 404 when the project doesn't exist. Legacy projects with no org_id (pre-
+    tenancy) fall back to a global role check so old installs keep working. This is the
+    single choke point that stops one tenant reaching another's project (files, git,
+    infra, runs) by guessing an id."""
+    p = db.get_project(project_id)
+    if not p:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    org_id = p.get("org_id")
+    if org_id:
+        _require_org(request, org_id, min_role)
+    else:
+        # No org on the row — require the equivalent GLOBAL role (backward compat).
+        need = {"viewer": "viewer", "operator": "operator", "admin": "operator"}[min_role]
+        s = _session_or_401(request)
+        if ROLE_RANK.get(s.get("role", "viewer"), 1) < ROLE_RANK[need]:
+            raise HTTPException(status_code=403, detail=f"Requires the {need} role.")
+    return p
+
+
+def _guard_inventory(request: Request, iid, min_role: str = "operator"):
+    """Load an inventory and enforce access to its org. Returns the inventory row."""
+    inv = db.get_inventory(iid)
+    if not inv:
+        raise HTTPException(status_code=404, detail="Inventory not found.")
+    _guard_object_org(request, inv.get("org_id"), min_role)
+    return inv
+
+
+def _guard_object_org(request: Request, org_id, min_role: str = "operator"):
+    """Org guard for a resource identified by its own org_id (inventory, credential,
+    run's project, …). Legacy NULL org falls back to the global role check."""
+    if org_id:
+        _require_org(request, org_id, min_role)
+        return
+    need = {"viewer": "viewer", "operator": "operator", "admin": "operator"}[min_role]
+    s = _session_or_401(request)
+    if ROLE_RANK.get(s.get("role", "viewer"), 1) < ROLE_RANK[need]:
+        raise HTTPException(status_code=403, detail=f"Requires the {need} role.")
+
+
 def _mask_extra_vars(row, role):
     """A run row's extra_vars may hold a secret an operator typed into the Variables
     box. Viewers see the var KEYS but masked VALUES; operator+ see them in full.
@@ -630,11 +672,8 @@ def create_project(request: Request, body: dict = Body(...), user: str = Depends
 
 
 @app.get("/projects/{pid}")
-def get_project(pid: int, user: str = Depends(current_user)):
-    p = db.get_project(pid)
-    if not p:
-        raise HTTPException(status_code=404, detail="Project not found.")
-    return p
+def get_project(pid: int, request: Request, user: str = Depends(current_user)):
+    return _guard_project(request, pid, "viewer")
 
 
 @app.patch("/projects/{pid}")
@@ -662,7 +701,8 @@ def move_project(pid: int, request: Request, body: dict = Body(...), user: str =
 
 
 @app.delete("/projects/{pid}")
-def delete_project(pid: int, user: str = Depends(current_user)):
+def delete_project(pid: int, request: Request, user: str = Depends(current_user)):
+    _guard_project(request, pid, "operator")
     db.delete_project(pid)
     return {"status": "deleted"}
 
@@ -687,14 +727,14 @@ def _tree(root: Path):
 
 
 @app.get("/projects/{pid}/files")
-def list_files(pid: int, user: str = Depends(current_user)):
-    if not db.get_project(pid):
-        raise HTTPException(status_code=404, detail="Project not found.")
+def list_files(pid: int, request: Request, user: str = Depends(current_user)):
+    _guard_project(request, pid, "viewer")
     return {"files": _tree(db.project_dir(pid).resolve())}
 
 
 @app.get("/projects/{pid}/file")
-def read_file(pid: int, path: str = Query(...), user: str = Depends(current_user)):
+def read_file(pid: int, request: Request, path: str = Query(...), user: str = Depends(current_user)):
+    _guard_project(request, pid, "viewer")
     target = _safe_path(pid, path)
     if not target.is_file():
         raise HTTPException(status_code=404, detail="File not found.")
@@ -705,7 +745,8 @@ def read_file(pid: int, path: str = Query(...), user: str = Depends(current_user
 
 
 @app.put("/projects/{pid}/file")
-def write_file(pid: int, body: dict = Body(...), user: str = Depends(current_user)):
+def write_file(pid: int, request: Request, body: dict = Body(...), user: str = Depends(current_user)):
+    _guard_project(request, pid, "operator")
     path = str(body.get("path") or "").strip()
     if not path:
         raise HTTPException(status_code=400, detail="path is required.")
@@ -717,10 +758,11 @@ def write_file(pid: int, body: dict = Body(...), user: str = Depends(current_use
 
 
 @app.post("/projects/{pid}/file")
-def create_path(pid: int, body: dict = Body(...), user: str = Depends(current_user)):
+def create_path(pid: int, request: Request, body: dict = Body(...), user: str = Depends(current_user)):
     """Create a file or a directory (type=dir). An optional `content` seeds a new
     file with starter text (e.g. a Terraform / Ansible / Salt template) — only
     applied when the file doesn't already exist, so it never clobbers."""
+    _guard_project(request, pid, "operator")
     path = str(body.get("path") or "").strip()
     if not path:
         raise HTTPException(status_code=400, detail="path is required.")
@@ -740,25 +782,22 @@ def create_path(pid: int, body: dict = Body(...), user: str = Depends(current_us
 # by ansible-playbook at run time). These give the console a first-class handle
 # on it — create from a SLEP-tuned template, read, and validate-on-save.
 @app.get("/projects/{pid}/config")
-def get_config(pid: int, user: str = Depends(current_user)):
-    if not db.get_project(pid):
-        raise HTTPException(status_code=404, detail="Project not found.")
+def get_config(pid: int, request: Request, user: str = Depends(current_user)):
+    _guard_project(request, pid, "viewer")
     return projcfg.read(pid)
 
 
 @app.post("/projects/{pid}/config/default")
-def create_default_config(pid: int, user: str = Depends(current_user)):
+def create_default_config(pid: int, request: Request, user: str = Depends(current_user)):
     """Create ansible.cfg from the starter template if it doesn't exist yet."""
-    if not db.get_project(pid):
-        raise HTTPException(status_code=404, detail="Project not found.")
+    _guard_project(request, pid, "operator")
     db.log_audit("config_default", user, f"project:{pid}")
     return projcfg.ensure_default(pid)
 
 
 @app.put("/projects/{pid}/config")
-def put_config(pid: int, body: dict = Body(...), user: str = Depends(current_user)):
-    if not db.get_project(pid):
-        raise HTTPException(status_code=404, detail="Project not found.")
+def put_config(pid: int, request: Request, body: dict = Body(...), user: str = Depends(current_user)):
+    _guard_project(request, pid, "operator")
     try:
         return projcfg.write(pid, str(body.get("content") or ""))
     except ValueError as e:
@@ -774,50 +813,54 @@ def _git(fn):
 
 
 @app.get("/projects/{pid}/git/status")
-def git_status(pid: int, user: str = Depends(current_user)):
-    if not db.get_project(pid):
-        raise HTTPException(status_code=404, detail="Project not found.")
+def git_status(pid: int, request: Request, user: str = Depends(current_user)):
+    _guard_project(request, pid, "viewer")
     return _git(lambda: gitops.status(pid))
 
 
 @app.post("/projects/{pid}/git/init")
-def git_init(pid: int, user: str = Depends(current_user)):
+def git_init(pid: int, request: Request, user: str = Depends(current_user)):
+    _guard_project(request, pid, "operator")
     db.log_audit("git_init", user, f"project:{pid}")
     return _git(lambda: gitops.init(pid))
 
 
 @app.post("/projects/{pid}/git/commit")
-def git_commit(pid: int, body: dict = Body(...), user: str = Depends(current_user)):
+def git_commit(pid: int, request: Request, body: dict = Body(...), user: str = Depends(current_user)):
+    _guard_project(request, pid, "operator")
     paths = body.get("paths")
     return _git(lambda: gitops.commit(pid, str(body.get("message") or ""),
                                       paths=list(paths) if isinstance(paths, list) else None))
 
 
 @app.get("/projects/{pid}/git/log")
-def git_log(pid: int, user: str = Depends(current_user)):
+def git_log(pid: int, request: Request, user: str = Depends(current_user)):
+    _guard_project(request, pid, "viewer")
     return {"commits": _git(lambda: gitops.log(pid))}
 
 
 @app.get("/projects/{pid}/git/diff", response_class=PlainTextResponse)
-def git_diff(pid: int, path: str | None = None, staged: bool = False, user: str = Depends(current_user)):
+def git_diff(pid: int, request: Request, path: str | None = None, staged: bool = False, user: str = Depends(current_user)):
+    _guard_project(request, pid, "viewer")
     return PlainTextResponse(_git(lambda: gitops.diff(pid, path=path, staged=staged)))
 
 
 @app.get("/projects/{pid}/git/branches")
-def git_branches(pid: int, user: str = Depends(current_user)):
+def git_branches(pid: int, request: Request, user: str = Depends(current_user)):
+    _guard_project(request, pid, "viewer")
     return {"branches": _git(lambda: gitops.branches(pid))}
 
 
 @app.post("/projects/{pid}/git/checkout")
-def git_checkout(pid: int, body: dict = Body(...), user: str = Depends(current_user)):
+def git_checkout(pid: int, request: Request, body: dict = Body(...), user: str = Depends(current_user)):
+    _guard_project(request, pid, "operator")
     return _git(lambda: gitops.checkout(pid, str(body.get("branch") or ""), create=bool(body.get("create"))))
 
 
 @app.post("/projects/{pid}/git/remote")
-def git_remote(pid: int, body: dict = Body(...), user: str = Depends(current_user)):
+def git_remote(pid: int, request: Request, body: dict = Body(...), user: str = Depends(current_user)):
     """Set the remote URL and (optionally) an encrypted push/pull token."""
-    if not db.get_project(pid):
-        raise HTTPException(status_code=404, detail="Project not found.")
+    _guard_project(request, pid, "operator")
     if "url" in body:
         gitops.set_remote(pid, str(body.get("url") or ""))
     if "token" in body:
@@ -827,21 +870,24 @@ def git_remote(pid: int, body: dict = Body(...), user: str = Depends(current_use
 
 
 @app.post("/projects/{pid}/git/push")
-def git_push(pid: int, user: str = Depends(current_user)):
+def git_push(pid: int, request: Request, user: str = Depends(current_user)):
+    _guard_project(request, pid, "operator")
     db.log_audit("git_push", user, f"project:{pid}")
     return _git(lambda: gitops.push(pid))
 
 
 @app.post("/projects/{pid}/git/pull")
-def git_pull(pid: int, user: str = Depends(current_user)):
+def git_pull(pid: int, request: Request, user: str = Depends(current_user)):
+    _guard_project(request, pid, "operator")
     db.log_audit("git_pull", user, f"project:{pid}")
     return _git(lambda: gitops.pull(pid))
 
 
 @app.post("/projects/{pid}/file/rename")
-def rename_path(pid: int, body: dict = Body(...), user: str = Depends(current_user)):
+def rename_path(pid: int, request: Request, body: dict = Body(...), user: str = Depends(current_user)):
     """Rename/move a file or directory within the project (both paths are
     confined to the project dir by _safe_path)."""
+    _guard_project(request, pid, "operator")
     src = _safe_path(pid, str(body.get("from") or "").strip())
     dst = _safe_path(pid, str(body.get("to") or "").strip())
     if not str(body.get("to") or "").strip():
@@ -857,8 +903,9 @@ def rename_path(pid: int, body: dict = Body(...), user: str = Depends(current_us
 
 
 @app.delete("/projects/{pid}/file")
-def delete_path(pid: int, path: str = Query(...), user: str = Depends(current_user)):
+def delete_path(pid: int, request: Request, path: str = Query(...), user: str = Depends(current_user)):
     import shutil
+    _guard_project(request, pid, "operator")
     target = _safe_path(pid, path)
     if target.is_dir():
         shutil.rmtree(target, ignore_errors=True)
@@ -897,31 +944,38 @@ def create_credential(request: Request, body: dict = Body(...), user: str = Depe
 
 
 @app.patch("/credentials/{cid}")
-def update_credential(cid: int, body: dict = Body(...), user: str = Depends(current_user)):
+def update_credential(cid: int, request: Request, body: dict = Body(...), user: str = Depends(current_user)):
     """Set or clear a credential's sudo/become password (encrypted at rest). Lets
     the auto-created 'SLEP managed key' carry the sudo password for `become` tasks."""
-    if not db.get_credential(cid):
+    cred = db.get_credential(cid)
+    if not cred:
         raise HTTPException(status_code=404, detail="Credential not found.")
+    _guard_object_org(request, cred.get("org_id"), "operator")
     if "become_password" in body:
         db.set_credential_become(cid, str(body.get("become_password") or ""))   # encrypted at rest by db
     return db.get_credential(cid)
 
 
 @app.delete("/credentials/{cid}")
-def delete_credential(cid: int, user: str = Depends(current_user)):
+def delete_credential(cid: int, request: Request, user: str = Depends(current_user)):
+    cred = db.get_credential(cid)
+    if not cred:
+        raise HTTPException(status_code=404, detail="Credential not found.")
+    _guard_object_org(request, cred.get("org_id"), "operator")
     db.delete_credential(cid)
     return {"status": "deleted"}
 
 
 # ------------------------------------------------------------------ vault (secrets)
 @app.get("/vault")
-def vault_list(user: str = Depends(require_operator)):
-    """Secret names only — values are encrypted and never returned."""
-    return {"secrets": db.list_secrets()}
+def vault_list(request: Request, user: str = Depends(require_operator)):
+    """Secret names only — values are encrypted and never returned. Scoped to the
+    caller's orgs so one tenant can't enumerate another's secret names."""
+    return {"secrets": db.list_secrets(_visible_org_ids(request))}
 
 
 @app.post("/vault")
-def vault_set(body: dict = Body(...), user: str = Depends(require_operator)):
+def vault_set(request: Request, body: dict = Body(...), user: str = Depends(require_operator)):
     """Create or replace a secret. `name` is referenced from playbooks as
     {{ vault.NAME }}; the value is encrypted at rest and never returned."""
     name = str(body.get("name") or "").strip()
@@ -931,16 +985,24 @@ def vault_set(body: dict = Body(...), user: str = Depends(require_operator)):
     if value is None or value == "":
         raise HTTPException(status_code=400, detail="Secret value is required.")
     # Ansible var names: letters/digits/underscore, not starting with a digit.
-    import re as _re
-    if not _re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", name):
+    if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", name):
         raise HTTPException(status_code=400,
                             detail="Name must be a valid variable: letters/digits/underscore, no leading digit.")
-    sid = db.upsert_secret(name, vault.encrypt(str(value)))
+    org_id = body.get("org_id") or db.default_org_id()
+    _require_org(request, org_id, "operator")
+    # If the name already exists in ANOTHER org, don't let this write hijack it.
+    existing = db.get_secret_org(next((s["id"] for s in db.list_secrets() if s["name"] == name), 0))
+    if existing and existing != org_id and _effective_org_role(request, existing) is None:
+        raise HTTPException(status_code=409, detail="A secret with that name exists in another organization.")
+    sid = db.upsert_secret(name, vault.encrypt(str(value)), org_id=org_id)
     return {"status": "ok", "id": sid, "name": name}
 
 
 @app.delete("/vault/{sid}")
-def vault_delete(sid: int, user: str = Depends(require_operator)):
+def vault_delete(sid: int, request: Request, user: str = Depends(require_operator)):
+    org_id = db.get_secret_org(sid)
+    if org_id:
+        _require_org(request, org_id, "operator")
     db.delete_secret(sid)
     return {"status": "deleted"}
 
@@ -1165,18 +1227,21 @@ def update_inventory(iid: int, body: dict = Body(...), user: str = Depends(curre
 
 
 @app.delete("/inventories/{iid}")
-def delete_inventory(iid: int, user: str = Depends(current_user)):
+def delete_inventory(iid: int, request: Request, user: str = Depends(current_user)):
+    _guard_inventory(request, iid, "operator")
     db.delete_inventory(iid)
     return {"status": "deleted"}
 
 
 @app.get("/inventories/{iid}/hosts")
-def inventory_hosts(iid: int, user: str = Depends(current_user)):
+def inventory_hosts(iid: int, request: Request, user: str = Depends(current_user)):
+    _guard_inventory(request, iid, "viewer")
     return {"hosts": db.list_hosts(iid)}
 
 
 @app.post("/inventories/{iid}/hosts")
-def add_host(iid: int, body: dict = Body(...), user: str = Depends(current_user)):
+def add_host(iid: int, request: Request, body: dict = Body(...), user: str = Depends(current_user)):
+    _guard_inventory(request, iid, "operator")
     name = str(body.get("name") or "").strip()
     address = str(body.get("address") or "").strip() or name
     if not name:
@@ -1236,7 +1301,8 @@ def controller_hosts(cid: int, user: str = Depends(current_user)):
 
 
 @app.post("/inventories/{iid}/import-controller")
-def import_controller(iid: int, body: dict = Body(...), user: str = Depends(current_user)):
+def import_controller(iid: int, request: Request, body: dict = Body(...), user: str = Depends(current_user)):
+    _guard_inventory(request, iid, "operator")
     """Import hosts into this inventory from a Controller — either a saved one
     (controller_id) or an ad-hoc controller_url + api_key. Pass `host_names` (a
     list) to import only that selection; omit it to import everything."""
@@ -1332,6 +1398,22 @@ def _dispatch_run(project, kind, target, inventory_id, credential_id, extra_vars
     manual /runs route and the scheduler. Returns the run id. `become_password` is
     a transient per-run sudo password — stashed in memory, never persisted.
     `tf_tool` picks Terraform vs OpenTofu ('terraform' | 'tofu') for terraform runs."""
+    # Cross-tenant guard (works for every caller, incl. the scheduler): the credential
+    # and inventory a run uses must belong to the PROJECT's org (or be legacy-unowned).
+    # Otherwise an operator could run their own project with another org's credential
+    # (its key/password gets written to disk for the play) — credential theft.
+    _porg = project.get("org_id")
+    if _porg:
+        if credential_id:
+            cred = db.get_credential(int(credential_id))
+            corg = cred.get("org_id") if cred else None
+            if corg and corg != _porg:
+                raise HTTPException(status_code=403, detail="That credential belongs to a different organization.")
+        if inventory_id:
+            inv = db.get_inventory(int(inventory_id))
+            iorg = inv.get("org_id") if inv else None
+            if iorg and iorg != _porg:
+                raise HTTPException(status_code=403, detail="That inventory belongs to a different organization.")
     run_id = db.create_run(
         project["id"], kind, target, inventory_id=inventory_id,
         credential_id=credential_id, extra_vars=extra_vars or {}, created_by=actor,
@@ -1479,15 +1561,23 @@ def pipeline_group_runs(group_id: str, request: Request, user: str = Depends(cur
 
 # ---- saved pipelines (named, re-runnable sequences) ----
 @app.get("/pipelines")
-def list_saved_pipelines(user: str = Depends(current_user)):
-    return {"pipelines": db.list_pipelines()}
+def list_saved_pipelines(request: Request, user: str = Depends(current_user)):
+    vis = _visible_org_ids(request)
+    rows = db.list_pipelines()
+    if vis is not None:
+        allowed = set(vis)
+        rows = [pl for pl in rows
+                if ((db.get_project(pl["project_id"]) or {}).get("org_id") in allowed
+                    or (db.get_project(pl["project_id"]) or {}).get("org_id") is None)]
+    return {"pipelines": rows}
 
 
 @app.post("/pipelines")
-def create_saved_pipeline(body: dict = Body(...), user: str = Depends(current_user)):
+def create_saved_pipeline(request: Request, body: dict = Body(...), user: str = Depends(current_user)):
     project = db.get_project(body.get("project_id")) if body.get("project_id") else None
     if not project:
         raise HTTPException(status_code=404, detail="Project not found.")
+    _guard_project(request, project["id"], "operator")
     name = str(body.get("name") or "").strip()
     if not name:
         raise HTTPException(status_code=400, detail="A pipeline name is required.")
@@ -1499,9 +1589,11 @@ def create_saved_pipeline(body: dict = Body(...), user: str = Depends(current_us
 
 
 @app.put("/pipelines/{pipeline_id}")
-def edit_saved_pipeline(pipeline_id: int, body: dict = Body(...), user: str = Depends(current_user)):
-    if not db.get_pipeline(pipeline_id):
+def edit_saved_pipeline(pipeline_id: int, request: Request, body: dict = Body(...), user: str = Depends(current_user)):
+    pl = db.get_pipeline(pipeline_id)
+    if not pl:
         raise HTTPException(status_code=404, detail="Pipeline not found.")
+    _guard_project(request, pl["project_id"], "operator")
     steps = body.get("steps")
     if steps is not None:
         _validate_steps(steps)
@@ -1512,30 +1604,36 @@ def edit_saved_pipeline(pipeline_id: int, body: dict = Body(...), user: str = De
 
 
 @app.delete("/pipelines/{pipeline_id}")
-def remove_saved_pipeline(pipeline_id: int, user: str = Depends(current_user)):
+def remove_saved_pipeline(pipeline_id: int, request: Request, user: str = Depends(current_user)):
+    pl = db.get_pipeline(pipeline_id)
+    if not pl:
+        raise HTTPException(status_code=404, detail="Pipeline not found.")
+    _guard_project(request, pl["project_id"], "operator")
     db.delete_pipeline(pipeline_id)
     return {"status": "deleted"}
 
 
 @app.post("/pipelines/{pipeline_id}/run")
-def run_saved_pipeline(pipeline_id: int, user: str = Depends(current_user)):
+def run_saved_pipeline(pipeline_id: int, request: Request, user: str = Depends(current_user)):
     pl = db.get_pipeline(pipeline_id)
     if not pl:
         raise HTTPException(status_code=404, detail="Pipeline not found.")
     project = db.get_project(pl["project_id"])
     if not project:
         raise HTTPException(status_code=404, detail="Project not found.")
+    _guard_project(request, project["id"], "operator")
     _validate_steps(pl["steps"])
     run_ids, group_id = _dispatch_pipeline(project, pl["steps"], user, stop_on_failure=pl["stop_on_failure"])
     return {"status": "launched", "run_ids": run_ids, "group_id": group_id}
 
 
 @app.post("/runs")
-def launch_run(body: dict = Body(...), user: str = Depends(current_user)):
+def launch_run(request: Request, body: dict = Body(...), user: str = Depends(current_user)):
     pid = body.get("project_id")
     project = db.get_project(pid) if pid else None
     if not project:
         raise HTTPException(status_code=404, detail="Project not found.")
+    _guard_project(request, pid, "operator")
     kind = str(body.get("kind") or "ansible")
     if kind not in RUNNERS:
         raise HTTPException(status_code=400,
@@ -1561,18 +1659,27 @@ def runs(request: Request, project_id: int | None = None, user: str = Depends(cu
     return {"runs": [_mask_extra_vars(r, role) for r in db.list_runs(project_id)]}
 
 
-@app.get("/runs/{run_id}")
-def get_run(run_id: int, request: Request, user: str = Depends(current_user)):
+def _guard_run(request: Request, run_id: int, min_role: str = "viewer"):
+    """Load a run and enforce access to its project's org. Returns the run row."""
     r = db.get_run(run_id)
     if not r:
         raise HTTPException(status_code=404, detail="Run not found.")
+    proj = db.get_project(r["project_id"]) if r.get("project_id") else None
+    _guard_object_org(request, (proj or {}).get("org_id"), min_role)
+    return r
+
+
+@app.get("/runs/{run_id}")
+def get_run(run_id: int, request: Request, user: str = Depends(current_user)):
+    r = _guard_run(request, run_id, "viewer")
     return _mask_extra_vars(r, _session_or_401(request)["role"])
 
 
 @app.get("/runs/{run_id}/log", response_class=PlainTextResponse)
-def run_log(run_id: int, offset: int = 0, user: str = Depends(current_user)):
+def run_log(run_id: int, request: Request, offset: int = 0, user: str = Depends(current_user)):
     """Return the run log from byte `offset` onward, so the console can poll-tail.
     The X-Log-Next header carries the next offset to request."""
+    _guard_run(request, run_id, "viewer")
     p = db.run_log_path(run_id)
     if not p.exists():
         return PlainTextResponse("", headers={"X-Log-Next": "0", "X-Run-Status": "pending"})
@@ -1609,7 +1716,7 @@ def cancel_run(run_id: int, user: str = Depends(require_operator)):
 
 
 @app.post("/runs/{run_id}/rerun")
-def rerun_run(run_id: int, user: str = Depends(require_operator)):
+def rerun_run(run_id: int, request: Request, user: str = Depends(require_operator)):
     """Relaunch a past run with the same engine, target, inventory, credential and
     extra_vars — one-click repeat from the Runs list or a finished run. A transient
     per-run sudo password isn't persisted, so a run that used one falls back to the
@@ -1621,6 +1728,7 @@ def rerun_run(run_id: int, user: str = Depends(require_operator)):
     project = db.get_project(r["project_id"])
     if not project:
         raise HTTPException(status_code=404, detail="The run's project no longer exists.")
+    _guard_project(request, project["id"], "operator")
     try:
         extra_vars = json.loads(r.get("extra_vars") or "{}")
     except (TypeError, ValueError):
@@ -1641,11 +1749,12 @@ def schedules_list(project_id: int | None = None, user: str = Depends(current_us
 
 
 @app.post("/schedules")
-def schedules_create(body: dict = Body(...), user: str = Depends(require_operator)):
+def schedules_create(request: Request, body: dict = Body(...), user: str = Depends(require_operator)):
     pid = body.get("project_id")
     project = db.get_project(pid) if pid else None
     if not project:
         raise HTTPException(status_code=404, detail="Project not found.")
+    _guard_project(request, project["id"], "operator")
     kind = str(body.get("kind") or "ansible")
     if kind not in RUNNERS and kind != "pipeline":
         raise HTTPException(status_code=400, detail=f"Unknown engine '{kind}'.")
@@ -2314,9 +2423,10 @@ def infra_list_vms(body: dict = Body(...), user: str = Depends(require_operator)
 
 
 @app.post("/infra/{project_id}/vms")
-def infra_project_vms(project_id: int, user: str = Depends(require_operator)):
+def infra_project_vms(project_id: int, request: Request, user: str = Depends(require_operator)):
     """List the VMs on the hypervisor this infra project targets (its var.uri) — so
     the operator can see what's actually running without SSHing to the host."""
+    _guard_project(request, project_id, "operator")
     if not db.get_project(project_id):
         raise HTTPException(status_code=404, detail="Project not found.")
     uri = _libvirt_uri_for_project(project_id)
@@ -2494,11 +2604,12 @@ def infra_install_hypervisor_key(body: dict = Body(...), user: str = Depends(req
 
 
 @app.post("/infra/{project_id}/scaffold")
-def infra_scaffold(project_id: int, body: dict = Body(...), user: str = Depends(current_user)):
+def infra_scaffold(project_id: int, request: Request, body: dict = Body(...), user: str = Depends(current_user)):
     """Scaffold the next cadence stage into an infra project: 'configure' writes a
     starter Ansible playbook, 'maintain' a starter Salt state — so an operator goes
     straight from built VMs to configuring/maintaining them. Won't overwrite an
     existing file. Returns the path to open in the IDE."""
+    _guard_project(request, project_id, "operator")
     project = db.get_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found.")
@@ -2527,8 +2638,18 @@ def _mask_infra(row: dict) -> dict:
 
 
 @app.get("/infra")
-def infra_list(user: str = Depends(current_user)):
-    return {"infra": [_mask_infra(r) for r in db.list_infra()]}
+def infra_list(request: Request, user: str = Depends(current_user)):
+    # Scope to the caller's orgs — infra rows carry the project's provider, jump host,
+    # controller and ssh_user, which shouldn't leak across tenants (a system admin's
+    # _visible_org_ids is None → all).
+    vis = _visible_org_ids(request)
+    rows = db.list_infra()
+    if vis is not None:
+        allowed = set(vis)
+        rows = [r for r in rows
+                if (db.get_project(r["project_id"]) or {}).get("org_id") in allowed
+                or (db.get_project(r["project_id"]) or {}).get("org_id") is None]
+    return {"infra": [_mask_infra(r) for r in rows]}
 
 
 def _resolve_secret_ref(value: str) -> str:
@@ -3029,11 +3150,12 @@ def _distribute_managed_key(project_id: int, emit=None):
 
 
 @app.post("/infra/{project_id}/distribute-key")
-def infra_distribute_key(project_id: int, user: str = Depends(require_operator)):
+def infra_distribute_key(project_id: int, request: Request, user: str = Depends(require_operator)):
     """Fix 'the SLEP managed key isn't working with the VM' without a rebuild: log in
     to each VM with the stored (Vault) password and install SLEP's CURRENT key. This
     repairs key drift — a VM built with a key that was later regenerated — so the
     next Ansible/Salt run authenticates. Returns per-host results."""
+    _guard_project(request, project_id, "operator")
     if not db.get_infra(project_id):
         raise HTTPException(status_code=404, detail="Not an infrastructure project.")
     results, note = _distribute_managed_key(project_id)
@@ -3042,7 +3164,7 @@ def infra_distribute_key(project_id: int, user: str = Depends(require_operator))
 
 
 @app.post("/infra/{project_id}/test-auth")
-def infra_test_auth(project_id: int, body: dict = Body(default={}), user: str = Depends(require_operator)):
+def infra_test_auth(project_id: int, request: Request, body: dict = Body(default={}), user: str = Depends(require_operator)):
     """Read-only auth probe: does a key or password actually log in to this project's
     VMs THROUGH the jump host? Nothing is changed on the VMs. Pick a method:
       • method='key'      → SLEP's managed key (default) or a stored ssh credential's key
@@ -3051,6 +3173,7 @@ def infra_test_auth(project_id: int, body: dict = Body(default={}), user: str = 
     Per host it reports ok, a plain-English reason, who you logged in as, and whether
     cloud-init is present — a missing cloud-init is why a baked-in password/key never
     took."""
+    _guard_project(request, project_id, "operator")
     import shutil, tempfile
     from . import keydist
     meta = db.get_infra(project_id)
@@ -3205,12 +3328,13 @@ def _diag_note(r: dict) -> str:
 
 
 @app.post("/infra/{project_id}/diagnose")
-def infra_diagnose(project_id: int, user: str = Depends(require_operator)):
+def infra_diagnose(project_id: int, request: Request, user: str = Depends(require_operator)):
     """Diagnose why a project's VMs are unreachable WITHOUT logging into them: SSH to
     the hypervisor with SLEP's managed key and read each VM's disk with libguestfs
     (virt-cat) — reporting whether cloud-init is present, whether it ran, and whether
     the login account exists with a password. This is the ground truth behind
     'password rejected at the console' / 'tunnel closed before login'."""
+    _guard_project(request, project_id, "operator")
     meta = db.get_infra(project_id)
     if not meta:
         raise HTTPException(status_code=404, detail="Not an infrastructure project.")
@@ -3258,11 +3382,12 @@ def infra_diagnose(project_id: int, user: str = Depends(require_operator)):
 
 
 @app.post("/infra/{project_id}/inventory")
-def infra_to_inventory(project_id: int, user: str = Depends(require_operator)):
+def infra_to_inventory(project_id: int, request: Request, user: str = Depends(require_operator)):
     """After apply, read the created VMs (sysible_hosts) into a SLEP Ansible
     inventory for this project. Reuses/refreshes the project's infra inventory on
     re-run, so the Configure (Ansible) step can immediately target the new
     machines."""
+    _guard_project(request, project_id, "operator")
     project = db.get_project(project_id)
     meta = db.get_infra(project_id)
     if not project or not meta:
@@ -3273,12 +3398,13 @@ def infra_to_inventory(project_id: int, user: str = Depends(require_operator)):
 
 
 @app.patch("/infra/{project_id}")
-def infra_update(project_id: int, body: dict = Body(...), user: str = Depends(require_operator)):
+def infra_update(project_id: int, request: Request, body: dict = Body(...), user: str = Depends(require_operator)):
     """Update an infrastructure project's settings. Currently the SSH jump host
     (bastion) used to reach its VMs — designating it here (project level) applies
     it to every inventory the project owns, so you don't have to set it on each
     inventory. Empty clears it. For libvirt this is normally the hypervisor and is
     auto-derived on create; this lets you view/override it."""
+    _guard_project(request, project_id, "operator")
     meta = db.get_infra(project_id)
     if not meta:
         raise HTTPException(status_code=404, detail="Not an infrastructure project.")
@@ -3418,12 +3544,13 @@ def _enroll_infra_hosts(project_id: int, controller_id=None):
 
 
 @app.post("/infra/{project_id}/enroll")
-def infra_enroll(project_id: int, body: dict = Body(default=None),
+def infra_enroll(project_id: int, request: Request, body: dict = Body(default=None),
                  user: str = Depends(require_operator)):
     """After `terraform apply`, read the created VMs (the sysible_hosts output) and
     register each into a Controller as an SSH host. Uses the infra's configured
     Controller, or an optional `controller_id` in the body to pick one on demand
     (which is then remembered for the project)."""
+    _guard_project(request, project_id, "operator")
     cid = (body or {}).get("controller_id")
     out = _enroll_infra_hosts(project_id, controller_id=int(cid) if cid else None)
     db.log_audit("infra_enrolled", user,

@@ -393,8 +393,10 @@ def launch(run_id: int) -> None:
                 cmd += ["-e", "@" + str(evfile)]
 
             # Inject the secrets vault as `vault.<name>` via a 0600 vars file
-            # (-e @file keeps the values out of the process list / ps).
-            secrets = db.all_secret_ciphertexts()
+            # (-e @file keeps the values out of the process list / ps). Scope to the
+            # PROJECT'S org so a run can never materialise another tenant's secrets.
+            _porg = (project or {}).get("org_id")
+            secrets = db.all_secret_ciphertexts([_porg] if _porg else None)
             if secrets:
                 vfile = tmp / "vault.json"
                 fd = os.open(str(vfile), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)

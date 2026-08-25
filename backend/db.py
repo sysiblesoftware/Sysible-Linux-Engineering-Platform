@@ -327,7 +327,7 @@ def init_db() -> None:
         # Multi-tenancy: every owned resource carries an org_id. Add the column
         # where missing, then adopt any orphaned rows + existing users into a
         # 'Default' organization so pre-tenancy installs keep working unchanged.
-        for tbl in ("projects", "inventories", "credentials", "controllers"):
+        for tbl in ("projects", "inventories", "credentials", "controllers", "secrets"):
             cols = [r["name"] for r in c.execute(f"PRAGMA table_info({tbl})")]
             if "org_id" not in cols:
                 c.execute(f"ALTER TABLE {tbl} ADD COLUMN org_id INTEGER")
@@ -357,7 +357,7 @@ def _seed_default_org(c) -> int:
                   "VALUES('Default','default','Default organization',?)", (_now(),))
         oid = c.execute("SELECT id FROM organizations WHERE slug='default'").fetchone()["id"]
     # Adopt any resource rows written before org_id existed.
-    for tbl in ("projects", "inventories", "credentials", "controllers"):
+    for tbl in ("projects", "inventories", "credentials", "controllers", "secrets"):
         c.execute(f"UPDATE {tbl} SET org_id=? WHERE org_id IS NULL", (oid,))
     # Adopt existing admins as members of Default, mapping their global role:
     # superuser/legacy-admin -> org admin, operator -> operator, viewer -> viewer.
@@ -997,23 +997,47 @@ def delete_credential(cid: int):
 
 
 # ---------------------------------------------------------------- vault (secrets)
-def list_secrets():
-    """Names + timestamps only — never the (encrypted) value."""
+def _org_filter(org_ids):
+    """(sql_fragment, params) restricting to org_ids (+ legacy NULL-org rows). Returns
+    (None, None) to mean 'no rows' for an empty list, and ('', ()) for None = all."""
+    if org_ids is None:
+        return "", ()
+    if not org_ids:
+        return None, None
+    ph = ",".join("?" * len(org_ids))
+    return f"(org_id IN ({ph}) OR org_id IS NULL)", tuple(org_ids)
+
+
+def list_secrets(org_ids=None):
+    """Names + timestamps only — never the (encrypted) value. Scoped to org_ids (a
+    system admin passes None = all)."""
+    frag, params = _org_filter(org_ids)
+    if frag is None:
+        return []
     with _connect() as c:
+        q = "SELECT id,name,created FROM secrets" + (f" WHERE {frag}" if frag else "") + " ORDER BY name"
         return [{"id": r["id"], "name": r["name"], "created": r["created"]}
-                for r in c.execute("SELECT id,name,created FROM secrets ORDER BY name")]
+                for r in c.execute(q, params)]
 
 
-def upsert_secret(name, ciphertext):
-    """Store (or replace) a secret's ciphertext by name."""
+def upsert_secret(name, ciphertext, org_id=None):
+    """Store (or replace) a secret's ciphertext by name within an org."""
     with _connect() as c:
         row = c.execute("SELECT id FROM secrets WHERE name=?", (name,)).fetchone()
         if row:
-            c.execute("UPDATE secrets SET value=? WHERE id=?", (ciphertext, row["id"]))
+            c.execute("UPDATE secrets SET value=?, org_id=COALESCE(org_id,?) WHERE id=?",
+                      (ciphertext, org_id, row["id"]))
             return row["id"]
-        cur = c.execute("INSERT INTO secrets(name,value,created) VALUES(?,?,?)",
-                        (name, ciphertext, _now()))
+        cur = c.execute("INSERT INTO secrets(name,value,created,org_id) VALUES(?,?,?,?)",
+                        (name, ciphertext, _now(), org_id))
         return cur.lastrowid
+
+
+def get_secret_org(sid: int):
+    """The org_id of a secret (None if the secret doesn't exist or is legacy-unowned)."""
+    with _connect() as c:
+        r = c.execute("SELECT org_id FROM secrets WHERE id=?", (sid,)).fetchone()
+        return (r["org_id"] if r else None)
 
 
 def delete_secret(sid: int):
@@ -1021,10 +1045,15 @@ def delete_secret(sid: int):
         c.execute("DELETE FROM secrets WHERE id=?", (sid,))
 
 
-def all_secret_ciphertexts():
-    """[(name, ciphertext)] for injecting the vault into a run."""
+def all_secret_ciphertexts(org_ids=None):
+    """[(name, ciphertext)] for injecting the vault into a run — scoped to org_ids so a
+    run only ever sees its own org's secrets. None = all (system-internal callers)."""
+    frag, params = _org_filter(org_ids)
+    if frag is None:
+        return []
     with _connect() as c:
-        return [(r["name"], r["value"]) for r in c.execute("SELECT name,value FROM secrets")]
+        q = "SELECT name,value FROM secrets" + (f" WHERE {frag}" if frag else "")
+        return [(r["name"], r["value"]) for r in c.execute(q, params)]
 
 
 # ---------------------------------------------------------------- controllers
