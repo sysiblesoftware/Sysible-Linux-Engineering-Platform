@@ -1,23 +1,34 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { api } from '../api.js'
 import { Field, Modal, useErr } from '../ui.jsx'
+import { useInfraRowActions } from './InfraActions.jsx'
+import { CreateWizard } from './Infrastructure.jsx'
 
 // Projects are the top-level unit; each can nest sub-projects (folders) via
 // parent_id, rendered here as an expandable tree. Organizations still exist for
 // access control behind the scenes (shown as a column only when you can see
 // more than one). The name is the primary action (opens the project); everything
 // else lives in a per-row ⋯ menu to keep the list calm.
-export default function Projects({ onOpen }) {
+export default function Projects({ onOpen, onOpenRun }) {
   const [projects, setProjects] = useState([])
   const [orgs, setOrgs] = useState([])
+  const [infraByPid, setInfraByPid] = useState({})  // project_id → infra row (for the ⋯ menu actions)
   const [newFor, setNewFor] = useState(undefined)   // undefined=closed; null=top-level; id=sub-project parent
+  const [wizOpen, setWizOpen] = useState(false)     // Create-Infrastructure wizard
   const [moveP, setMoveP] = useState(null)          // project being reparented
   const [menuId, setMenuId] = useState(null)        // project whose ⋯ menu is open
   const [collapsed, setCollapsed] = useState({})    // {projectId: true} → children hidden
   const { wrap, node } = useErr()
 
   const load = () => api('projects').then((d) => setProjects(d.projects))
-  useEffect(() => { load(); api('organizations').then((d) => setOrgs(d.organizations || [])).catch(() => {}) }, [])
+  const loadInfra = () => api('infra').then((d) => {
+    const m = {}; (d.infra || []).forEach((r) => { m[r.project_id] = r }); setInfraByPid(m)
+  }).catch(() => {})
+  useEffect(() => { load(); loadInfra(); api('organizations').then((d) => setOrgs(d.organizations || [])).catch(() => {}) }, [])
+  // Infra lifecycle actions for the row ⋯ menu (shared with the IDE bar).
+  const { itemsFor, modals: infraModals } = useInfraRowActions({
+    onOpenRun, onOpenProject: onOpen, onReload: () => { load(); loadInfra() },
+  })
   const orgName = (id) => (orgs.find((o) => o.id === id) || {}).name || '—'
   const multiOrg = orgs.length > 1
 
@@ -71,6 +82,7 @@ export default function Projects({ onOpen }) {
                   { label: 'Open', accel: '↵', run: () => onOpen(p) },
                   { label: 'Add sub-project', run: () => setNewFor(p.id) },
                   { label: 'Move…', run: () => setMoveP(p) },
+                  ...itemsFor(infraByPid[p.id]),
                   { sep: true },
                   { label: 'Delete', danger: true, run: () => del(p) },
                 ]} />
@@ -87,6 +99,7 @@ export default function Projects({ onOpen }) {
       <div className="row" style={{ marginBottom: 14 }}>
         <h2 style={{ margin: 0 }}>Projects</h2>
         <div className="spacer" />
+        <button className="ghost" onClick={() => setWizOpen(true)}>+ Create infrastructure</button>
         <button className="primary" onClick={() => setNewFor(null)}>+ New project</button>
       </div>
       {node}
@@ -112,6 +125,11 @@ export default function Projects({ onOpen }) {
           onClose={() => setMoveP(null)}
           onMove={(parentId) => { setMoveP(null); move(moveP, parentId) }} />
       )}
+      {wizOpen && (
+        <CreateWizard onClose={() => setWizOpen(false)}
+          onDone={(pid, name, slug) => { setWizOpen(false); load(); loadInfra(); onOpen({ id: pid, name, slug }) }} />
+      )}
+      {infraModals}
     </>
   )
 }

@@ -11,6 +11,7 @@ import Credentials from './views/Credentials.jsx'
 import Vault from './views/Vault.jsx'
 import Users from './views/Users.jsx'
 import Infrastructure from './views/Infrastructure.jsx'
+import { InfraActions } from './views/InfraActions.jsx'
 import Schedules from './views/Schedules.jsx'
 import Activity from './views/Activity.jsx'
 import HealthBanner from './components/HealthBanner.jsx'
@@ -120,11 +121,11 @@ export default function App() {
       <main className="view">
         {runId == null && !project && <HealthBanner />}
         {runId != null ? <RunLog runId={runId} onBack={() => setRunId(null)} onOpenRun={setRunId} />
-          : project ? <Ide project={project} onBack={() => setProject(null)} onRun={(id) => setRunId(id)} />
+          : project ? <><InfraActions project={project} variant="bar" onOpenRun={setRunId} onOpenProject={setProject} /><Ide project={project} onBack={() => setProject(null)} onRun={(id) => setRunId(id)} /></>
             : view === 'organizations' ? <Organizations />
-            : view === 'projects' ? <Projects onOpen={setProject} />
+            : view === 'projects' ? <Projects onOpen={setProject} onOpenRun={setRunId} />
               : view === 'inventories' ? <Inventories />
-                : view === 'infra' ? <Infrastructure onOpenProject={setProject} onOpenRun={setRunId} />
+                : view === 'infra' ? <Infrastructure onOpenProject={setProject} />
                 : view === 'pipelines' ? <Pipelines onOpenRun={setRunId} />
                 : view === 'controllers' ? <Controllers />
                   : view === 'credentials' ? <Credentials />

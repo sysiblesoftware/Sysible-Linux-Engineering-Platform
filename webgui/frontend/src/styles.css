@@ -306,3 +306,10 @@ label.fld{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--
 .env-head:hover>td{color:var(--accent2)}
 .env-caret{display:inline-block;width:16px;color:var(--faint);font-size:10px}
 .env-count{margin-left:8px;font-size:11px;color:var(--faint);border:1px solid var(--line);border-radius:20px;padding:0 7px}
+
+/* Infrastructure lifecycle action bar — sits on top of the IDE for infra projects. */
+.infra-bar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding: 8px 12px; margin-bottom: 10px; border: 1px solid var(--line);
+  border-radius: 10px; background: var(--panel, rgba(255,255,255,0.02)); }
+.infra-bar-label { font-size: 12.5px; font-weight: 600; color: var(--muted); white-space: nowrap; }
+.infra-bar-actions { display: flex; gap: 6px; flex-wrap: wrap; }

@@ -1,135 +1,67 @@
 import React, { useEffect, useState } from 'react'
-import { api, canWrite } from '../api.js'
+import { api } from '../api.js'
 import { Field, Modal, useErr } from '../ui.jsx'
-import { PipelineModal } from './Ide.jsx'
 
-// Create Infrastructure — a form-driven Terraform VM builder. The wizard's menus
-// come from the backend provider schema; on create it generates a Terraform
-// project you can Plan/Apply, then one-click enroll the new VMs into a Controller.
-export default function Infrastructure({ onOpenProject, onOpenRun }) {
+// Infrastructure — a READ-ONLY status view of the VMs SLEP has built. Building and
+// the lifecycle actions (apply/destroy/configure/maintain/cadence) live in Projects
+// now (a project row's ⋯ menu, and on top of the IDE when the project is open); this
+// pane just shows what exists and whether it's reachable. Click a row to open the
+// project (where the actions are).
+export default function Infrastructure({ onOpenProject }) {
   const [rows, setRows] = useState([])
-  const [open, setOpen] = useState(false)
-  const [pipe, setPipe] = useState(null)   // {project, steps} → opens the pipeline builder
-  const [vms, setVms] = useState(null)     // {name, loading?|list?|error?} → VMs-on-hypervisor modal
-  const [controllers, setControllers] = useState([])
-  const [enrollFor, setEnrollFor] = useState(null)   // {r} → Controller picker when none set
-  const [jumpFor, setJumpFor] = useState(null)       // {r} → jump-host editor
-  const load = () => api('infra').then((d) => setRows(d.infra))
-  useEffect(() => { load(); api('controllers').then((d) => setControllers(d.controllers || [])).catch(() => {}) }, [])
-  const writable = canWrite()
+  const [status, setStatus] = useState({})   // project_id → {loading|vms|error}
+  useEffect(() => { api('infra').then((d) => setRows(d.infra || [])) }, [])
 
-  const run = async (r, target) => {
-    const d = await api('runs', { method: 'POST', json: { project_id: r.project_id, kind: 'terraform', target } })
-    onOpenRun(d.run_id)
-  }
-  // Register this project's applied VMs into a Controller. Uses the project's set
-  // Controller if it has one; otherwise opens a picker so you can choose on demand
-  // (the choice is remembered for next time). This is the "enroll the new VMs"
-  // button — always available on infra projects, no need to hunt for a run.
-  const enroll = async (r, controllerId) => {
-    if (!r.controller_id && !controllerId) {
-      if (!controllers.length) { alert('Connect a Controller first (Controllers tab).'); return }
-      setEnrollFor(r); return
-    }
-    try {
-      const body = controllerId ? { controller_id: Number(controllerId) } : {}
-      const d = await api(`infra/${r.project_id}/enroll`, { method: 'POST', json: body })
-      setEnrollFor(null); load()
-      const lines = d.results.map((h) => `${h.ok ? '✓' : '✗'} ${h.name} ${h.ip} — ${h.detail}`).join('\n')
-      alert(`Enrolled ${d.enrolled}/${d.total} into ${d.controller}:\n\n${lines || '(no hosts yet — apply the VMs first)'}`)
-    } catch (e) { alert(e.message) }
-  }
-  // Read the applied VMs (terraform/tofu output) into a SLEP Ansible inventory, so
-  // the Configure/Maintain (Ansible/Salt) steps can target them. Run after apply.
-  const toInventory = async (r) => {
-    try {
-      const d = await api(`infra/${r.project_id}/inventory`, { method: 'POST' })
-      alert(`Built inventory “${d.name}” with ${d.hosts} host(s).\nIt's now selectable in Ansible/Salt runs and pipelines.`)
-    } catch (e) { alert(e.message) }
-  }
-  // Cadence steps 2 & 3: scaffold a starter Ansible playbook / Salt state into the
-  // infra project and open it in the IDE, so Create flows into Configure → Maintain.
-  const scaffold = async (r, stage) => {
-    try {
-      const d = await api(`infra/${r.project_id}/scaffold`, { method: 'POST', json: { stage } })
-      onOpenProject({ id: r.project_id, name: r.project_name, slug: r.project_slug, openFile: d.path })
-    } catch (e) { alert(e.message) }
-  }
-  // One-click cadence: scaffold configure/maintain (idempotent), then open the
-  // pipeline builder pre-filled with apply → build-inventory → configure → maintain
-  // so it runs as a sequence. The Inventory step reads the VMs the apply just
-  // created into this project's inventory and auto-targets the Ansible/Salt steps
-  // at them — so Create flows straight into Configure → Maintain with no manual
-  // inventory hop.
-  // Show the domains actually on this project's hypervisor (virsh list --all) —
-  // so you can see what exists without SSHing to the host.
-  const listVms = async (r) => {
-    setVms({ name: r.project_name, loading: true })
-    try {
-      const d = await api(`infra/${r.project_id}/vms`, { method: 'POST' })
-      setVms({ name: r.project_name, list: d.vms || [], error: d.ok ? '' : d.output })
-    } catch (e) { setVms({ name: r.project_name, error: e.message }) }
-  }
-  const cadence = async (r) => {
-    try {
-      await api(`infra/${r.project_id}/scaffold`, { method: 'POST', json: { stage: 'configure' } })
-      await api(`infra/${r.project_id}/scaffold`, { method: 'POST', json: { stage: 'maintain' } })
-      setPipe({
-        project: { id: r.project_id, name: r.project_name, slug: r.project_slug },
-        steps: [
-          { kind: 'terraform', target: 'apply', tool: 'terraform' },
-          { kind: 'inventory', target: 'from VMs' },
-          { kind: 'ansible', target: 'configure.yml' },
-          { kind: 'salt', target: 'maintain.sls' },
-        ],
-      })
-    } catch (e) { alert(e.message) }
+  // Best-effort live status per project: the domains on its hypervisor.
+  useEffect(() => {
+    let alive = true
+    rows.forEach((r) => {
+      setStatus((s) => (s[r.project_id] ? s : { ...s, [r.project_id]: { loading: true } }))
+      api(`infra/${r.project_id}/vms`, { method: 'POST' })
+        .then((d) => { if (alive) setStatus((s) => ({ ...s, [r.project_id]: { vms: d.vms || [], error: d.ok ? '' : d.output } })) })
+        .catch((e) => { if (alive) setStatus((s) => ({ ...s, [r.project_id]: { error: e.message } })) })
+    })
+    return () => { alive = false }
+  }, [rows])   // eslint-disable-line
+
+  const vmsCell = (r) => {
+    const st = status[r.project_id]
+    if (!st || st.loading) return <span className="faint">checking…</span>
+    if (st.error) return <span className="faint" title={st.error}>—</span>
+    const list = st.vms || []
+    if (!list.length) return <span className="faint">none yet</span>
+    const running = list.filter((v) => /running/i.test(v.state)).length
+    return <span title={list.map((v) => `${v.name}: ${v.state}`).join('\n')}>{running}/{list.length} running</span>
   }
 
   return (
     <>
       <div className="row" style={{ marginBottom: 10 }}>
         <h2 style={{ margin: 0 }}>Infrastructure</h2>
-        <div className="spacer" />
-        {writable && <button className="primary" onClick={() => setOpen(true)}>+ Create infrastructure</button>}
       </div>
-      <div className="muted" style={{ marginBottom: 10 }}>Build VMs with Terraform/OpenTofu from a form — pick a provider and options, apply, then auto-enroll the new machines into a connected Controller.</div>
-      <CadenceBar />
-      {rows.length === 0 ? <div className="muted">No infrastructure yet. “Create infrastructure” to build some.</div> : (
+      <div className="muted" style={{ marginBottom: 12 }}>
+        The machines SLEP has built, and their live status. To build new infrastructure or run its
+        lifecycle (apply, configure, maintain, enroll), open the project — the actions live on the
+        project’s row&nbsp;⋯ menu and on top of the IDE, or use “Create infrastructure” in <b>Projects</b>.
+      </div>
+      {rows.length === 0 ? (
+        <div className="muted">No infrastructure yet. Go to <b>Projects → Create infrastructure</b> to build some.</div>
+      ) : (
         <table>
-          <thead><tr><th>Name</th><th>Provider</th><th>Enroll target</th><th></th></tr></thead>
+          <thead><tr><th>Name</th><th>Provider</th><th>VMs on hypervisor</th><th>Jump host</th><th>Enroll target</th></tr></thead>
           <tbody>
             {rows.map((r) => (
               <tr key={r.project_id}>
                 <td><a onClick={() => onOpenProject({ id: r.project_id, name: r.project_name, slug: r.project_slug })}>{r.project_name}</a></td>
-                <td className="muted">{r.provider}{r.bastion ? <><br /><span className="faint" style={{ fontSize: 11 }} title="VMs are reached through this hypervisor jump host">↳ via {r.bastion}</span></> : null}</td>
-                <td className="muted">{r.controller_id ? `Controller #${r.controller_id}${r.environment ? ' · ' + r.environment : ''}` : '—'}</td>
-                <td className="row">
-                  {writable && <button className="ghost sm" title="Terraform/OpenTofu plan" onClick={() => run(r, 'plan')}>Plan</button>}
-                  {writable && <button className="ghost sm" title="Terraform/OpenTofu apply — create the VMs" onClick={() => run(r, 'apply')}>Apply</button>}
-                  {writable && <button className="danger ghost sm" onClick={() => run(r, 'destroy')}>Destroy</button>}
-                  {writable && <button className="ghost sm" title="List the VMs actually on this project's hypervisor" onClick={() => listVms(r)}>🖥 VMs</button>}
-                  {writable && <button className="ghost sm" title="Read the applied VMs into a SLEP Ansible inventory" onClick={() => toInventory(r)}>→ Inventory</button>}
-                  {writable && <button className="ghost sm" title="Login user, password (Vault) and jump host used to reach these VMs" onClick={() => setJumpFor(r)}>⚙ Access</button>}
-                  {writable && <button className="primary sm" title="Register the applied VMs into a connected Controller (agent enroll)" onClick={() => enroll(r)}>Enroll → Controller</button>}
-                  {writable && <button className="ghost sm" title="Scaffold an Ansible playbook and open it (Configure)" onClick={() => scaffold(r, 'configure')}>Configure</button>}
-                  {writable && <button className="ghost sm" title="Scaffold a Salt state and open it (Maintain)" onClick={() => scaffold(r, 'maintain')}>Maintain</button>}
-                  {writable && <button className="primary sm" title="Run the whole cadence in sequence: apply → configure → maintain" onClick={() => cadence(r)}>▶ Cadence</button>}
-                </td>
+                <td className="muted">{r.provider}</td>
+                <td className="muted">{vmsCell(r)}</td>
+                <td className="muted">{r.bastion || <span className="faint">direct</span>}</td>
+                <td className="muted">{r.controller_id ? `Controller #${r.controller_id}${r.environment ? ' · ' + r.environment : ''}` : <span className="faint">—</span>}</td>
               </tr>
             ))}
           </tbody>
         </table>
       )}
-      {open && <CreateWizard onClose={() => setOpen(false)}
-        onDone={(pid, name, slug) => { setOpen(false); load(); onOpenProject({ id: pid, name, slug }) }} />}
-      {pipe && <PipelineModal project={pipe.project} initialSteps={pipe.steps}
-        onClose={() => setPipe(null)} onLaunched={(id) => { setPipe(null); onOpenRun(id) }} />}
-      {vms && <VmsModal data={vms} onClose={() => setVms(null)} />}
-      {enrollFor && <EnrollPicker r={enrollFor} controllers={controllers}
-        onClose={() => setEnrollFor(null)} onPick={(cid) => enroll(enrollFor, cid)} />}
-      {jumpFor && <JumpHostEditor r={jumpFor} onClose={() => setJumpFor(null)}
-        onSaved={() => { setJumpFor(null); load() }} />}
     </>
   )
 }
@@ -139,7 +71,7 @@ export default function Infrastructure({ onOpenProject, onOpenRun }) {
 // optional login password sourced from a Vault variable (turns on password SSH so
 // a VM is reachable even before its key lands), and the SSH jump host. All apply to
 // every inventory the project owns, so you set them once instead of per inventory.
-function JumpHostEditor({ r, onClose, onSaved }) {
+export function JumpHostEditor({ r, onClose, onSaved }) {
   const [sshUser, setSshUser] = useState(r.ssh_user || '')
   const [pw, setPw] = useState('')
   const [bastion, setBastion] = useState(r.bastion || '')
@@ -177,7 +109,7 @@ function JumpHostEditor({ r, onClose, onSaved }) {
 
 // Pick a Controller to enroll a project's VMs into, when the project has none set.
 // The choice is remembered by the backend for future enrolls.
-function EnrollPicker({ r, controllers, onClose, onPick }) {
+export function EnrollPicker({ r, controllers, onClose, onPick }) {
   const [cid, setCid] = useState(controllers[0] ? String(controllers[0].id) : '')
   const [busy, setBusy] = useState(false)
   return (
@@ -199,7 +131,7 @@ function EnrollPicker({ r, controllers, onClose, onPick }) {
 
 // The domains actually on a project's hypervisor (virsh list --all). A quick way
 // to see what exists / is running without SSHing to the host.
-function VmsModal({ data, onClose }) {
+export function VmsModal({ data, onClose }) {
   const stateColor = (s) => /running/i.test(s) ? 'var(--green-bright)'
     : /paused/i.test(s) ? 'var(--warn)' : /shut|off/i.test(s) ? 'var(--muted)' : 'var(--text)'
   return (
@@ -227,7 +159,7 @@ function VmsModal({ data, onClose }) {
 // The Sysible lifecycle cadence: create the machines (Terraform/OpenTofu), then
 // configure them (Ansible), then keep them in a known state over time (Salt).
 // Shown as a guide so the recommended flow is obvious from the Infrastructure page.
-function CadenceBar() {
+export function CadenceBar() {
   const steps = [
     ['1', 'Create', 'Terraform / OpenTofu', 'Build the VMs on a hypervisor or cloud', true],
     ['2', 'Configure', 'Ansible', 'Install & set up software on the new hosts'],
@@ -251,7 +183,7 @@ function CadenceBar() {
   )
 }
 
-function CreateWizard({ onClose, onDone }) {
+export function CreateWizard({ onClose, onDone }) {
   const [schema, setSchema] = useState(null)
   const [controllers, setControllers] = useState([])
   const [name, setName] = useState('')

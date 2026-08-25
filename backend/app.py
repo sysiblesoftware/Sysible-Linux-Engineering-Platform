@@ -579,7 +579,16 @@ def _slugify(name: str) -> str:
 
 @app.get("/projects")
 def projects(request: Request, user: str = Depends(current_user)):
-    return {"projects": db.list_projects(_visible_org_ids(request))}
+    rows = db.list_projects(_visible_org_ids(request))
+    # Flag which projects are Create-Infrastructure projects (and their provider), so
+    # the UI can surface the infra lifecycle actions on those rows / in the IDE
+    # without a second round-trip per project.
+    infra_by_pid = {i["project_id"]: i for i in db.list_infra()}
+    for p in rows:
+        meta = infra_by_pid.get(p["id"])
+        p["is_infra"] = bool(meta)
+        p["infra_provider"] = (meta or {}).get("provider") or ""
+    return {"projects": rows}
 
 
 @app.post("/projects")

@@ -1356,3 +1356,14 @@ def test_infra_stores_vault_password_ref_only(client):
     # PATCH with a vault ref also records it.
     client.patch(f"/infra/{pid2}", json={"ssh_password": "vault.kvm_pw"})
     assert db.get_infra(pid2).get("ssh_password_ref") == "kvm_pw"
+
+
+def test_projects_flag_infra(client):
+    """GET /projects flags infra projects (+ provider) so the UI can surface the
+    lifecycle actions on those rows / in the IDE."""
+    p_plain = client.post("/projects", json={"name": "plain", "slug": "plain-x"}).json()["id"]
+    p_infra = client.post("/infra", json={"name": "infra-x", "provider": "libvirt",
+                                          "options": {"count": 1, "base_image": "x"}}).json()["project_id"]
+    rows = {r["id"]: r for r in client.get("/projects").json()["projects"]}
+    assert rows[p_infra]["is_infra"] is True and rows[p_infra]["infra_provider"] == "libvirt"
+    assert rows[p_plain]["is_infra"] is False and rows[p_plain]["infra_provider"] == ""
