@@ -899,10 +899,17 @@ def _dec(s) -> str:
     if not s:
         return ""
     from . import vault
+    s = str(s)
     try:
-        return vault.decrypt(str(s))
-    except Exception:  # noqa: BLE001 — legacy plaintext (pre-encryption) or wrong key
-        return str(s)
+        return vault.decrypt(s)
+    except Exception:  # noqa: BLE001
+        # A value that LOOKS like a Fernet token (starts with the version+timestamp
+        # prefix) but won't decrypt is corruption or a wrong/rotated key — fail CLOSED
+        # (empty) rather than hand back ciphertext as if it were the secret. A value
+        # that isn't a token is genuine legacy pre-encryption plaintext, returned as-is.
+        if s.startswith("gAAAAA"):
+            return ""
+        return s
 
 
 def _strip_cred_secrets(d):

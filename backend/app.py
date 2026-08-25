@@ -252,6 +252,18 @@ def _guard_project(request: Request, project_id, min_role: str = "operator"):
     return p
 
 
+def _coerce_org_id(v):
+    """A body-supplied org_id → a positive int, or the Default org when absent. Rejects
+    a non-integer so a string can't land in an org_id column and silently break the
+    org-scoped IN(...) filters (which compare integers)."""
+    if v in (None, "", 0):
+        return db.default_org_id()
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="org_id must be an integer.")
+
+
 def _guard_inventory(request: Request, iid, min_role: str = "operator"):
     """Load an inventory and enforce access to its org. Returns the inventory row."""
     inv = db.get_inventory(iid)
@@ -647,7 +659,7 @@ def create_project(request: Request, body: dict = Body(...), user: str = Depends
             raise HTTPException(status_code=404, detail="Parent project not found.")
         org_id = parent.get("org_id") or db.default_org_id()
     else:
-        org_id = body.get("org_id") or db.default_org_id()
+        org_id = _coerce_org_id(body.get("org_id"))
     _require_org(request, org_id, "operator")
     base = _slugify(name)
     slug, n = base, 1
@@ -931,7 +943,7 @@ def create_credential(request: Request, body: dict = Body(...), user: str = Depe
         # The username becomes an ssh `user@host` target and an inventory ansible_user;
         # a leading '-' or a shell metacharacter would be an option/injection vector.
         raise HTTPException(status_code=400, detail="Invalid username — use letters, digits, . _ - (no spaces or leading '-').")
-    org_id = body.get("org_id") or db.default_org_id()
+    org_id = _coerce_org_id(body.get("org_id"))
     _require_org(request, org_id, "operator")
     # The SSH key / cloud secret and the sudo/become password are encrypted at rest
     # by the db layer — pass them as plaintext.
@@ -988,7 +1000,7 @@ def vault_set(request: Request, body: dict = Body(...), user: str = Depends(requ
     if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", name):
         raise HTTPException(status_code=400,
                             detail="Name must be a valid variable: letters/digits/underscore, no leading digit.")
-    org_id = body.get("org_id") or db.default_org_id()
+    org_id = _coerce_org_id(body.get("org_id"))
     _require_org(request, org_id, "operator")
     # If the name already exists in ANOTHER org, don't let this write hijack it.
     existing = db.get_secret_org(next((s["id"] for s in db.list_secrets() if s["name"] == name), 0))
@@ -1196,7 +1208,7 @@ def create_inventory(request: Request, body: dict = Body(...), user: str = Depen
             raise HTTPException(status_code=404, detail="Project not found.")
         org_id = proj.get("org_id") or db.default_org_id()
     else:
-        org_id = body.get("org_id") or db.default_org_id()
+        org_id = _coerce_org_id(body.get("org_id"))
     _require_org(request, org_id, "operator")
     # Get-or-create within a project: an inventory with this exact name already
     # there is returned as-is, so a double-submit (or re-adding the same name)
@@ -1370,7 +1382,7 @@ def connect_controller(body: dict = Body(...), user: str = Depends(require_super
     except controller_import.ControllerImportError as e:
         raise HTTPException(status_code=400, detail=str(e))
     cid = db.create_controller(name or url, url, key,
-                               org_id=body.get("org_id") or db.default_org_id())
+                               org_id=_coerce_org_id(body.get("org_id")))
     return {"status": "connected", "controller": db.get_controller(cid), **probe}
 
 
