@@ -1273,3 +1273,47 @@ def test_managed_key_regenerate(client, monkeypatch):
         assert keydist.public_key() == "ssh-ed25519 NEWKEY slep-managed"
     finally:
         priv.unlink(missing_ok=True); pub.unlink(missing_ok=True)
+
+
+def test_deep_destroy_sweeps_only_project_prefix(client, monkeypatch):
+    """A libvirt destroy sweeps THIS project's leftover domains + volumes (matching
+    its name_prefix), and never another project's."""
+    from backend.runners import terraform_runner as tr
+    import backend.db as db
+    import shutil
+    pid = client.post("/projects", json={"name": "dd", "slug": "dd"}).json()["id"]
+    (db.project_dir(pid) / "variables.tf").write_text(
+        'variable "name_prefix" {\n  type = string\n  default = "app"\n}\n'
+        'variable "pool" {\n  type = string\n  default = "default"\n}\n')
+
+    monkeypatch.setattr(shutil, "which", lambda b: "/usr/bin/virsh")
+    monkeypatch.setattr(tr, "_libvirt_uri_for", lambda p: "qemu:///system")
+
+    def fake_run(cmd, *a, **k):
+        class R:
+            returncode = 0; stderr = ""
+            stdout = ("app-1\nother-1\n" if "list" in cmd else
+                      "app-base.qcow2\napp-1.qcow2\napp-1-ci.iso\nother-1.qcow2\nnotes.txt\n")
+        return R()
+    monkeypatch.setattr(tr.subprocess, "run", fake_run)
+    dom_seen, vol_seen = [], []
+    monkeypatch.setattr(tr, "_delete_libvirt_domains", lambda p, names, e: dom_seen.extend(names) or True)
+    monkeypatch.setattr(tr, "_delete_libvirt_volumes", lambda p, names, e: vol_seen.extend(names) or True)
+
+    n = tr._deep_destroy_libvirt(pid, lambda m: None)
+    # only app-* objects, never other-*
+    assert dom_seen == ["app-1"]
+    assert set(vol_seen) == {"app-base.qcow2", "app-1.qcow2", "app-1-ci.iso"}
+    assert "other-1" not in dom_seen and not any("other" in v for v in vol_seen)
+    assert n == 1 + 3
+
+
+def test_tf_var_default_reads_variables_tf(client):
+    from backend.runners import terraform_runner as tr
+    import backend.db as db
+    pid = client.post("/projects", json={"name": "vt", "slug": "vt"}).json()["id"]
+    (db.project_dir(pid) / "variables.tf").write_text(
+        'variable "name_prefix" {\n  default = "web"\n}\nvariable "pool" {\n  default = "fast"\n}\n')
+    assert tr._tf_var_default(pid, "name_prefix", "app") == "web"
+    assert tr._tf_var_default(pid, "pool", "default") == "fast"
+    assert tr._tf_var_default(pid, "missing", "fb") == "fb"

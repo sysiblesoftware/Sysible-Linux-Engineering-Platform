@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
 import time
 from pathlib import Path
 
@@ -105,6 +106,65 @@ def _delete_libvirt_volumes(project_id: int, names: list[str], emit) -> bool:
     return any_ok
 
 
+def _tf_var_default(project_id: int, name: str, fallback: str = "") -> str:
+    """Read a variable's `default` from the project's variables.tf (string or number).
+    Cheap regex — the file is SLEP-generated, so the shape is known."""
+    import re
+    try:
+        t = (db.project_dir(project_id) / "variables.tf").read_text()
+    except OSError:
+        return fallback
+    m = re.search(r'variable\s+"' + re.escape(name) + r'"\s*\{.*?default\s*=\s*"?([^"\n}]+?)"?\s*\n', t, re.S)
+    return m.group(1).strip() if m else fallback
+
+
+def _deep_destroy_libvirt(project_id: int, emit) -> int:
+    """After a libvirt `destroy`, sweep the hypervisor for THIS project's leftover
+    objects that terraform state didn't track (a partial earlier apply, the shared
+    base volume, cloud-init ISOs) and remove them — so a destroy really means a clean
+    slate and the next apply neither collides nor re-downloads. Scoped strictly to
+    the project's own name_prefix + pool, so it never touches another project's VMs.
+    virsh-only (the orphan-on-destroy behaviour is the libvirt provider's); returns
+    the count removed."""
+    import re
+    import shutil
+    uri = _libvirt_uri_for(project_id)
+    if not uri or not shutil.which("virsh"):
+        return 0
+    prefix = _tf_var_default(project_id, "name_prefix", "app")
+    pool = _tf_var_default(project_id, "pool", "default")
+    if not prefix:
+        return 0
+    removed = 0
+    # Domains named "<prefix>-<n>" — destroy (power off) then undefine (disks stay,
+    # they're swept separately below). List all and match this project's pattern.
+    try:
+        r = subprocess.run(["virsh", "-c", uri, "--readonly", "list", "--all", "--name"],
+                           capture_output=True, text=True, timeout=25, env=dict(os.environ))
+        doms = [d.strip() for d in r.stdout.splitlines() if d.strip()]
+    except Exception:  # noqa: BLE001
+        doms = []
+    dom_re = re.compile(r'^' + re.escape(prefix) + r'-\d+$')
+    stale_doms = [d for d in doms if dom_re.match(d)]
+    if stale_doms and _delete_libvirt_domains(project_id, stale_doms, emit):
+        removed += len(stale_doms)
+    # Volumes: "<prefix>-base.qcow2", "<prefix>-<n>.qcow2", "<prefix>-<n>-ci.iso".
+    try:
+        r = subprocess.run(["virsh", "-c", uri, "--readonly", "vol-list", pool, "--name"],
+                           capture_output=True, text=True, timeout=25, env=dict(os.environ))
+        vols = [v.strip() for v in r.stdout.splitlines() if v.strip()]
+    except Exception:  # noqa: BLE001
+        vols = []
+    vol_re = re.compile(r'^' + re.escape(prefix) + r'-(base\.qcow2|\d+\.qcow2|\d+-ci\.iso)$')
+    stale_vols = [v for v in vols if vol_re.match(v)]
+    if stale_vols and _delete_libvirt_volumes(project_id, stale_vols, emit):
+        removed += len(stale_vols)
+    if removed:
+        emit(f"-- SLEP: swept {removed} leftover libvirt object(s) for “{prefix}-*” — "
+             f"the next apply starts clean.")
+    return removed
+
+
 def _orphan_domains(log_path) -> list[str]:
     """Domain (VM) names from any 'domain '<name>' already exists' errors in the run
     log — VMs a partial apply defined on the hypervisor but didn't record in state,
@@ -184,7 +244,6 @@ def _libvirt_uri_for(project_id: int) -> str:
 
 
 def _run_quiet(cmd) -> int:
-    import subprocess
     try:
         return subprocess.run(cmd, capture_output=True, text=True, timeout=25,
                               env=dict(os.environ)).returncode
@@ -414,6 +473,22 @@ def launch(run_id: int) -> None:
         # created for this provision but never got hosts (see _cleanup_empty_infra_inventory).
         if action == "apply" and rc != 0:
             _cleanup_empty_infra_inventory(run["project_id"], emit)
+
+        # A libvirt DESTROY: terraform only removes what's in state, so sweep the
+        # hypervisor for this project's leftover domains/volumes (orphans from an
+        # earlier partial apply, the shared base volume, cloud-init ISOs) so destroy
+        # is a true clean slate. Runs whether terraform destroy succeeded or not —
+        # by-name removal is safe either way. Scoped to this project's prefix + pool.
+        if action == "destroy":
+            try:
+                swept = _deep_destroy_libvirt(run["project_id"], emit)
+                if swept and rc != 0:
+                    # terraform choked (likely on the very orphans we just removed) —
+                    # the sweep cleaned them, so the project is now actually empty.
+                    emit("-- terraform destroy reported an error, but the sweep removed the "
+                         "leftovers, so the hypervisor is now clean for this project.")
+            except Exception:  # noqa: BLE001 — never mask the destroy result
+                pass
 
         emit(f"\n== finished: exit code {rc} ==")
         db.set_run_status(run_id, "success" if rc == 0 else "failed",
