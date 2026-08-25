@@ -12,6 +12,9 @@ the IDE and is easy to tweak by hand afterwards.
 """
 from __future__ import annotations
 
+import shutil
+import subprocess
+
 # ---- option schema shown as menus in the console ---------------------------
 # type: "select" (choices), "number", "text", "textarea". `default` seeds the form.
 _COUNT = {"key": "count", "label": "How many VMs", "type": "number", "default": 1}
@@ -205,20 +208,47 @@ def _sanitize_pubkey(s) -> str:
     return f"{parts[0]} {parts[1]}" + (f" {comment}" if comment else "")
 
 
+def _hash_password(password: str) -> str:
+    """SHA-512 crypt ($6$) hash of `password` — the format /etc/shadow and `chpasswd -e`
+    expect, verified by login exactly as `crypt.crypt(pw, hash) == hash`. Tries the
+    stdlib `crypt` module first, then falls back to `openssl passwd -6` (the `crypt`
+    module was REMOVED in Python 3.13, and swallowing that would silently ship a VM
+    with NO password). Returns '' only if neither is available."""
+    if not password:
+        return ""
+    try:
+        import crypt  # removed in 3.13; guarded below
+        return crypt.crypt(password, crypt.mksalt(crypt.METHOD_SHA512))
+    except Exception:  # noqa: BLE001
+        pass
+    openssl = shutil.which("openssl")
+    if openssl:
+        try:
+            # -6 = SHA-512; openssl generates its own salt. Feed the password on stdin
+            # (never argv) so it can't leak via the process list.
+            r = subprocess.run([openssl, "passwd", "-6", "-stdin"], input=password,
+                               capture_output=True, text=True, timeout=10)
+            out = (r.stdout or "").strip()
+            if r.returncode == 0 and out.startswith("$6$"):
+                return out
+        except Exception:  # noqa: BLE001
+            pass
+    return ""
+
+
 def _cloudinit(ssh_user: str, keys: list[str], password: str = "", hashed_password: str = "") -> str:
     # Single-line each value so nothing can inject a top-level cloud-init directive.
     ssh_user = _one_line(ssh_user) or "user"
-    password = _one_line(password)
+    # Keep the password verbatim (first line only, no strip): a leading/trailing space
+    # is a legitimate part of a password, and stripping it would bake a hash that never
+    # matches what the operator types. Only a newline (YAML/shell-breaking) is dropped.
+    password = str(password or "").split("\n", 1)[0].replace("\r", "")
     # Hash the optional password (SHA-512 crypt) so plaintext never lands in the
     # cloud-init on disk; a pre-hashed one (carried through a regeneration) is used
-    # as-is. Fall back to no password if crypt is unavailable.
+    # as-is.
     hashed = _one_line(hashed_password)
     if password and not hashed:
-        try:
-            import crypt
-            hashed = crypt.crypt(password, crypt.mksalt(crypt.METHOD_SHA512))
-        except Exception:  # noqa: BLE001
-            hashed = ""
+        hashed = _hash_password(password)
     clean, seen = [], set()
     for k in keys:
         k = _sanitize_pubkey(k) if k and k.strip() else ""
