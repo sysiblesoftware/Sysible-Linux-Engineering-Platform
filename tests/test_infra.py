@@ -1141,3 +1141,34 @@ def test_orphan_cloudinit_iso_parse(tmp_path):
     got = tr._orphan_cloudinit_isos(log)
     assert got == ["app-1-ci.iso", "app-2-ci.iso"]
     assert "realdisk.qcow2" not in got
+
+
+def test_libvirt_default_hostname_sysible():
+    """VMs SLEP builds default to hostname 'sysible', set per-VM via the cloud-init
+    meta-data local-hostname (the shared user_data can't differ per VM). A single VM
+    gets the bare name; several get it suffixed so they stay unique."""
+    files = infra.generate("libvirt", {"count": 1, "base_image": "x"})
+    main = files["main.tf"]
+    # hostname is a parameter, default sysible, overridable.
+    assert 'variable "hostname"' in files["variables.tf"]
+    assert 'default = "sysible"' in files["variables.tf"]
+    # per-VM meta-data drives the hostname (bare for one, suffixed for many)
+    assert "meta_data" in main and "local-hostname:" in main
+    assert 'var.vm_count > 1 ? "${var.hostname}-${count.index + 1}" : var.hostname' in main
+    # instance-id is per-VM too (also stops cloud-init treating a clone as configured)
+    assert "instance-id: ${var.name_prefix}-${count.index + 1}" in main
+    # the meta_data stays a single HCL line (literal \n escapes, not real newlines)
+    meta = [ln for ln in main.splitlines() if "meta_data" in ln][0]
+    assert "\\n" in meta and meta.count('"') >= 2
+    # belt-and-suspenders: /etc/hosts maps the runtime hostname
+    assert "127.0.1.1" in files["cloudinit.cfg"]
+    # overridable
+    m2 = infra.generate("libvirt", {"count": 1, "base_image": "x", "hostname": "edge"})["variables.tf"]
+    assert 'default = "edge"' in m2
+
+
+def test_libvirt_hostname_option_in_schema(client):
+    """The wizard exposes a Hostname field for libvirt (default sysible)."""
+    opts = client.get("/infra/providers").json()["providers"]["libvirt"]["options"]
+    ho = next((o for o in opts if o["key"] == "hostname"), None)
+    assert ho and ho["default"] == "sysible"

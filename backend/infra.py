@@ -16,6 +16,10 @@ from __future__ import annotations
 # type: "select" (choices), "number", "text", "textarea". `default` seeds the form.
 _COUNT = {"key": "count", "label": "How many VMs", "type": "number", "default": 1}
 _PREFIX = {"key": "name_prefix", "label": "Name prefix", "type": "text", "default": "app"}
+_HOSTNAME = {"key": "hostname", "label": "Hostname (base name set on the VMs)", "type": "text",
+             "default": "sysible",
+             "help": "The OS hostname the VMs boot with. A single VM gets exactly this; several get "
+                     "it suffixed (sysible-1, sysible-2, …). Set per-VM via the cloud-init meta-data."}
 _SSH_USER = {"key": "ssh_user", "label": "Login user", "type": "text", "default": "ubuntu"}
 _SSH_KEY = {"key": "ssh_public_key", "label": "Deploy SSH public key (for SLEP access)",
             "type": "textarea", "default": "", "help": "Paste an ssh-ed25519/ssh-rsa public key. Optional."}
@@ -97,7 +101,7 @@ PROVIDERS = {
                      "clone. A bare local path is read from the SLEP host (a container), not the "
                      "hypervisor — to use an image on the hypervisor, name it under “Existing pool volume”."},
             {"key": "network", "label": "Network name", "type": "text", "default": "default"},
-            _SSH_USER, _SSH_KEY, _SSH_PASSWORD, _ENV,
+            _HOSTNAME, _SSH_USER, _SSH_KEY, _SSH_PASSWORD, _ENV,
         ],
     },
     "proxmox": {
@@ -247,6 +251,13 @@ def _cloudinit(ssh_user: str, keys: list[str], password: str = "", hashed_passwo
         # install + start an SSH server (apt → dnf → yum), cross-distro, best-effort
         "command -v sshd >/dev/null 2>&1 || { command -v apt-get >/dev/null 2>&1 && apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y openssh-server; } || { command -v dnf >/dev/null 2>&1 && dnf install -y openssh-server; } || { command -v yum >/dev/null 2>&1 && yum install -y openssh-server; } || true",
         "systemctl enable --now ssh 2>/dev/null || systemctl enable --now sshd 2>/dev/null || true",
+        # Map 127.0.1.1 to whatever hostname the VM actually booted with (set per-VM
+        # via the cloud-init meta-data local-hostname, e.g. 'sysible') so sudo and
+        # name resolution don't warn about an unresolvable host. Uses the runtime
+        # hostname, so it's correct for every VM without baking a name into the
+        # shared cloud-init.
+        "_hn=\"$(hostname 2>/dev/null || cat /etc/hostname 2>/dev/null)\"",
+        "if [ -n \"$_hn\" ] && ! grep -qE \"^127\\.0\\.1\\.1[[:space:]]+$_hn( |\\$)\" /etc/hosts 2>/dev/null; then echo \"127.0.1.1 $_hn\" >> /etc/hosts; fi",
     ]
     if hashed:
         # Set the password and turn password auth ON in sshd (cloud images usually
@@ -396,6 +407,11 @@ resource "libvirt_cloudinit_disk" "ci" {{
   name      = "${{var.name_prefix}}-${{count.index + 1}}-ci.iso"
   pool      = var.pool
   user_data = file("${{path.module}}/cloudinit.cfg")
+  # Per-VM hostname via NoCloud meta-data (the shared user_data can't differ per
+  # VM). One VM gets the bare base name; several get it suffixed so they stay
+  # unique. instance-id is per-VM too, which also keeps cloud-init from treating a
+  # cloned disk as an already-configured instance.
+  meta_data = "instance-id: ${{var.name_prefix}}-${{count.index + 1}}\\nlocal-hostname: ${{var.vm_count > 1 ? "${{var.hostname}}-${{count.index + 1}}" : var.hostname}}\\n"
 }}
 
 {storage}
@@ -427,6 +443,7 @@ resource "libvirt_domain" "vm" {{
         "base_image": ("string", spec.get("base_image", "")),
         "base_volume": ("string", base_volume),
         "network": ("string", spec.get("network", "default")),
+        "hostname": ("string", spec.get("hostname", "sysible")),
         "vm_count": ("number", spec.get("count", 1)),
         "name_prefix": ("string", spec.get("name_prefix", "app")),
         "environment": ("string", spec.get("environment", "production")),
