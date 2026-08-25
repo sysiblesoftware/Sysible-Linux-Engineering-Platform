@@ -2849,7 +2849,7 @@ def _verify_infra_key_access(project_id: int, inventory_id: int, emit) -> None:
                 if distribute(h) and reachable(h):
                     good.add(h["name"]); pending.remove(h)
                     emit(f"   ✓ {h['name']} — key installed over the password login, now reachable.")
-        elif pending and pw_ref and not shutil.which("sshpass"):
+        elif pending and password and not shutil.which("sshpass"):
             emit("   (couldn't auto-install over password — `sshpass` isn't on the SLEP host.)")
         for h in hosts:
             ok = h["name"] in good
@@ -2974,6 +2974,25 @@ def infra_test_auth(project_id: int, body: dict = Body(default={}), user: str = 
             if not sshpass:
                 return {"results": [], "note": "`sshpass` isn't installed on the SLEP host — can't test a password here."}
 
+        # If there's a jump host, first confirm IT accepts SLEP's managed key. Every
+        # per-host probe hops through the jump host with that key, so if the jump host
+        # doesn't trust it the probes all fail with a target-blaming message ("tunnel
+        # closed") — pointing the operator at the VM when the jump host is the fault.
+        # Check it once, up front, and say so plainly.
+        if bastion:
+            mk = keydist.managed_key_path()
+            bcmd = keydist.probe_cmd("", bastion, keyfile=mk) if mk else None
+            if bcmd:
+                try:
+                    br = subprocess.run(bcmd, capture_output=True, text=True, timeout=20)
+                    if br.returncode != 0:
+                        return {"results": [], "bastion": bastion,
+                                "note": (f"The jump host {bastion} isn't accepting SLEP's key, so nothing can hop "
+                                         f"through it to the VMs. Run “Prepare jump host” (or check its address/login), "
+                                         f"then test again.\n\n({keydist._err_line(br, has_bastion=False)})")}
+                except Exception:  # noqa: BLE001 — fall through to per-host probing
+                    pass
+
         results = []
         for h in hosts:
             u = (h.get("variables") or {}).get("ansible_user") or meta.get("ssh_user") or ""
@@ -3006,9 +3025,24 @@ def infra_test_auth(project_id: int, body: dict = Body(default={}), user: str = 
 
     label = "SLEP managed key" if method == "key" and not cred else \
             (f"credential “{cred['name']}”" if cred else "typed password" if method == "password" else "key")
-    db.log_audit("infra_test_auth", user, f"project #{project_id} via {label}: {sum(1 for r in results if r['ok'])}/{len(results)} ok")
-    return {"results": results, "note": "", "method": method, "label": label, "bastion": bastion,
-            "ok": sum(1 for r in results if r["ok"]), "total": len(results)}
+    n_ok = sum(1 for r in results if r["ok"])
+    # When EVERY host refuses login and none of them are 'permission denied' (i.e. the
+    # account/sshd isn't even answering), the usual cause is a base image that doesn't
+    # run cloud-init — so the account, password and keys SLEP wrote were never applied.
+    # The per-host probe can't read cloud-init status without logging in, so surface the
+    # hint here rather than leaving the operator with only "tunnel closed".
+    note = ""
+    if results and n_ok == 0:
+        refused = any("refused" in (r.get("detail") or "").lower() or "denied" in (r.get("detail") or "").lower() for r in results)
+        if not refused:
+            note = ("None of the VMs answered on SSH. If this base image was INSTALLED from an ISO "
+                    "(rather than a cloud image), it likely doesn't run cloud-init — so the admin account, "
+                    "password and keys SLEP configured were never created and sshd may be off. Rebuild from "
+                    "an Ubuntu CLOUD image (a *-cloudimg / .img that runs cloud-init on first boot). To confirm "
+                    "on the hypervisor:  sudo virt-cat -d <vm> /var/log/cloud-init.log")
+    db.log_audit("infra_test_auth", user, f"project #{project_id} via {label}: {n_ok}/{len(results)} ok")
+    return {"results": results, "note": note, "method": method, "label": label, "bastion": bastion,
+            "ok": n_ok, "total": len(results)}
 
 
 @app.post("/infra/{project_id}/inventory")
@@ -3085,7 +3119,11 @@ def infra_update(project_id: int, body: dict = Body(...), user: str = Depends(re
         if lcid is not None:
             cred = db.get_credential(lcid, include_secret=True)
             if not cred:
-                raise HTTPException(status_code=404, detail="Credential not found.")
+                # The picked credential no longer exists (deleted, or a stale id the UI
+                # submitted). Give an actionable message rather than a bare 404 that
+                # looks like the credential shown in the dropdown is missing.
+                raise HTTPException(status_code=400,
+                                    detail="That login credential no longer exists — pick another in the dropdown (or choose “Enter a username + password manually”).")
             uname = (cred.get("username") or "").strip()
             if uname:
                 _set_infra_login_user(project_id, uname)

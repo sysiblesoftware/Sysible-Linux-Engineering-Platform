@@ -78,7 +78,18 @@ export function JumpHostEditor({ r, onClose, onSaved }) {
   const [src, setSrc] = useState(r.login_credential_id ? String(r.login_credential_id) : '__manual')
   const [sshUser, setSshUser] = useState(r.ssh_user || '')
   const [pw, setPw] = useState('')
-  useEffect(() => { api('credentials').then((d) => setCreds((d.credentials || []).filter((c) => c.kind === 'ssh' || c.kind === 'ssh_password'))) }, [])
+  useEffect(() => {
+    api('credentials').then((d) => {
+      const list = (d.credentials || []).filter((c) => c.kind === 'ssh' || c.kind === 'ssh_password')
+      setCreds(list)
+      // Reconcile the dropdown: if the stored login_credential_id isn't in the list
+      // (deleted, or not visible to this operator), the <select> would show the first
+      // option while `src` still holds the phantom id — and Save would submit that
+      // stale id and get "Credential not found." Snap `src` to a real option instead.
+      setSrc((cur) => (cur === '__manual' || list.some((c) => String(c.id) === cur)
+        ? cur : (list[0] ? String(list[0].id) : '__manual')))
+    })
+  }, [])
   const { wrap, node } = useErr()
   const picked = creds.find((c) => String(c.id) === src)
   return (
@@ -484,6 +495,9 @@ function PoolVolumePicker({ values, set }) {
         {vols && vols.length === 0 && !err && <div className="faint" style={{ fontSize: 11 }}>No images in pool “{values.pool || 'default'}”. Type a name, or leave blank to download the URL below.</div>}
         {err && <div className="faint" style={{ fontSize: 11, color: 'var(--danger)' }}>{err}</div>}
         {!vols && !err && <div className="faint" style={{ fontSize: 11 }}>Leave blank to download the base image URL below, or “Load images” to clone one already on the hypervisor.</div>}
+        <div className="faint" style={{ fontSize: 11, marginTop: 4 }}>
+          ⚠ Must be a <b>cloud image</b> (a <span className="mono">*-cloudimg</span> / <span className="mono">.img</span> that runs cloud-init on first boot). A disk you <b>installed from an ISO</b> won’t run cloud-init — the login account, password and SSH keys never get created and the VM stays unreachable.
+        </div>
       </Field>
     </div>
   )
