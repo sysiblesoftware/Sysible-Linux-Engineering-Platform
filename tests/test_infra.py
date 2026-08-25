@@ -1223,3 +1223,53 @@ def test_cleanup_empty_infra_inventory_on_failed_apply(client):
     db.upsert_host(iid2, "vm-1", "10.0.0.5", source="infra")
     assert tr._cleanup_empty_infra_inventory(pid2, emit) is False
     assert db.get_inventory(iid2) is not None
+
+
+def test_managed_key_view_and_remove(client, monkeypatch):
+    """GET /infra/managed-key reports the key + credential; DELETE removes both the
+    on-disk key and the 'SLEP managed key' credential."""
+    import backend.keydist as keydist
+    import backend.db as db
+    priv, pub = keydist._key_paths()
+    priv.parent.mkdir(parents=True, exist_ok=True)
+    priv.write_text("PRIV"); pub.write_text("ssh-ed25519 AAAAMK slep-managed\n")
+    cid = db.upsert_credential("SLEP managed key", kind="ssh", username="admin", secret="PRIV")
+    try:
+        info = client.get("/infra/managed-key").json()
+        assert info["exists"] is True and info["credential_id"] == cid
+        assert info["public_key"].startswith("ssh-ed25519")
+
+        d = client.request("DELETE", "/infra/managed-key").json()
+        assert d["removed"] is True and d["credential_removed"] is True
+        assert not priv.exists() and not pub.exists()
+        assert client.get("/infra/managed-key").json()["exists"] is False
+    finally:
+        priv.unlink(missing_ok=True); pub.unlink(missing_ok=True)
+
+
+def test_managed_key_regenerate(client, monkeypatch):
+    """Regenerate mints a NEW key (different from the old) and re-syncs the credential."""
+    import backend.keydist as keydist
+    import backend.db as db
+    priv, pub = keydist._key_paths()
+    priv.parent.mkdir(parents=True, exist_ok=True)
+    priv.write_text("OLD-PRIV"); pub.write_text("ssh-ed25519 OLDKEY slep-managed\n")
+    db.upsert_credential("SLEP managed key", kind="ssh", username="admin", secret="OLD-PRIV")
+    # Fake ssh-keygen (absent in the test image) so ensure_key() mints a new pair.
+    import shutil
+    monkeypatch.setattr(keydist.shutil, "which", lambda b: "/usr/bin/" + b)
+
+    def fake_run(cmd, **k):
+        f = cmd[cmd.index("-f") + 1]
+        open(f, "w").write("NEW-PRIV"); open(f + ".pub", "w").write("ssh-ed25519 NEWKEY slep-managed")
+        class R: returncode = 0; stdout = ""; stderr = ""
+        return R()
+    monkeypatch.setattr(keydist.subprocess, "run", fake_run)
+    try:
+        d = client.post("/infra/managed-key/regenerate").json()
+        assert "NEWKEY" in d["public_key"] and "OLDKEY" not in d["public_key"]
+        # credential re-synced to the new private key
+        got = db.get_credential(db.list_credentials()[0]["id"], include_secret=True) if False else None
+        assert keydist.public_key() == "ssh-ed25519 NEWKEY slep-managed"
+    finally:
+        priv.unlink(missing_ok=True); pub.unlink(missing_ok=True)

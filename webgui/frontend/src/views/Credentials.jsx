@@ -12,6 +12,7 @@ export default function Credentials() {
   return (
     <>
       <h2>Credentials</h2>
+      <ManagedKeyPanel onChanged={load} />
       <div className="row" style={{ marginBottom: 12 }}>
         <button className="primary" onClick={() => setOpen(true)}>+ New credential</button>
       </div>
@@ -35,6 +36,54 @@ export default function Credentials() {
       {open && <NewCred onClose={() => setOpen(false)} onDone={() => { setOpen(false); load() }} />}
       {sudoFor && <SetSudo cred={sudoFor} onClose={() => setSudoFor(null)} onDone={() => { setSudoFor(null); load() }} />}
     </>
+  )
+}
+
+// SLEP's ONE managed key — the key baked into VMs it builds, used for the jump
+// hop and the hypervisor connection. Shows its fingerprint (so you can tell the
+// current key from a stale one on old VMs), and lets you RESET it (mint a fresh
+// key when the deployed one drifted — "none of the SLEP keys work") or REMOVE it.
+function ManagedKeyPanel({ onChanged }) {
+  const [info, setInfo] = useState(null)
+  const [busy, setBusy] = useState('')
+  const [msg, setMsg] = useState('')
+  const load = () => api('infra/managed-key').then(setInfo).catch(() => setInfo({ exists: false }))
+  useEffect(() => { load() }, [])   // eslint-disable-line
+  const regen = async () => {
+    if (!window.confirm('Reset SLEP’s managed key?\n\nA brand-new key is generated and the OLD one stops working immediately. You must then re-install it on your hypervisor(s) (Install key with password) and re-apply so VMs bake in the new key.')) return
+    setBusy('regen'); setMsg('')
+    try { const d = await api('infra/managed-key/regenerate', { method: 'POST' }); setMsg(d.note || 'Key regenerated.'); await load(); onChanged && onChanged() }
+    catch (e) { setMsg('Error: ' + (e.message || e)) } finally { setBusy('') }
+  }
+  const remove = async () => {
+    if (!window.confirm('Remove SLEP’s managed key and its credential?\n\nSLEP will mint a fresh one the next time it needs a key. Deployed copies (hypervisor authorized_keys, VM cloud-init) are not touched.')) return
+    setBusy('remove'); setMsg('')
+    try { await api('infra/managed-key', { method: 'DELETE' }); setMsg('Removed. A fresh key will be created on next use.'); await load(); onChanged && onChanged() }
+    catch (e) { setMsg('Error: ' + (e.message || e)) } finally { setBusy('') }
+  }
+  if (!info) return null
+  return (
+    <div style={{ border: '1px solid var(--line)', borderRadius: 10, padding: 12, margin: '4px 0 14px' }}>
+      <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+        <div>
+          <b style={{ fontSize: 13 }}>🔑 SLEP managed key</b>
+          <div className="faint" style={{ fontSize: 12, marginTop: 2 }}>
+            The one key SLEP bakes into the VMs it builds and uses for the jump hop / hypervisor connection.
+          </div>
+          <div className="mono" style={{ fontSize: 11.5, marginTop: 4 }}>
+            {info.exists
+              ? (info.fingerprint || info.public_key || '(key present)')
+              : <span style={{ color: 'var(--danger)' }}>no key on disk — one will be created on next use</span>}
+            {info.exists && info.credential_id == null && <span style={{ color: 'var(--danger)' }}> · no matching credential</span>}
+          </div>
+        </div>
+        <div className="row" style={{ gap: 6 }}>
+          <button className="ghost sm" disabled={busy === 'regen'} title="Mint a brand-new key (resets SLEP’s identity)" onClick={regen}>{busy === 'regen' ? 'Resetting…' : '↻ Reset key'}</button>
+          <button className="danger ghost sm" disabled={busy === 'remove'} title="Remove the key + its credential" onClick={remove}>{busy === 'remove' ? 'Removing…' : 'Remove'}</button>
+        </div>
+      </div>
+      {msg && <div className="faint" style={{ fontSize: 12, marginTop: 8 }}>{msg}</div>}
+    </div>
   )
 }
 

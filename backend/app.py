@@ -2212,6 +2212,61 @@ def infra_hypervisor_key(user: str = Depends(require_operator)):
     return {"public_key": pub, "keyfile": keyfile}
 
 
+def _managed_key_credential_id():
+    """Id of the 'SLEP managed key' credential, or None."""
+    for c in db.list_credentials():
+        if c.get("name") == keydist._CRED_NAME:
+            return c["id"]
+    return None
+
+
+@app.get("/infra/managed-key")
+def infra_managed_key(user: str = Depends(require_operator)):
+    """Describe SLEP's ONE managed key — its public half + fingerprint, whether it
+    exists on disk, and whether the matching credential is present. The fingerprint
+    lets you tell the CURRENT key from a stale one baked into older VMs (the usual
+    cause of 'none of the SLEP keys work': the on-disk key drifted from what's
+    deployed)."""
+    return {
+        "exists": bool(keydist.managed_key_path()),
+        "public_key": keydist.public_key(),
+        "fingerprint": keydist.fingerprint(),
+        "credential_id": _managed_key_credential_id(),
+        "path": keydist.managed_key_path(),
+    }
+
+
+@app.post("/infra/managed-key/regenerate")
+def infra_managed_key_regenerate(user: str = Depends(require_operator)):
+    """RESET SLEP's managed key: mint a brand-new keypair and re-sync the credential
+    to it. Use when the deployed key drifted from the on-disk one. The OLD key stops
+    working immediately, so afterwards you must re-install the new key on each
+    hypervisor (Install key with password) and re-apply so VMs bake it in. Returns
+    the new public key + fingerprint."""
+    try:
+        pub = keydist.regenerate_key()
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"Couldn't regenerate the key: {e}")
+    db.log_audit("managed_key_regenerated", user, "SLEP managed key reset")
+    return {"public_key": pub, "fingerprint": keydist.fingerprint(),
+            "note": "New key generated. Re-install it on your hypervisor(s) and re-apply so VMs pick it up — "
+                    "the previous key no longer authenticates."}
+
+
+@app.delete("/infra/managed-key")
+def infra_managed_key_delete(user: str = Depends(require_operator)):
+    """Remove SLEP's managed key entirely — the on-disk keypair AND the 'SLEP managed
+    key' credential. SLEP will mint a fresh one the next time it needs a key (e.g. an
+    infra apply or a key-install), so this is a clean slate, not a permanent removal.
+    Deployed copies (hypervisor authorized_keys, VM cloud-init) are not touched."""
+    removed = keydist.remove_key()
+    cid = _managed_key_credential_id()
+    if cid:
+        db.delete_credential(cid)
+    db.log_audit("managed_key_removed", user, f"on-disk={removed} credential={'yes' if cid else 'no'}")
+    return {"removed": removed, "credential_removed": bool(cid)}
+
+
 @app.post("/infra/install-hypervisor-key")
 def infra_install_hypervisor_key(body: dict = Body(...), user: str = Depends(require_operator)):
     """Install SLEP's managed hypervisor public key onto a remote KVM host using a

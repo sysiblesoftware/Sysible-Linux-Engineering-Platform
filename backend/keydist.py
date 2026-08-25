@@ -72,6 +72,48 @@ def public_key() -> str:
     return pub.read_text().strip() if pub.exists() else ""
 
 
+def fingerprint() -> str:
+    """SHA256 fingerprint of the on-disk managed public key (`ssh-keygen -lf`), or ''
+    when there's no key or ssh-keygen is unavailable. Lets the UI show WHICH key is
+    current so a stale one baked into old VMs is recognisable."""
+    _priv, pub = _key_paths()
+    if not pub.exists() or not shutil.which("ssh-keygen"):
+        return ""
+    try:
+        r = subprocess.run(["ssh-keygen", "-lf", str(pub)], capture_output=True, text=True, timeout=10)
+        return r.stdout.strip() if r.returncode == 0 else ""
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def remove_key() -> bool:
+    """Delete the on-disk managed keypair. Returns True if anything was removed. The
+    'SLEP managed key' credential is left to the caller (the API deletes it too on a
+    full remove). After this, ensure_key() would mint a fresh, DIFFERENT key."""
+    priv, pub = _key_paths()
+    removed = False
+    for p in (priv, pub):
+        try:
+            if p.exists():
+                p.unlink()
+                removed = True
+        except OSError:
+            pass
+    return removed
+
+
+def regenerate_key() -> str:
+    """Replace the managed keypair with a brand-new one and re-sync the credential to
+    it. Use this to RESET SLEP's identity when the deployed key drifted from the
+    on-disk one (the classic 'none of the keys work any more'). Returns the new
+    public key. Callers must then re-install it on hypervisors and re-apply so VMs
+    bake in the new key — the old key stops working the moment this runs."""
+    remove_key()
+    pub = ensure_key()
+    sync_managed_credential()
+    return pub
+
+
 def sync_managed_credential() -> bool:
     """Keep the 'SLEP managed key' credential holding the CURRENT on-disk managed
     private key, so a run using it authenticates with exactly the key SLEP bakes
