@@ -72,46 +72,43 @@ export default function Infrastructure({ onOpenProject }) {
 // a VM is reachable even before its key lands), and the SSH jump host. All apply to
 // every inventory the project owns, so you set them once instead of per inventory.
 export function JumpHostEditor({ r, onClose, onSaved }) {
-  const [sshUser, setSshUser] = useState(r.ssh_user || '')
-  const [pw, setPw] = useState('')
   const [bastion, setBastion] = useState(r.bastion || '')
   const [creds, setCreds] = useState([])
-  // Deploy key source: '' = SLEP managed key, a credential id, or '__literal' (paste)
-  const [credId, setCredId] = useState(r.deploy_public_key ? '__literal' : (r.deploy_credential_id ? String(r.deploy_credential_id) : ''))
-  const [litKey, setLitKey] = useState(r.deploy_public_key || '')
-  useEffect(() => { api('credentials').then((d) => setCreds((d.credentials || []).filter((c) => c.kind === 'ssh'))) }, [])
+  // Login source: a stored credential id, or '__manual' (type user + password).
+  const [src, setSrc] = useState(r.login_credential_id ? String(r.login_credential_id) : '__manual')
+  const [sshUser, setSshUser] = useState(r.ssh_user || '')
+  const [pw, setPw] = useState('')
+  useEffect(() => { api('credentials').then((d) => setCreds((d.credentials || []).filter((c) => c.kind === 'ssh' || c.kind === 'ssh_password'))) }, [])
   const { wrap, node } = useErr()
+  const picked = creds.find((c) => String(c.id) === src)
   return (
     <Modal title={`VM access — ${r.project_name}`} onClose={onClose}>
       <p className="muted" style={{ marginTop: 0 }}>
-        How SLEP logs into this project’s VMs. The login user is baked into the cloud-init, the Terraform output,
-        and the inventory together, so they never drift out of step (the mismatch that causes
-        <span className="mono"> Permission denied</span>). Re-apply to rebuild existing VMs with these settings.
+        One login account — like Sysible Controller: the same user + password (or key) is created on the VMs and
+        used by SLEP to log in and to <span className="mono">sudo</span>. cloud-init creates it; Ansible and Salt
+        both authenticate as it. Re-apply to rebuild existing VMs with these settings.
       </p>
-      <Field label="Login user — the account keys are installed on (e.g. admin)">
-        <input value={sshUser} autoFocus onChange={(e) => setSshUser(e.target.value)} placeholder="admin" />
-      </Field>
-      <Field label={`Login password — a literal, or a Vault variable like vault.admin_pw${r.has_password ? ' (a password is already set — leave blank to keep it)' : ' (turns on password SSH)'}`}>
-        <input value={pw} onChange={(e) => setPw(e.target.value)} placeholder={r.has_password ? '•••••••• (set — type to change)' : 'admin_pass or vault.admin_pw'} />
-      </Field>
-      <Field label="Deploy SSH credential — whose public key is baked into the VMs (so it can log in)">
-        <select value={credId} onChange={(e) => setCredId(e.target.value)}>
-          <option value="">SLEP managed key (default)</option>
-          {creds.map((c) => <option key={c.id} value={c.id}>{c.name}{c.username ? ` (${c.username})` : ''}</option>)}
-          <option value="__literal">＋ Paste a public key…</option>
+      <Field label="Login credential — a stored credential used as the VM account (login + sudo)">
+        <select value={src} onChange={(e) => setSrc(e.target.value)}>
+          {creds.map((c) => <option key={c.id} value={c.id}>{c.name} — {c.username || '?'} ({c.kind === 'ssh_password' ? 'password' : 'key'})</option>)}
+          <option value="__manual">＋ Enter a username + password manually…</option>
         </select>
-        {credId === '__literal'
-          ? <>
-              <textarea rows={2} value={litKey} onChange={(e) => setLitKey(e.target.value)}
-                placeholder="ssh-ed25519 AAAA… user@host"
-                style={{ fontFamily: 'ui-monospace,monospace', fontSize: 11.5, marginTop: 4 }} />
-              <div className="faint" style={{ fontSize: 11 }}>Paste an OpenSSH public key — baked into the cloud-init; re-apply (or Fix SSH) to push it to existing VMs.</div>
-            </>
-          : <div className="faint" style={{ fontSize: 11 }}>
-              {creds.length === 0 ? <>No stored SSH credentials — add one under <b>Credentials</b>, or paste a key.</>
-                : 'Pick a stored credential (from the Credentials tab) or paste a key; it’s added to the cloud-init.'}
-            </div>}
+        {picked
+          ? <div className="faint" style={{ fontSize: 11.5 }}>
+              cloud-init creates <b>{picked.username}</b> with this credential’s {picked.kind === 'ssh_password' ? 'password' : 'key'}; Ansible &amp; Salt log in as it.
+            </div>
+          : <div className="faint" style={{ fontSize: 11.5 }}>Type an account below — or pick one you already made in the <b>Credentials</b> tab.</div>}
       </Field>
+      {src === '__manual' && (
+        <>
+          <Field label="Username (e.g. admin)">
+            <input value={sshUser} onChange={(e) => setSshUser(e.target.value)} placeholder="admin" />
+          </Field>
+          <Field label={`Password — a literal, or a Vault variable like vault.admin_pw${r.has_password ? ' (a password is already set — leave blank to keep it)' : ''}`}>
+            <input value={pw} onChange={(e) => setPw(e.target.value)} placeholder={r.has_password ? '•••••••• (set — type to change)' : 'admin_pass or vault.admin_pw'} />
+          </Field>
+        </>
+      )}
       <Field label="Jump host (user@host[:port]) — empty for a direct connection">
         <input value={bastion} onChange={(e) => setBastion(e.target.value)} placeholder="admin@192.168.8.212" />
       </Field>
@@ -120,11 +117,12 @@ export function JumpHostEditor({ r, onClose, onSaved }) {
         <button className="ghost sm" onClick={onClose}>Cancel</button>
         <button className="primary sm" onClick={() => wrap(async () => {
           const body = { bastion: bastion.trim() }
-          if (sshUser.trim() && sshUser.trim() !== (r.ssh_user || '')) body.ssh_user = sshUser.trim()
-          if (pw.trim()) body.ssh_password = pw.trim()
-          // Deploy key: a stored credential, a pasted literal, or the managed key.
-          if (credId === '__literal') { body.deploy_public_key = litKey.trim(); body.deploy_credential_id = null }
-          else { body.deploy_credential_id = credId ? Number(credId) : null; body.deploy_public_key = '' }
+          if (src === '__manual') {
+            if (sshUser.trim() && sshUser.trim() !== (r.ssh_user || '')) body.ssh_user = sshUser.trim()
+            if (pw.trim()) body.ssh_password = pw.trim()
+          } else {
+            body.login_credential_id = Number(src)   // backend derives user + password/key
+          }
           await api(`infra/${r.project_id}`, { method: 'PATCH', json: body })
           onSaved()
         })}>Save</button>

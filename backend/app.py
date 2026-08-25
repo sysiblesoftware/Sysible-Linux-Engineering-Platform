@@ -2447,23 +2447,29 @@ def _resolve_secret_ref(value: str) -> str:
     return "" if m else s
 
 
-def _sync_login_credential(project_id: int):
-    """Keep a single 'login account' credential (username + password) for this infra
-    project in step with ⚙ Access — the Controller model: one local account used to
-    log in AND for controlled sudo. A password credential carries BOTH ansible_password
-    and ansible_become_password, so Ansible/Salt authenticate and sudo as that account.
-    Created/updated when a user + password are set; nothing happens without a password
-    (key-only projects keep using the key credential)."""
-    meta = db.get_infra(project_id) or {}
-    user = (meta.get("ssh_user") or "").strip()
-    password = _infra_login_password(meta)
-    proj = db.get_project(project_id)
-    if not (user and password and proj):
+def _set_infra_login_user(project_id: int, su: str):
+    """Set the login user consistently: the infra row, the Terraform output `user`
+    (→ inventory ansible_user), and already-built inventory hosts."""
+    su = infra._one_line(su or "").strip()
+    if not su:
         return
-    name = f"{proj['name']} — login"
-    cid = db.upsert_credential(name, kind="ssh_password", username=user, secret=password)
-    db.set_infra_login_credential(project_id, cid)
-    return cid
+    db.set_infra_ssh_user(project_id, su)
+    outp = db.project_dir(project_id) / "outputs.tf"
+    if outp.exists():
+        import re as _re
+        try:
+            t = outp.read_text()
+            t2 = _re.sub(r'(\buser\s*=\s*)"[^"]*"', rf'\1"{su}"', t)
+            if t2 != t:
+                outp.write_text(t2)
+        except OSError:
+            pass
+    meta = db.get_infra(project_id)
+    if meta and meta.get("inventory_id"):
+        for h in db.list_hosts(meta["inventory_id"]):
+            v = dict(h.get("variables") or {}); v["ansible_user"] = su
+            db.upsert_host(meta["inventory_id"], h["name"], h["address"],
+                           groups=h.get("groups", ""), variables=v, source=h.get("source", "infra"))
 
 
 def _infra_login_password(meta: dict) -> str:
@@ -2636,8 +2642,6 @@ def infra_create(body: dict = Body(...), user: str = Depends(require_operator)):
     _pw_plain = str(options.get("ssh_password") or "").strip()
     if _pw_plain:
         db.set_infra_ssh_password_enc(pid, vault.encrypt(_pw_plain))
-    # Auto-maintain the login-account credential (username + password) so runs use it.
-    _sync_login_credential(pid)
     # If the VMs land in an inventory that has no jump host yet, give it the
     # hypervisor as one so Ansible/Salt hop through it (no-op when there's none).
     if hv_bastion and inv_target:
@@ -2960,27 +2964,8 @@ def infra_update(project_id: int, body: dict = Body(...), user: str = Depends(re
         # log into the same account the keys were installed on.
         su = infra._one_line(str(body.get("ssh_user") or "")).strip()
         if su:
-            db.set_infra_ssh_user(project_id, su)
-            # Keep the Terraform output (→ inventory ansible_user) in step.
-            outp = db.project_dir(project_id) / "outputs.tf"
-            if outp.exists():
-                import re as _re
-                try:
-                    t = outp.read_text()
-                    t2 = _re.sub(r'(\buser\s*=\s*)"[^"]*"', rf'\1"{su}"', t)
-                    if t2 != t:
-                        outp.write_text(t2)
-                except OSError:
-                    pass
-            # Point any already-built inventory hosts at the new user too.
-            meta2 = db.get_infra(project_id)
-            if meta2 and meta2.get("inventory_id"):
-                for h in db.list_hosts(meta2["inventory_id"]):
-                    v = dict(h.get("variables") or {}); v["ansible_user"] = su
-                    db.upsert_host(meta2["inventory_id"], h["name"], h["address"],
-                                   groups=h.get("groups", ""), variables=v, source=h.get("source", "infra"))
-            # Rebuild the cloud-init so the account it creates matches.
-            _refresh_infra_cloudinit(project_id)
+            _set_infra_login_user(project_id, su)
+            _refresh_infra_cloudinit(project_id)   # rebuild so the account it creates matches
             db.log_audit("infra_ssh_user_set", user, f"project #{project_id} → {su}")
     if "ssh_password" in body:
         # Set (or clear) the login user's password and turn ON password SSH, so a
@@ -3003,10 +2988,31 @@ def infra_update(project_id: int, body: dict = Body(...), user: str = Depends(re
             db.set_infra_ssh_password_enc(project_id, vault.encrypt(pw))
             db.log_audit("infra_ssh_password_set", user,
                          f"project #{project_id} ({'vault' if raw != pw else 'literal'})")
-    # Keep the single login-account credential (username + password) in step, so
-    # Ansible/Salt authenticate + sudo as that account (the Controller model).
-    if "ssh_user" in body or "ssh_password" in body:
-        _sync_login_credential(project_id)
+    if "login_credential_id" in body:
+        # Pick a STORED credential (from the Credentials tab) as the login account —
+        # the Controller model, using a credential you made rather than SLEP inventing
+        # one. A password credential sets the VM's user+password; an SSH-key credential
+        # sets the user + bakes its key. Ansible/Salt then default to this credential.
+        v = body.get("login_credential_id")
+        lcid = int(v) if v not in (None, "", 0) else None
+        if lcid is not None:
+            cred = db.get_credential(lcid, include_secret=True)
+            if not cred:
+                raise HTTPException(status_code=404, detail="Credential not found.")
+            uname = (cred.get("username") or "").strip()
+            if uname:
+                _set_infra_login_user(project_id, uname)
+            if cred.get("kind") == "ssh_password":
+                secret = cred.get("secret") or ""
+                db.set_infra_ssh_password_enc(project_id, vault.encrypt(secret))
+                db.set_infra_deploy_credential(project_id, None)
+                db.set_infra_deploy_public_key(project_id, "")
+                _refresh_infra_cloudinit(project_id, password=secret)
+            elif cred.get("kind") == "ssh":
+                db.set_infra_deploy_credential(project_id, lcid)
+                _refresh_infra_cloudinit(project_id)
+        db.set_infra_login_credential(project_id, lcid)
+        db.log_audit("infra_login_credential_set", user, f"project #{project_id} → {lcid}")
     if "deploy_credential_id" in body or "deploy_public_key" in body:
         # The key baked into the VMs, from EITHER a stored SSH credential (pick from
         # the Credentials tab) OR a literal public key pasted in Access. Setting one
