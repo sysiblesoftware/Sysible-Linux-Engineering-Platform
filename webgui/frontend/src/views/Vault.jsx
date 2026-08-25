@@ -12,9 +12,11 @@ export default function Vault() {
 
   return (
     <>
-      <h2>Vault</h2>
+      <h2>Variable Vault</h2>
       <div className="muted" style={{ marginBottom: 10 }}>
-        Secrets are encrypted at rest and injected into runs as <span className="mono">{'{{ vault.NAME }}'}</span> — never shown again after you save them.
+        Named secret <b>values</b> your playbooks/states reference as <span className="mono">{'{{ vault.NAME }}'}</span> —
+        encrypted at rest, injected into runs, never shown again after you save them. (For login accounts SLEP
+        connects with, use <b>Credentials</b>.)
       </div>
       <div className="row" style={{ marginBottom: 12 }}>
         <button className="primary" onClick={() => setOpen(true)}>+ Add secret</button>

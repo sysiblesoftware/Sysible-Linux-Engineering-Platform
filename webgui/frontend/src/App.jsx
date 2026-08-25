@@ -26,7 +26,7 @@ const NAV = [
   { key: 'infra', label: 'Infrastructure', icon: 'cloud' },
   { key: 'controllers', label: 'Controllers', icon: 'link' },
   { key: 'credentials', label: 'Credentials', icon: 'key' },
-  { key: 'vault', label: 'Vault', icon: 'lock' },
+  { key: 'vault', label: 'Variable Vault', icon: 'lock' },
   { key: 'runs', label: 'Runs', icon: 'play' },
   { key: 'pipelines', label: 'Pipelines', icon: 'pipeline' },
   { key: 'schedules', label: 'Schedules', icon: 'clock' },
