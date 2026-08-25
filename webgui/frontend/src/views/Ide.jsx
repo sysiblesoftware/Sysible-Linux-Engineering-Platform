@@ -459,7 +459,7 @@ export default function Ide({ project, onBack, onRun, onInfraChanged, theme }) {
           <button className="ghost sm" onClick={() => setNewOpen(true)}>＋ New file</button>
           {!isInfra && (
             <button className="ghost sm" title="Generate a full, working Terraform project here with the infrastructure wizard"
-              onClick={() => setInfraWizOpen(true)}>☁ Build infra</button>
+              onClick={() => setInfraWizOpen(true)}>Build infra</button>
           )}
           {snip.engine === 'ansible' && (
             <button className="ghost sm" onClick={() => setPlayOpen(true)} disabled={path == null}
@@ -471,7 +471,7 @@ export default function Ide({ project, onBack, onRun, onInfraChanged, theme }) {
           )}
           {snip.engine === 'ansible' && (
             <button className="ghost sm" onClick={openConfig}
-              title="Edit this project's ansible.cfg — forks, host key checking, become, SSH, roles/collections paths">⚙ Config</button>
+              title="Edit this project's ansible.cfg — forks, host key checking, become, SSH, roles/collections paths">Config</button>
           )}
           <button className="ghost sm" onClick={() => setTaskOpen(true)} disabled={path == null}
             title={`Insert a ready-made ${snip.engine} ${snip.verb.toLowerCase()} at the cursor`}>Add {snip.verb}</button>
@@ -484,8 +484,8 @@ export default function Ide({ project, onBack, onRun, onInfraChanged, theme }) {
           </label>
           <button className="ghost sm" title="Version control — commit, push, pull, branches" onClick={() => setGitOpen(true)}>⎇ Git</button>
           <div className="spacer" />
-          <button className="ghost sm" title="Run several steps in succession (create → configure → maintain)" onClick={() => setPipeOpen(true)}>⧉ Sequence</button>
-          <button className="primary sm" onClick={() => setRunOpen(true)}>▶ Run</button>
+          <button className="ghost sm" title="Run several steps in succession (create → configure → maintain)" onClick={() => setPipeOpen(true)}>Sequence</button>
+          <button className="primary sm" onClick={() => setRunOpen(true)}>Run</button>
         </div>
         <div className="tree">
           <div className="tree-h"><span>Explorer</span><button className="tree-h-btn" title="New file" onClick={() => setNewOpen(true)}>＋</button></div>
@@ -1036,7 +1036,7 @@ export function RunModal({ project, currentFile, onClose, onLaunched, initial })
           tool: engine === 'terraform' ? tfTool : '',
         } })
         onClose(); onLaunched(d.run_id)
-      })}>▶ Launch</button>
+      })}>Launch</button>
       {newInvOpen && <NameModal title="New inventory" label="Inventory name" placeholder="prod-web"
         onClose={() => setNewInvOpen(false)}
         onSubmit={async (nm) => {
@@ -1166,7 +1166,7 @@ export function PipelineModal({ project, currentFile, initialSteps, initialName,
                 </select>
               </>)}
           <div className="row" style={{ gap: 2 }}>
-            {st.kind !== 'inventory' && <button className={'ghost sm' + (openSteps.has(i) ? ' active' : '')} title="Variables & options" onClick={() => toggleOpts(i)}>⚙</button>}
+            {st.kind !== 'inventory' && <button className={'ghost sm' + (openSteps.has(i) ? ' active' : '')} title="Variables & options" onClick={() => toggleOpts(i)}>Options</button>}
             <button className="ghost sm" title="Move up" onClick={() => move(i, -1)} disabled={i === 0}>↑</button>
             <button className="ghost sm" title="Move down" onClick={() => move(i, 1)} disabled={i === steps.length - 1}>↓</button>
             <button className="danger ghost sm" title="Remove step" onClick={() => del(i)} disabled={steps.length === 1}>✕</button>
@@ -1227,7 +1227,7 @@ export function PipelineModal({ project, currentFile, initialSteps, initialName,
         <button className="primary" onClick={() => wrap(async () => {
           const d = await api('pipelines/run', { method: 'POST', json: { project_id: project.id, steps: payloadOf(), stop_on_failure: stopOnFail } })
           onClose(); onLaunched(d.run_ids[0])
-        })}>▶ Run {steps.length} step{steps.length > 1 ? 's' : ''} in sequence</button>
+        })}>Run {steps.length} step{steps.length > 1 ? 's' : ''} in sequence</button>
       </div>
     </Modal>
   )

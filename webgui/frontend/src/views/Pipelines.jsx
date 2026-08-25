@@ -33,7 +33,7 @@ export default function Pipelines({ onOpenRun }) {
         {writable && <button className="primary" onClick={() => setNewOpen(true)}>+ New pipeline</button>}
       </div>
       <div className="muted" style={{ marginBottom: 12 }}>Saved sequences you can re-run — steps execute one after another (create → configure → maintain, or any order).</div>
-      {rows.length === 0 ? <div className="muted">No saved pipelines yet. “New pipeline” to build one, or save a sequence from a project’s “⧉ Sequence” builder.</div> : (
+      {rows.length === 0 ? <div className="muted">No saved pipelines yet. “New pipeline” to build one, or save a sequence from a project’s “Sequence” builder.</div> : (
         <table>
           <thead><tr><th>Name</th><th>Project</th><th>Sequence</th><th></th></tr></thead>
           <tbody>
@@ -43,7 +43,7 @@ export default function Pipelines({ onOpenRun }) {
                 <td className="muted">{p.project_name}</td>
                 <td className="muted" style={{ fontSize: 12.5 }}>{p.steps.map((s) => `${s.kind}:${s.target}`).join('  →  ')}</td>
                 <td className="row">
-                  {writable && <button className="primary sm" onClick={() => run(p)}>▶ Run</button>}
+                  {writable && <button className="primary sm" onClick={() => run(p)}>Run</button>}
                   {writable && <button className="ghost sm" onClick={() => edit(p)}>Edit</button>}
                   {writable && <button className="danger ghost sm" onClick={() => del(p)}>Delete</button>}
                 </td>

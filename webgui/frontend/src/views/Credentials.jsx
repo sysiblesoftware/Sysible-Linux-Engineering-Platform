@@ -66,7 +66,7 @@ function ManagedKeyPanel({ onChanged }) {
     <div style={{ border: '1px solid var(--line)', borderRadius: 10, padding: 12, margin: '4px 0 14px' }}>
       <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
         <div>
-          <b style={{ fontSize: 13 }}>🔑 SLEP managed key</b>
+          <b style={{ fontSize: 13 }}>SLEP managed key</b>
           <div className="faint" style={{ fontSize: 12, marginTop: 2 }}>
             The one key SLEP bakes into the VMs it builds and uses for the jump hop / hypervisor connection.
           </div>
@@ -78,7 +78,7 @@ function ManagedKeyPanel({ onChanged }) {
           </div>
         </div>
         <div className="row" style={{ gap: 6 }}>
-          <button className="ghost sm" disabled={busy === 'regen'} title="Mint a brand-new key (resets SLEP’s identity)" onClick={regen}>{busy === 'regen' ? 'Resetting…' : '↻ Reset key'}</button>
+          <button className="ghost sm" disabled={busy === 'regen'} title="Mint a brand-new key (resets SLEP’s identity)" onClick={regen}>{busy === 'regen' ? 'Resetting…' : 'Reset key'}</button>
           <button className="danger ghost sm" disabled={busy === 'remove'} title="Remove the key + its credential" onClick={remove}>{busy === 'remove' ? 'Removing…' : 'Remove'}</button>
         </div>
       </div>

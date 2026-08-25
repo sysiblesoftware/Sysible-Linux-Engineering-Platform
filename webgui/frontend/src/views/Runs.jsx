@@ -74,7 +74,7 @@ export default function Runs({ onOpen }) {
                 <td className="muted">{r.created ? new Date(r.created * 1000).toLocaleString() : ''}</td>
                 <td><button className="ghost sm" disabled={busy === r.id}
                   title={`Re-run this ${r.kind} (${r.target}) with the same settings`}
-                  onClick={() => rerun(r.id)}>{busy === r.id ? '…' : '↻ Re-run'}</button></td>
+                  onClick={() => rerun(r.id)}>{busy === r.id ? '…' : 'Re-run'}</button></td>
               </tr>
             ))}
           </tbody>
@@ -253,11 +253,11 @@ export function RunLog({ runId, onBack, onOpenRun }) {
           onClick={toggleLog}>{showLog ? 'Hide log' : 'Show log'}</button>
         {!done && (
           <button className="danger sm" disabled={stopping} title="Terminate this run"
-            onClick={stopRun}>{stopping ? 'Stopping…' : '■ Stop'}</button>
+            onClick={stopRun}>{stopping ? 'Stopping…' : 'Stop'}</button>
         )}
         {done && failedHosts.length > 0 && (
           <button className="ghost sm" title={`Re-run the playbook against just: ${failedHosts.join(', ')}`}
-            onClick={openRerun}>↻ Re-run failed ({failedHosts.length})</button>
+            onClick={openRerun}>Re-run failed ({failedHosts.length})</button>
         )}
         {projectId && ((engine === 'terraform' && done) ||
                        seq.some((s) => s.kind === 'terraform' && ['success', 'failed'].includes(s.status))) && (
