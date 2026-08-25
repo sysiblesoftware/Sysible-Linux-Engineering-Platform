@@ -717,7 +717,9 @@ def write_file(pid: int, body: dict = Body(...), user: str = Depends(current_use
 
 @app.post("/projects/{pid}/file")
 def create_path(pid: int, body: dict = Body(...), user: str = Depends(current_user)):
-    """Create an empty file or a directory (type=dir)."""
+    """Create a file or a directory (type=dir). An optional `content` seeds a new
+    file with starter text (e.g. a Terraform / Ansible / Salt template) — only
+    applied when the file doesn't already exist, so it never clobbers."""
     path = str(body.get("path") or "").strip()
     if not path:
         raise HTTPException(status_code=400, detail="path is required.")
@@ -727,7 +729,7 @@ def create_path(pid: int, body: dict = Body(...), user: str = Depends(current_us
     else:
         target.parent.mkdir(parents=True, exist_ok=True)
         if not target.exists():
-            target.write_text("")
+            target.write_text(str(body.get("content") or ""))
     db.touch_project(pid)
     return {"status": "created", "path": path}
 

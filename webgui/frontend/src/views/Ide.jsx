@@ -481,7 +481,7 @@ export default function Ide({ project, onBack, onRun }) {
         </div>
         <div className="tree">
           <div className="tree-h"><span>Explorer</span><button className="tree-h-btn" title="New file" onClick={() => setNewOpen(true)}>＋</button></div>
-          {tree.length === 0 && <div className="muted" style={{ padding: 6 }}>Empty project — “＋ New file”.</div>}
+          {tree.length === 0 && <div className="muted" style={{ padding: 6, fontSize: 12 }}>Empty project. Click “＋ New file” to start from a template — Ansible playbook, Salt state, or Terraform.</div>}
           {tree.map((f) => {
             const depth = f.path.split('/').length - 1
             const base = f.path.split('/').pop()
@@ -609,14 +609,46 @@ function PlayModal({ targets, hasContent, onClose, onWrap, onInsert }) {
   )
 }
 
+// Starter templates so a fresh project can bootstrap any engine — you pick the
+// kind and get a runnable skeleton, instead of a blank file you have to know how to
+// fill. Each is [label, default path, content].
+const FILE_TEMPLATES = [
+  ['Ansible playbook', 'site.yml',
+    '---\n- name: Configure hosts\n  hosts: all\n  become: true\n  tasks:\n' +
+    '    - name: Ping the host\n      ansible.builtin.ping:\n'],
+  ['Salt state', 'states/web.sls',
+    '# Salt state — apply with the Salt engine (state.apply / highstate).\n' +
+    'install_nginx:\n  pkg.installed:\n    - name: nginx\n\nnginx_running:\n' +
+    '  service.running:\n    - name: nginx\n    - enable: true\n'],
+  ['Terraform', 'main.tf',
+    '# Terraform — run with the Terraform/OpenTofu engine (plan / apply / destroy).\n' +
+    '# For libvirt/cloud VMs, “Create infrastructure” in Projects scaffolds a full,\n' +
+    '# working project; this is a blank starting point.\n\n' +
+    'terraform {\n  required_providers {\n    # e.g. libvirt = { source = "dmacvicar/libvirt", version = "~> 0.7.0" }\n  }\n}\n'],
+  ['Empty file', '', ''],
+]
+
 function NewFile({ project, onClose, onCreated }) {
   const [p, setP] = useState('')
+  const [tpl, setTpl] = useState(null)   // index into FILE_TEMPLATES, or null
   const { wrap, node } = useErr()
+  const create = (path, content) => wrap(async () => {
+    if (!path.trim()) throw new Error('Enter a file path.')
+    await api(`projects/${project.id}/file`, { method: 'POST', json: { path: path.trim(), type: 'file', content: content || '' } })
+    onCreated(path.trim())
+  })
   return (
     <Modal title="New file" onClose={onClose}>
+      <div className="muted" style={{ marginBottom: 8, fontSize: 13 }}>Start from a template, or make an empty file.</div>
+      <div className="col" style={{ gap: 6, marginBottom: 12 }}>
+        {FILE_TEMPLATES.map(([label, path, content], i) => (
+          <button key={label} className={'ghost' + (tpl === i ? ' active' : '')} style={{ justifyContent: 'flex-start' }}
+            onClick={() => { setTpl(i); setP(path) }}>{label}{path ? <span className="faint" style={{ marginLeft: 8 }}>{path}</span> : null}</button>
+        ))}
+      </div>
       <Field label="Path"><input value={p} onChange={(e) => setP(e.target.value)} autoFocus placeholder="site.yml, main.tf, states/web.sls" /></Field>
       {node}
-      <button className="primary" onClick={() => wrap(async () => { await api(`projects/${project.id}/file`, { method: 'POST', json: { path: p, type: 'file' } }); onCreated(p) })}>Create</button>
+      <button className="primary" onClick={() => create(p, tpl != null ? FILE_TEMPLATES[tpl][2] : '')}>Create</button>
     </Modal>
   )
 }
