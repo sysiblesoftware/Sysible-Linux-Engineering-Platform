@@ -1335,3 +1335,24 @@ def test_cloudinit_sanitizes_corrupted_key_quote():
     assert infra._sanitize_pubkey('ssh-ed25519 AAAA cmt"') == "ssh-ed25519 AAAA cmt"
     assert infra._sanitize_pubkey('"ssh-ed25519 AAAA"') == "ssh-ed25519 AAAA"
     assert infra._sanitize_pubkey("ssh-rsa BBBB") == "ssh-rsa BBBB"
+
+
+def test_infra_stores_vault_password_ref_only(client):
+    """A Vault password reference is persisted (name only, for later re-resolution to
+    auto-install the key); a literal password is NOT stored."""
+    import backend.db as db
+    import backend.vault as vault
+    db.upsert_secret("kvm_pw", vault.encrypt("s3cr3t"))
+    # Vault ref → the NAME is stored on the infra row.
+    pid = client.post("/infra", json={"name": "pw-ref", "provider": "libvirt",
+                                      "options": {"count": 1, "base_image": "x", "ssh_user": "admin",
+                                                  "ssh_password": "vault.kvm_pw"}}).json()["project_id"]
+    assert db.get_infra(pid).get("ssh_password_ref") == "kvm_pw"
+    # Literal password → nothing stored.
+    pid2 = client.post("/infra", json={"name": "pw-lit", "provider": "libvirt",
+                                       "options": {"count": 1, "base_image": "x", "ssh_user": "admin",
+                                                   "ssh_password": "PlainPass1"}}).json()["project_id"]
+    assert (db.get_infra(pid2).get("ssh_password_ref") or "") == ""
+    # PATCH with a vault ref also records it.
+    client.patch(f"/infra/{pid2}", json={"ssh_password": "vault.kvm_pw"})
+    assert db.get_infra(pid2).get("ssh_password_ref") == "kvm_pw"

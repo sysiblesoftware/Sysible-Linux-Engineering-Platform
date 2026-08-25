@@ -2408,6 +2408,17 @@ def _resolve_secret_ref(value: str) -> str:
     return "" if m else s
 
 
+def _secret_ref_name(value: str) -> str:
+    """The Vault variable NAME if `value` is a vault reference (`vault.NAME`,
+    `{{ vault.NAME }}`), else '' — so only a reference (never a literal password) is
+    persisted for later re-resolution."""
+    import re
+    s = (value or "").strip()
+    m = re.fullmatch(r"\{\{\s*vault\.([A-Za-z0-9_.-]+)\s*\}\}", s) \
+        or re.fullmatch(r"\$?vault\.([A-Za-z0-9_.-]+)", s)
+    return m.group(1) if m else ""
+
+
 def _derive_public_key(private_key: str) -> str:
     """Derive the OpenSSH public key from a private key (`ssh-keygen -y`). Returns ''
     when it can't — no ssh-keygen, a malformed key, or a passphrase-protected one
@@ -2487,8 +2498,12 @@ def infra_create(body: dict = Body(...), user: str = Depends(require_operator)):
         managed_key = keydist.public_key()
     # A login password may be given as a Vault variable (`vault.NAME`) so it never
     # rides in the clear — resolve it to plaintext here; _cloudinit hashes it. A
-    # literal password is passed through unchanged.
+    # literal password is passed through unchanged. Remember a vault REFERENCE (only
+    # the name) so a post-apply reachability check can resolve it and distribute the
+    # key over the password login.
+    pw_ref = ""
     if str(options.get("ssh_password") or "").strip():
+        pw_ref = _secret_ref_name(options["ssh_password"])
         options = dict(options)
         options["ssh_password"] = _resolve_secret_ref(options["ssh_password"])
     try:
@@ -2527,6 +2542,8 @@ def infra_create(body: dict = Body(...), user: str = Depends(require_operator)):
     db.set_infra(pid, provider, int(controller_id) if controller_id else None,
                  str(options.get("ssh_user", "")), str(options.get("environment", "")),
                  inventory_id=inv_target, bastion=hv_bastion)
+    if pw_ref:
+        db.set_infra_ssh_password_ref(pid, pw_ref)
     # If the VMs land in an inventory that has no jump host yet, give it the
     # hypervisor as one so Ansible/Salt hop through it (no-op when there's none).
     if hv_bastion and inv_target:
@@ -2672,6 +2689,7 @@ def _verify_infra_key_access(project_id: int, inventory_id: int, emit) -> None:
     immediate, explicit answer right where the VMs were created. Best-effort and
     log-only: never raises, never fails the apply."""
     try:
+        import shutil
         from . import keydist
         key = keydist.managed_key_path()
         if not key:
@@ -2681,27 +2699,71 @@ def _verify_infra_key_access(project_id: int, inventory_id: int, emit) -> None:
         hosts = db.list_hosts(inventory_id)
         if not hosts:
             return
-        emit("\n-- SLEP: checking SSH to the new VM(s) with the managed key"
-             + (f" via jump host {bastion}" if bastion else "") + " …")
-        ok = 0
-        for h in hosts:
+        pub = keydist.public_key()
+        # A stored Vault password reference lets us install the key over the password
+        # login if key auth hasn't taken (never a literal — only the ref was kept).
+        meta = db.get_infra(project_id) or {}
+        pw_ref = (meta.get("ssh_password_ref") or "").strip()
+        password = _resolve_secret_ref(f"vault.{pw_ref}") if pw_ref else ""
+
+        def _target(h):
             user = (h.get("variables") or {}).get("ansible_user") or ""
-            target = (f"{user}@" if user else "") + h["address"]
-            hop = keydist.hop_for(bastion, h["address"])
-            cmd = keydist._key_cmd(hop, key, target, "echo SLEP_OK")
+            return (f"{user}@" if user else "") + h["address"]
+
+        def reachable(h):
+            cmd = keydist._key_cmd(keydist.hop_for(bastion, h["address"]), key, _target(h), "echo SLEP_OK")
             try:
                 r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-                good = r.returncode == 0 and "SLEP_OK" in r.stdout
+                return r.returncode == 0 and "SLEP_OK" in r.stdout
             except subprocess.TimeoutExpired:
-                good = False
-            ok += 1 if good else 0
-            emit(f"   {'✓' if good else '✗'} {h['name']} ({target})"
-                 + ("" if good else " — not reachable with the managed key yet"))
-        emit(f"-- SLEP: {ok}/{len(hosts)} new VM(s) reachable with the managed key. "
-             + ("The cadence's Ansible/Salt steps can log in." if ok == len(hosts) else
-                "Unreachable ones may still be booting (re-run the Ansible step); if a jump host "
-                "is set, run 'Prepare jump host' once so the hypervisor trusts SLEP's key; VMs built "
-                "before managed-key baking need a re-apply."))
+                return False
+
+        def distribute(h):
+            # Install SLEP's key over the password login (jump hop still uses the key).
+            if not password or not shutil.which("sshpass"):
+                return False
+            env = dict(os.environ); env["SSHPASS"] = password
+            cmd = keydist._pw_cmd("sshpass", keydist.hop_for(bastion, h["address"]),
+                                  _target(h), keydist._install_cmd(pub))
+            try:
+                return subprocess.run(cmd, capture_output=True, text=True, timeout=30, env=env).returncode == 0
+            except subprocess.TimeoutExpired:
+                return False
+
+        emit("\n-- SLEP: checking SSH to the new VM(s) with the managed key"
+             + (f" via jump host {bastion}" if bastion else "") + " …")
+        # Retry with backoff — a freshly-applied VM is usually just still booting
+        # (cloud-init hasn't finished installing sshd + the key). ~65s across 4 passes.
+        good = set()
+        pending = list(hosts)
+        for i, delay in enumerate((0, 15, 20, 30)):
+            if not pending:
+                break
+            if delay:
+                time.sleep(delay)
+            pending = [h for h in pending if not (reachable(h) and good.add(h["name"]) is None)]
+            if pending and i < 3:
+                emit(f"   … {len(pending)} not up yet — waiting (VMs may still be booting) …")
+        # Last resort: install the key over the password login for the stragglers.
+        if pending and password and shutil.which("sshpass"):
+            emit(f"-- SLEP: {len(pending)} still unreachable by key — installing SLEP's key over the "
+                 f"password login and re-checking …")
+            for h in list(pending):
+                if distribute(h) and reachable(h):
+                    good.add(h["name"]); pending.remove(h)
+                    emit(f"   ✓ {h['name']} — key installed over the password login, now reachable.")
+        elif pending and pw_ref and not shutil.which("sshpass"):
+            emit("   (couldn't auto-install over password — `sshpass` isn't on the SLEP host.)")
+        for h in hosts:
+            ok = h["name"] in good
+            emit(f"   {'✓' if ok else '✗'} {h['name']} ({_target(h)})"
+                 + ("" if ok else " — not reachable with the managed key"))
+        n = len(good)
+        emit(f"-- SLEP: {n}/{len(hosts)} new VM(s) reachable with the managed key. "
+             + ("The cadence's Ansible/Salt steps can log in." if n == len(hosts) else
+                "Still-unreachable ones: re-run the Ansible step once they finish booting; if a jump "
+                "host is set, run 'Prepare jump host' so the hypervisor trusts SLEP's key; set a login "
+                "password (Vault) on the project so SLEP can auto-install the key next time."))
     except Exception:  # noqa: BLE001 — never let a post-apply check fail the apply
         pass
 
@@ -2781,6 +2843,9 @@ def infra_update(project_id: int, body: dict = Body(...), user: str = Depends(re
                                        f"or enter a literal password.")
         if pw:
             _refresh_infra_cloudinit(project_id, password=pw)
+            # Persist a vault REFERENCE (name only) so the reachability check can
+            # re-resolve it later; a literal password is never stored.
+            db.set_infra_ssh_password_ref(project_id, _secret_ref_name(raw))
             db.log_audit("infra_ssh_password_set", user,
                          f"project #{project_id} ({'vault' if raw != pw else 'literal'})")
     return db.get_infra(project_id)

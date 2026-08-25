@@ -298,6 +298,13 @@ def init_db() -> None:
         # bastion the built inventory uses.
         if "bastion" not in infra_cols:
             c.execute("ALTER TABLE infra ADD COLUMN bastion TEXT DEFAULT ''")
+        # The Vault variable NAME (never the plaintext) of the login password set on
+        # the VMs, if any. Stored so a post-apply reachability check can resolve it on
+        # demand and distribute SLEP's key over the password login when key auth to a
+        # fresh VM hasn't taken yet. Only the reference is kept; the secret lives in
+        # the vault, encrypted.
+        if "ssh_password_ref" not in infra_cols:
+            c.execute("ALTER TABLE infra ADD COLUMN ssh_password_ref TEXT DEFAULT ''")
         # Multi-tenancy: every owned resource carries an org_id. Add the column
         # where missing, then adopt any orphaned rows + existing users into a
         # 'Default' organization so pre-tenancy installs keep working unchanged.
@@ -649,6 +656,14 @@ def set_infra_bastion(project_id, bastion):
     inventories by the caller."""
     with _connect() as c:
         c.execute("UPDATE infra SET bastion=? WHERE project_id=?", (bastion or "", project_id))
+
+
+def set_infra_ssh_password_ref(project_id, ref):
+    """Remember the Vault variable NAME of the VMs' login password (never the
+    plaintext) so a post-apply reachability check can resolve it and distribute
+    SLEP's key over the password login. Empty clears it."""
+    with _connect() as c:
+        c.execute("UPDATE infra SET ssh_password_ref=? WHERE project_id=?", (ref or "", project_id))
 
 
 def list_infra():
