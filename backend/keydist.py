@@ -219,8 +219,11 @@ def _key_proxy(bastion: str) -> str:
     inherit it → 'Host key verification failed'). The bastion must already carry
     the key (distribute/prepare installs it first)."""
     mk = str(_key_paths()[0])
+    # Quote the key path: ssh tokenises the ProxyCommand string itself, so a space in
+    # DATA_DIR would otherwise split the -i argument and fail the jump login (surfacing
+    # as the misleading "tunnel closed before login").
     return ("ssh " + " ".join(_HOSTKEY)
-            + f" -o ConnectTimeout=15 -o BatchMode=yes -i {mk} -W %h:%p {bastion}")
+            + f" -o ConnectTimeout=15 -o BatchMode=yes -i '{mk}' -W %h:%p {bastion}")
 
 
 def _pw_cmd(sshpass: str, bastion: str, target: str, remote: str) -> list[str]:
@@ -245,12 +248,27 @@ def _key_cmd(bastion: str, keyfile: str, target: str, remote: str) -> list[str]:
 def _friendly_err(raw: str, has_bastion: bool) -> str:
     """Translate a raw SSH failure into a short, plain-English reason."""
     low = (raw or "").lower()
-    if "connection closed by unknown" in low or "channel .* open failed" in low:
-        return ("jump host reached it, but the tunnel closed before login — the target likely "
-                "has SSH off or the jump host can't route to it") if has_bastion else \
+    # A jump-host CHANNEL failure ('channel N: open failed: connect failed /
+    # administratively prohibited') is the jump host being unable to reach the target
+    # (routing/firewall) — a DIFFERENT fault from the target's sshd being down. Classify
+    # it separately so the operator isn't sent to fix the VM when the jump host is the
+    # problem. (Plain substring — the old "channel .* open failed" was a regex written as
+    # a substring test and never matched.)
+    if "open failed" in low or "administratively prohibited" in low:
+        if "administratively prohibited" in low:
+            return "the jump host refused to forward to the target (its firewall/policy blocked port 22)"
+        return "the jump host couldn't reach the target (wrong VM address, or the jump host isn't on the VM's network)"
+    if "connection closed by unknown" in low:
+        # No target host in the message → the failure was on the JUMP hop itself
+        # (its ProxyCommand died), typically because the jump host doesn't trust
+        # SLEP's key. Only say "target" when there's no bastion in play.
+        return ("couldn't get through the jump host — it may not trust SLEP's key yet "
+                "(run “Prepare jump host”), or its address/login is wrong") if has_bastion else \
                "the host closed the connection before login (SSH may be off)"
     if "permission denied" in low:
-        return "login refused — key not installed yet, or wrong username/password"
+        return ("reached the target, but login was refused — wrong username/password, or the key "
+                "isn't installed") if has_bastion else \
+               "login refused — key not installed yet, or wrong username/password"
     if "connection timed out" in low or "operation timed out" in low or "timed out" in low:
         return "no response — host down, firewalled, or wrong address"
     if "connection refused" in low:

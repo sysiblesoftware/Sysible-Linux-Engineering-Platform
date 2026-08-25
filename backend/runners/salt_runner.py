@@ -24,23 +24,45 @@ from .. import db
 from . import _common
 
 
-def _render_roster(hosts, credential, key_path, dest: Path, bastion: str = "") -> None:
-    user = (credential or {}).get("username") or "root"
+def _render_roster(hosts, credential, key_path, dest: Path, bastion: str = "",
+                   bastion_key: str = "") -> None:
+    cred_user = (credential or {}).get("username") or ""
+    kind = (credential or {}).get("kind") if credential else None
+    # The jump hop authenticates with SLEP's managed key via an explicit ProxyCommand —
+    # the SAME way the Ansible runner does it — because the bastion only trusts that key
+    # ("Prepare jump host" installs it). A bare ProxyJump offers the bastion nothing
+    # usable and the hop is refused (this was why Salt runs failed through a jump host).
+    proxy = ""
+    if bastion:
+        if bastion_key:
+            proxy = (f"ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
+                     f"-o BatchMode=yes -o ConnectTimeout=15 -i '{bastion_key}' -W %h:%p {bastion}")
+        else:
+            proxy = ""   # fall back to ProxyJump below if we have no key
     lines = []
     for h in hosts:
+        # Target the inventory's ansible_user (the cloud-init login account) FIRST, so
+        # Salt logs in as the same user Ansible does; then the credential username, then
+        # root. Previously Salt used only credential.username/root and diverged from
+        # Ansible whenever the credential had no username.
+        huser = (h.get("variables") or {}).get("ansible_user") or cred_user or "root"
         lines.append(f"{h['name']}:")
         lines.append(f"  host: {h['address']}")
-        lines.append(f"  user: {user}")
+        lines.append(f"  user: {huser}")
         lines.append("  host_key_checking: False")
-        if credential and credential.get("kind") == "ssh" and key_path:
+        if credential and kind == "ssh" and key_path:
             lines.append(f"  priv: {key_path}")
-        elif credential and credential.get("kind") == "ssh_password" and credential.get("secret"):
+            lines.append("  sudo: True")   # key logins need sudo too (VMs grant NOPASSWD)
+        elif credential and kind == "ssh_password" and credential.get("secret"):
             lines.append(f"  passwd: {credential['secret']}")
             lines.append("  sudo: True")
         # Optional SSH jump host (bastion): reach every host through it.
         if bastion:
             lines.append("  ssh_options:")
-            lines.append(f"    - ProxyJump={bastion}")
+            if proxy:
+                lines.append(f"    - ProxyCommand={proxy}")
+            else:
+                lines.append(f"    - ProxyJump={bastion}")
             lines.append("    - StrictHostKeyChecking=no")
     dest.write_text("\n".join(lines) + "\n")
 
@@ -95,7 +117,9 @@ def launch(run_id: int) -> None:
             if credential and credential.get("kind") == "ssh" and credential.get("secret"):
                 _write_key(credential["secret"], key_file)
                 key_path = str(key_file)
-            _render_roster(hosts, credential, key_path, roster, bastion=bastion)
+            from .. import keydist
+            _render_roster(hosts, credential, key_path, roster, bastion=bastion,
+                           bastion_key=keydist.managed_key_path())
 
             # Minimal master config: states come from the project dir; keep all
             # of salt's scratch dirs inside the per-run temp so no root paths are
