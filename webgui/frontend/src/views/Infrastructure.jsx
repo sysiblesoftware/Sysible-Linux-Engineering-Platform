@@ -294,6 +294,49 @@ export function TestAuthModal({ r, onClose }) {
   )
 }
 
+// Prepare the jump host (the hypervisor) from the PROJECT level — install SLEP's
+// managed key on it with a one-time password — so runs and diagnostics can hop
+// through it with the key. Previously this lived only on an inventory, which a fresh
+// infra project doesn't have yet. Pre-fills from the project's configured jump host.
+export function PrepareJumpModal({ r, onClose }) {
+  const parse = (b) => {
+    let s = b || '', user = 'admin'
+    if (s.includes('@')) { [user, s] = s.split('@') }
+    const host = s.split(':')[0] || ''
+    return { user: user || 'admin', host }
+  }
+  const init = parse(r.bastion)
+  const [host, setHost] = useState(init.host)
+  const [user, setUser] = useState(init.user)
+  const [pw, setPw] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [res, setRes] = useState(null)
+  const { wrap, node } = useErr()
+  const go = () => wrap(async () => {
+    setBusy(true); setRes(null)
+    try {
+      const d = await api('infra/install-hypervisor-key', { method: 'POST', json: { host: host.trim(), user: user.trim(), password: pw } })
+      setRes(d)
+    } finally { setBusy(false) }
+  })
+  return (
+    <Modal title={`Prepare jump host — ${r.project_name}`} onClose={onClose}>
+      <p className="muted" style={{ marginTop: 0 }}>
+        Installs SLEP's key on the jump host (the hypervisor) with a one-time password, so runs and Diagnose hop through it with the key. The password is used once and never saved.
+      </p>
+      <Field label="Jump host (hypervisor address)"><input value={host} onChange={(e) => setHost(e.target.value)} placeholder="192.168.8.212" /></Field>
+      <Field label="SSH username"><input value={user} onChange={(e) => setUser(e.target.value)} placeholder="admin" /></Field>
+      <Field label="Host password (used once)"><input type="password" value={pw} onChange={(e) => setPw(e.target.value)} autoComplete="off" /></Field>
+      {node}
+      <div className="row" style={{ marginTop: 12, justifyContent: 'flex-end' }}>
+        <button className="ghost sm" onClick={onClose}>Close</button>
+        <button className="primary sm" disabled={busy || !host.trim() || !pw} onClick={go}>{busy ? 'Preparing…' : 'Prepare jump host'}</button>
+      </div>
+      {res && <div style={{ marginTop: 12, fontSize: 13, whiteSpace: 'pre-wrap', color: res.ok ? 'var(--green-bright)' : 'var(--danger)' }}>{res.ok ? '✓ ' : '✗ '}{res.detail || res.output || (res.ok ? 'Key installed on the jump host.' : 'Could not install the key.')}</div>}
+    </Modal>
+  )
+}
+
 // Ground-truth diagnosis WITHOUT logging into the VMs: SLEP SSHes to the hypervisor
 // with its managed key and reads each VM's disk (virt-cat) to report whether
 // cloud-init is present, whether it ran, and whether the login account exists with a

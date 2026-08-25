@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import { api, canWrite } from '../api.js'
 import { PipelineModal } from './Ide.jsx'
-import { JumpHostEditor, EnrollPicker, VmsModal, TestAuthModal, DiagnoseModal } from './Infrastructure.jsx'
+import { JumpHostEditor, EnrollPicker, VmsModal, TestAuthModal, DiagnoseModal, PrepareJumpModal } from './Infrastructure.jsx'
 
 // The infrastructure lifecycle actions (Plan/Apply/Destroy, → Inventory, Access,
 // Enroll, Configure/Maintain, Cadence) for ONE infra project — the workflow that
@@ -13,7 +13,7 @@ import { JumpHostEditor, EnrollPicker, VmsModal, TestAuthModal, DiagnoseModal } 
 
 // Build the handler set + the [label, fn, class, title] action list for an infra
 // row `r`, wired to the given modal setters / callbacks.
-function buildActions(r, { controllers, setPipe, setVms, setEnrollFor, setJumpFor, setTestFor, setDiagFor, onOpenRun, onOpenProject, refresh }) {
+function buildActions(r, { controllers, setPipe, setVms, setEnrollFor, setJumpFor, setTestFor, setDiagFor, setPrepFor, onOpenRun, onOpenProject, refresh }) {
   const openProj = (extra) => onOpenProject &&
     onOpenProject({ id: r.project_id, name: r.project_name, slug: r.project_slug, ...extra })
   const run = async (target) => {
@@ -83,6 +83,7 @@ function buildActions(r, { controllers, setPipe, setVms, setEnrollFor, setJumpFo
     ['Diagnose', () => setDiagFor(r), 'ghost', 'Read each VM\'s disk on the hypervisor to see if cloud-init ran and the account exists (no VM login)'],
     ['Fix SSH', fixSsh, 'ghost', "Install SLEP's current key on the VMs over the password login (repairs key drift, no rebuild)"],
     ['Access', () => setJumpFor(r), 'ghost', 'Login user, password (Vault) and jump host'],
+    ['Prepare jump host', () => setPrepFor(r), 'ghost', "Install SLEP's key on the jump host (hypervisor) with a one-time password, so runs hop through it with the key"],
     ['Enroll', () => enroll(), 'primary', 'Register the applied VMs into a Controller'],
     ['Configure', () => scaffold('configure'), 'ghost', 'Scaffold an Ansible playbook and open it'],
     ['Maintain', () => scaffold('maintain'), 'ghost', 'Scaffold a Salt state and open it'],
@@ -99,8 +100,9 @@ function useInfraModals({ onOpenRun, refresh }) {
   const [jumpFor, setJumpFor] = useState(null)
   const [testFor, setTestFor] = useState(null)
   const [diagFor, setDiagFor] = useState(null)
+  const [prepFor, setPrepFor] = useState(null)
   useEffect(() => { api('controllers').then((d) => setControllers(d.controllers || [])).catch(() => {}) }, [])
-  const enrollPick = enrollFor && buildActions(enrollFor, { controllers, setPipe, setVms, setEnrollFor, setJumpFor, setTestFor, setDiagFor, onOpenRun, refresh })[0].enroll
+  const enrollPick = enrollFor && buildActions(enrollFor, { controllers, setPipe, setVms, setEnrollFor, setJumpFor, setTestFor, setDiagFor, setPrepFor, onOpenRun, refresh })[0].enroll
   const modals = (
     <>
       {pipe && <PipelineModal project={pipe.project} initialSteps={pipe.steps}
@@ -112,9 +114,10 @@ function useInfraModals({ onOpenRun, refresh }) {
         onSaved={() => { setJumpFor(null); refresh && refresh() }} />}
       {testFor && <TestAuthModal r={testFor} onClose={() => setTestFor(null)} />}
       {diagFor && <DiagnoseModal r={diagFor} onClose={() => setDiagFor(null)} />}
+      {prepFor && <PrepareJumpModal r={prepFor} onClose={() => setPrepFor(null)} />}
     </>
   )
-  return { controllers, setPipe, setVms, setEnrollFor, setJumpFor, setTestFor, setDiagFor, modals }
+  return { controllers, setPipe, setVms, setEnrollFor, setJumpFor, setTestFor, setDiagFor, setPrepFor, modals }
 }
 
 // Bar on top of the IDE. Fetches this project's infra row; renders nothing for a
