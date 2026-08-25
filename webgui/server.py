@@ -109,8 +109,17 @@ if STATIC.exists():
 @app.get("/{path:path}")
 def spa(path: str):
     # SPA fallback: any non-API path serves index.html (client-side routing).
-    target = (DIST / path) if DIST.exists() else (STATIC / path)
-    if target.is_file():
+    # SECURITY: resolve the requested path and confine it to the served root before
+    # serving a file. Without this, a percent-encoded traversal (e.g. /%2e%2e/%2e%2e/
+    # data/vault.key) survives URL normalisation, decodes to '..' here, and would let
+    # an UNAUTHENTICATED caller read arbitrary files — including the vault key and the
+    # SQLite DB. Anything that escapes the root falls through to index.html.
+    base = (DIST if DIST.exists() else STATIC).resolve()
+    try:
+        target = (base / path.lstrip("/")).resolve()
+    except (OSError, ValueError):
+        return FileResponse(_index())
+    if (target == base or base in target.parents) and target.is_file():
         return FileResponse(target)
     return FileResponse(_index())
 
