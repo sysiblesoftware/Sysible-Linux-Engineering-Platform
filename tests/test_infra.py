@@ -1317,3 +1317,21 @@ def test_tf_var_default_reads_variables_tf(client):
     assert tr._tf_var_default(pid, "name_prefix", "app") == "web"
     assert tr._tf_var_default(pid, "pool", "default") == "fast"
     assert tr._tf_var_default(pid, "missing", "fb") == "fb"
+
+
+def test_cloudinit_sanitizes_corrupted_key_quote():
+    """A stored key wrapped in a stray quote (an old corruption, e.g.
+    'ssh-ed25519 AAAA slep-managed"') bakes in CLEAN, and dedupes with the same key
+    without the junk — so the next apply heals a corrupted cloud-init."""
+    import backend.infra as infra
+    ci = infra.generate("libvirt", {"count": 1, "base_image": "x", "ssh_user": "admin"},
+                        managed_key='ssh-ed25519 AAAAKEY slep-managed"',
+                        deploy_key="ssh-ed25519 AAAAKEY slep-managed")["cloudinit.cfg"]
+    assert 'slep-managed"' not in ci                       # the stray quote is gone
+    assert "ssh-ed25519 AAAAKEY slep-managed" in ci
+    # the quoted + unquoted forms are the same key → exactly one authorized_keys entry
+    assert ci.count("ssh-ed25519 AAAAKEY") == 2            # once in users:, once in the script
+    # sanitizer unit behaviour
+    assert infra._sanitize_pubkey('ssh-ed25519 AAAA cmt"') == "ssh-ed25519 AAAA cmt"
+    assert infra._sanitize_pubkey('"ssh-ed25519 AAAA"') == "ssh-ed25519 AAAA"
+    assert infra._sanitize_pubkey("ssh-rsa BBBB") == "ssh-rsa BBBB"

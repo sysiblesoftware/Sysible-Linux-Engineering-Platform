@@ -190,6 +190,21 @@ def _one_line(s) -> str:
     return (parts[0].strip() if parts else "")
 
 
+def _sanitize_pubkey(s) -> str:
+    """Normalise an SSH public key to a clean `<type> <base64> [comment]`, stripping
+    quotes or junk that a corrupted store can wrap it in — e.g. a key that came back
+    as `ssh-ed25519 AAAA... slep-managed"` (a stray trailing quote from an old bug)
+    would otherwise bake straight into authorized_keys. Rebuild from the type +
+    base64 (the parts SSH actually matches on) plus a de-quoted comment, so the same
+    key with and without the junk dedupes to one clean line."""
+    k = _one_line(s).strip().strip('"').strip("'").strip()
+    parts = k.split()
+    if len(parts) < 2:
+        return k
+    comment = " ".join(parts[2:]).strip().strip('"').strip("'").strip()
+    return f"{parts[0]} {parts[1]}" + (f" {comment}" if comment else "")
+
+
 def _cloudinit(ssh_user: str, keys: list[str], password: str = "", hashed_password: str = "") -> str:
     # Single-line each value so nothing can inject a top-level cloud-init directive.
     ssh_user = _one_line(ssh_user) or "user"
@@ -206,7 +221,7 @@ def _cloudinit(ssh_user: str, keys: list[str], password: str = "", hashed_passwo
             hashed = ""
     clean, seen = [], set()
     for k in keys:
-        k = _one_line(k) if k and k.strip() else ""
+        k = _sanitize_pubkey(k) if k and k.strip() else ""
         if k and k not in seen:
             seen.add(k)
             clean.append(k)
