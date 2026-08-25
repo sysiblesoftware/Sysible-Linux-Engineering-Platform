@@ -17,6 +17,9 @@ function buildActions(r, { controllers, setPipe, setVms, setEnrollFor, setJumpFo
   const openProj = (extra) => onOpenProject &&
     onOpenProject({ id: r.project_id, name: r.project_name, slug: r.project_slug, ...extra })
   const run = async (target) => {
+    if (target === 'destroy' && !window.confirm(
+      `Destroy the VMs in “${r.project_name}”?\n\nThis runs terraform destroy and PERMANENTLY deletes the VMs ` +
+      `and their disks on the hypervisor. This cannot be undone. Continue?`)) return
     try { const d = await api('runs', { method: 'POST', json: { project_id: r.project_id, kind: 'terraform', target } }); onOpenRun && onOpenRun(d.run_id) }
     catch (e) { alert(e.message) }
   }

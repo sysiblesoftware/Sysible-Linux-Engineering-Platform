@@ -112,6 +112,12 @@ export function JumpHostEditor({ r, onClose, onSaved }) {
       <Field label="Jump host (user@host[:port]) — empty for a direct connection">
         <input value={bastion} onChange={(e) => setBastion(e.target.value)} placeholder="admin@192.168.8.212" />
       </Field>
+      <div style={{ background: 'rgba(240,180,40,0.10)', border: '1px solid rgba(240,180,40,0.35)',
+        borderRadius: 8, padding: '8px 10px', margin: '10px 0 2px', fontSize: 12, color: 'var(--warn, #e0a83a)' }}>
+        ⚠ These settings take effect when a VM is <b>built</b>. Existing VMs keep the account they were created
+        with — <b>re-apply</b> (Destroy → Apply, or Apply if the name changed) to rebuild them with these, or use
+        <b> 🔑 Fix SSH</b> if you can still log in.
+      </div>
       {node}
       <div className="row" style={{ marginTop: 12, justifyContent: 'flex-end' }}>
         <button className="ghost sm" onClick={onClose}>Cancel</button>
