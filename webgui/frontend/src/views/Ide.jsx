@@ -876,7 +876,10 @@ export function RunModal({ project, currentFile, onClose, onLaunched, initial })
     return out
   }
 
-  useEffect(() => { api('inventories').then((d) => { setInvs(d.inventories); setInv((cur) => cur || (d.inventories[0] ? String(d.inventories[0].id) : '')) }) }, [])
+  // Load inventories; also called on dropdown focus so an inventory created since
+  // the modal opened (e.g. in Infrastructure) shows up without reopening.
+  const loadInvs = () => api('inventories').then((d) => { setInvs(d.inventories); setInv((cur) => cur || (d.inventories[0] ? String(d.inventories[0].id) : '')) })
+  useEffect(() => { loadInvs() }, [])
   useEffect(() => { api('credentials').then((d) => setCreds(d.credentials)) }, [])
   useEffect(() => { if (project?.id) api(`projects/${project.id}/files`)
     .then((d) => setFiles((d.files || []).filter((f) => f.type === 'file').map((f) => f.path))).catch(() => {}) }, [project?.id])
@@ -915,7 +918,7 @@ export function RunModal({ project, currentFile, onClose, onLaunched, initial })
       </Field>
       {needsInv && (
         <Field label="Inventory">
-          <select value={inv} onChange={(e) => { if (e.target.value === '__new') setNewInvOpen(true); else setInv(e.target.value) }}>
+          <select value={inv} onFocus={loadInvs} onChange={(e) => { if (e.target.value === '__new') setNewInvOpen(true); else setInv(e.target.value) }}>
             {invs.length === 0 && <option value="">(no inventories — create one first)</option>}
             {invs.map((i) => <option key={i.id} value={i.id}>{i.name}</option>)}
             <option value="__new">＋ New inventory…</option>
@@ -1023,8 +1026,11 @@ export function PipelineModal({ project, currentFile, initialSteps, initialName,
   const { wrap, node } = useErr()
 
   const [files, setFiles] = useState([])   // project files → target autocomplete
-  useEffect(() => { api('inventories').then((d) => { setInvs(d.inventories)
-    setSteps((s) => s.map((st) => ({ ...st, inventory_id: st.inventory_id || (d.inventories[0] ? String(d.inventories[0].id) : '') }))) }) }, [])
+  // Load inventories; re-called on dropdown focus so one created since the modal
+  // opened (e.g. in Infrastructure, or built by a prior step) appears without reopening.
+  const loadInvs = () => api('inventories').then((d) => { setInvs(d.inventories)
+    setSteps((s) => s.map((st) => ({ ...st, inventory_id: st.inventory_id || (d.inventories[0] ? String(d.inventories[0].id) : '') }))) })
+  useEffect(() => { loadInvs() }, [])
   useEffect(() => { api('credentials').then((d) => setCreds(d.credentials)) }, [])
   useEffect(() => { if (project?.id) api(`projects/${project.id}/files`)
     .then((d) => setFiles((d.files || []).filter((f) => f.type === 'file').map((f) => f.path))).catch(() => {}) }, [project?.id])
@@ -1076,7 +1082,7 @@ export function PipelineModal({ project, currentFile, initialSteps, initialName,
                                 placeholder={st.kind === 'salt' ? 'state / highstate' : 'playbook.yml'} />}
                 {st.kind === 'terraform'
                   ? <select value={st.tool} onChange={(e) => upd(i, { tool: e.target.value })} title="Tool" style={{ width: 150 }}><option value="terraform">Terraform</option><option value="tofu">OpenTofu</option></select>
-                  : <select value={st.inventory_id} onChange={(e) => invChange(i, e.target.value)} title="Inventory (hosts to target)" style={{ width: 150 }}>
+                  : <select value={st.inventory_id} onFocus={loadInvs} onChange={(e) => invChange(i, e.target.value)} title="Inventory (hosts to target)" style={{ width: 150 }}>
                     {invs.length === 0 && <option value="">(no inventory)</option>}
                     {invs.map((v) => <option key={v.id} value={v.id}>{v.name}</option>)}
                     <option value="__new">＋ New inventory…</option>

@@ -203,3 +203,26 @@ def test_runner_stash_opts_roundtrip():
     ar.stash_opts(999, {"limit": "web", "start_at_task": "", "junk": None})
     assert ar.pop_opts(999) == {"limit": "web"}
     assert ar.pop_opts(999) == {}      # popped once
+
+
+def test_run_rerun_clones_params(client, monkeypatch):
+    """POST /runs/{id}/rerun relaunches a past run with the same engine, target,
+    inventory, credential and extra_vars, returning a new run id."""
+    import backend.app as appmod
+    launched = {}
+    # Don't actually spawn an engine thread; capture the dispatch args.
+    monkeypatch.setattr(appmod, "_dispatch_run",
+                        lambda project, kind, target, inv, cred, ev, actor, **k: launched.update(
+                            project=project["id"], kind=kind, target=target, inv=inv, cred=cred, ev=ev) or 999)
+    pid = client.post("/projects", json={"name": "rr", "slug": "rr"}).json()["id"]
+    iid = client.post("/inventories", json={"name": "rr-inv", "project_id": pid}).json()["id"]
+    import backend.db as db
+    rid = db.create_run(pid, "ansible", "site.yml", inventory_id=iid, credential_id=None,
+                        extra_vars={"foo": "bar"}, created_by="admin")
+    r = client.post(f"/runs/{rid}/rerun")
+    assert r.status_code == 200, r.text
+    assert r.json()["run_id"] == 999 and r.json()["rerun_of"] == rid
+    assert launched["kind"] == "ansible" and launched["target"] == "site.yml"
+    assert launched["inv"] == iid and launched["ev"] == {"foo": "bar"}
+    # A missing run 404s.
+    assert client.post("/runs/999999/rerun").status_code == 404

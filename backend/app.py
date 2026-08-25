@@ -1489,6 +1489,29 @@ def cancel_run(run_id: int, user: str = Depends(require_operator)):
     return {"status": "canceling"}
 
 
+@app.post("/runs/{run_id}/rerun")
+def rerun_run(run_id: int, user: str = Depends(require_operator)):
+    """Relaunch a past run with the same engine, target, inventory, credential and
+    extra_vars — one-click repeat from the Runs list or a finished run. A transient
+    per-run sudo password isn't persisted, so a run that used one falls back to the
+    credential's stored become password (or none); everything else is reused as-is.
+    Returns the new run id."""
+    r = db.get_run(run_id)
+    if not r:
+        raise HTTPException(status_code=404, detail="Run not found.")
+    project = db.get_project(r["project_id"])
+    if not project:
+        raise HTTPException(status_code=404, detail="The run's project no longer exists.")
+    try:
+        extra_vars = json.loads(r.get("extra_vars") or "{}")
+    except (TypeError, ValueError):
+        extra_vars = {}
+    new_id = _dispatch_run(project, r["kind"], r["target"], r.get("inventory_id"),
+                           r.get("credential_id"), extra_vars, user)
+    db.log_audit("run_rerun", user, f"#{new_id} re-run of #{run_id} ({r.get('kind')} '{r.get('target')}')")
+    return {"status": "launched", "run_id": new_id, "rerun_of": run_id}
+
+
 # ------------------------------------------------------------------ schedules
 _CADENCES = {"hourly", "daily", "weekly"}
 

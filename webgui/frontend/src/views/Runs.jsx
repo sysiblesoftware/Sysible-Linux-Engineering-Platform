@@ -49,13 +49,22 @@ function ansiToSpans(text) {
 
 export default function Runs({ onOpen }) {
   const [runs, setRuns] = useState([])
-  useEffect(() => { api('runs').then((d) => setRuns(d.runs)) }, [])
+  const [busy, setBusy] = useState(0)
+  const load = () => api('runs').then((d) => setRuns(d.runs))
+  useEffect(() => { load() }, [])
+  // Relaunch a past run with the same engine/target/inventory/credential/vars and
+  // jump straight to the new run's log.
+  const rerun = async (id) => {
+    setBusy(id)
+    try { const d = await api(`runs/${id}/rerun`, { method: 'POST' }); onOpen(d.run_id) }
+    catch (e) { alert('Could not re-run: ' + (e.message || e)) } finally { setBusy(0) }
+  }
   return (
     <>
       <h2>Runs</h2>
       {runs.length === 0 ? <div className="muted">No runs yet.</div> : (
         <table>
-          <thead><tr><th>#</th><th>Engine</th><th>Target</th><th>Status</th><th>When</th></tr></thead>
+          <thead><tr><th>#</th><th>Engine</th><th>Target</th><th>Status</th><th>When</th><th></th></tr></thead>
           <tbody>
             {runs.map((r) => (
               <tr key={r.id}>
@@ -63,6 +72,9 @@ export default function Runs({ onOpen }) {
                 <td>{r.kind}</td><td className="muted">{r.target}</td>
                 <td><span className={'pill ' + r.status}>{r.status}</span></td>
                 <td className="muted">{r.created ? new Date(r.created * 1000).toLocaleString() : ''}</td>
+                <td><button className="ghost sm" disabled={busy === r.id}
+                  title={`Re-run this ${r.kind} (${r.target}) with the same settings`}
+                  onClick={() => rerun(r.id)}>{busy === r.id ? '…' : '↻ Re-run'}</button></td>
               </tr>
             ))}
           </tbody>
