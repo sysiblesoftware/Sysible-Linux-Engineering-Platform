@@ -250,7 +250,7 @@ export function RunLog({ runId, onBack, onOpenRun }) {
         <span className={'pill ' + status}>{status}</span>
         <div className="spacer" />
         <button className="ghost sm" title={showLog ? 'Hide the log pane' : 'Show the log pane'}
-          onClick={toggleLog}>{showLog ? '🙈 Hide log' : '📄 Show log'}</button>
+          onClick={toggleLog}>{showLog ? 'Hide log' : 'Show log'}</button>
         {!done && (
           <button className="danger sm" disabled={stopping} title="Terminate this run"
             onClick={stopRun}>{stopping ? 'Stopping…' : '■ Stop'}</button>
