@@ -310,6 +310,11 @@ def init_db() -> None:
         # not only at wizard time.
         if "deploy_credential_id" not in infra_cols:
             c.execute("ALTER TABLE infra ADD COLUMN deploy_credential_id INTEGER")
+        # The VMs' login password, ENCRYPTED at rest (vault.encrypt), so a post-apply
+        # reachability check / "Fix SSH" can log in and install the current key —
+        # whether the operator entered a literal or a Vault variable. Never plaintext.
+        if "ssh_password_enc" not in infra_cols:
+            c.execute("ALTER TABLE infra ADD COLUMN ssh_password_enc TEXT DEFAULT ''")
         # Multi-tenancy: every owned resource carries an org_id. Add the column
         # where missing, then adopt any orphaned rows + existing users into a
         # 'Default' organization so pre-tenancy installs keep working unchanged.
@@ -675,6 +680,13 @@ def set_infra_deploy_credential(project_id, credential_id):
     """Set the SSH credential whose public key is baked into the VMs. None clears it."""
     with _connect() as c:
         c.execute("UPDATE infra SET deploy_credential_id=? WHERE project_id=?", (credential_id, project_id))
+
+
+def set_infra_ssh_password_enc(project_id, ciphertext):
+    """Store the VMs' login password ENCRYPTED (caller encrypts) so reachability /
+    'Fix SSH' can reuse it. Empty clears it."""
+    with _connect() as c:
+        c.execute("UPDATE infra SET ssh_password_enc=? WHERE project_id=?", (ciphertext or "", project_id))
 
 
 def list_infra():

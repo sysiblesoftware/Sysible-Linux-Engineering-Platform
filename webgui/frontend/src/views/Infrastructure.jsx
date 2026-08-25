@@ -89,8 +89,8 @@ export function JumpHostEditor({ r, onClose, onSaved }) {
       <Field label="Login user — the account keys are installed on (e.g. admin)">
         <input value={sshUser} autoFocus onChange={(e) => setSshUser(e.target.value)} placeholder="admin" />
       </Field>
-      <Field label="Login password — a Vault variable, e.g. vault.admin_pw (turns on password SSH; leave blank to keep unchanged)">
-        <input value={pw} onChange={(e) => setPw(e.target.value)} placeholder="vault.admin_pw" />
+      <Field label="Login password — a literal, or a Vault variable like vault.admin_pw (turns on password SSH; leave blank to keep unchanged)">
+        <input value={pw} onChange={(e) => setPw(e.target.value)} placeholder="admin_pass or vault.admin_pw" />
       </Field>
       <Field label="Deploy SSH credential — a stored credential whose key is baked into the VMs (so it can log in)">
         <select value={credId} onChange={(e) => setCredId(e.target.value)}>

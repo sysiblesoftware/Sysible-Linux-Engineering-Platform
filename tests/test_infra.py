@@ -1473,3 +1473,30 @@ def test_access_deploy_credential_baked(client):
     # Clearing it is accepted.
     assert client.patch(f"/infra/{pid}", json={"deploy_credential_id": None}).status_code == 200
     assert (db.get_infra(pid)["deploy_credential_id"] or None) is None
+
+
+def test_literal_password_stored_and_usable_for_fix_ssh(client, monkeypatch):
+    """A LITERAL login password (not a vault ref) is kept (encrypted) so Fix SSH can
+    use it — the exact 'No login password is stored' bug."""
+    import backend.app as appmod
+    import backend.keydist as keydist
+    import backend.db as db
+    import shutil
+    pid = client.post("/infra", json={"name": "lit", "provider": "libvirt",
+                                      "options": {"count": 1, "base_image": "x", "ssh_user": "admin"}}).json()["project_id"]
+    iid = db.create_inventory("lit (VMs)", project_id=pid, source="infra")
+    db.set_infra_inventory(pid, iid)
+    db.upsert_host(iid, "app-1", "192.168.100.115", variables={"ansible_user": "admin"}, source="infra")
+    # Set a LITERAL password via Access (no vault. prefix).
+    assert client.patch(f"/infra/{pid}", json={"ssh_password": "admin_pass"}).status_code == 200
+    assert (db.get_infra(pid).get("ssh_password_ref") or "") == ""    # not a vault ref
+    assert db.get_infra(pid).get("ssh_password_enc")                  # but kept, encrypted
+
+    monkeypatch.setattr(keydist, "public_key", lambda: "ssh-ed25519 CURRENT slep-managed")
+    monkeypatch.setattr(shutil, "which", lambda b: "/usr/bin/" + b)
+    seen = {}
+    class R: returncode = 0; stdout = ""; stderr = ""
+    monkeypatch.setattr(appmod.subprocess, "run", lambda cmd, *a, **k: (seen.update(env=k.get("env") or {}) or R()))
+    d = client.post(f"/infra/{pid}/distribute-key").json()
+    assert d["total"] == 1 and d["installed"] == 1                    # no "no password" note
+    assert seen["env"].get("SSHPASS") == "admin_pass"                 # the literal is used

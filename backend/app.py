@@ -2431,6 +2431,22 @@ def _resolve_secret_ref(value: str) -> str:
     return "" if m else s
 
 
+def _infra_login_password(meta: dict) -> str:
+    """The VMs' login plaintext password for SLEP's own use (Fix SSH / reachability),
+    from whatever was stored: the encrypted copy first (covers a literal too), else
+    re-resolved from the Vault reference. '' when none was set."""
+    if not meta:
+        return ""
+    enc = (meta.get("ssh_password_enc") or "").strip()
+    if enc:
+        try:
+            return vault.decrypt(enc)
+        except Exception:  # noqa: BLE001
+            pass
+    ref = (meta.get("ssh_password_ref") or "").strip()
+    return _resolve_secret_ref(f"vault.{ref}") if ref else ""
+
+
 def _secret_ref_name(value: str) -> str:
     """The Vault variable NAME if `value` is a vault reference (`vault.NAME`,
     `{{ vault.NAME }}`), else '' — so only a reference (never a literal password) is
@@ -2580,6 +2596,11 @@ def infra_create(body: dict = Body(...), user: str = Depends(require_operator)):
                  inventory_id=inv_target, bastion=hv_bastion)
     if pw_ref:
         db.set_infra_ssh_password_ref(pid, pw_ref)
+    # Keep the resolved login password (encrypted) so "Fix SSH" / reachability can
+    # log in later — literal or vault ref alike.
+    _pw_plain = str(options.get("ssh_password") or "").strip()
+    if _pw_plain:
+        db.set_infra_ssh_password_enc(pid, vault.encrypt(_pw_plain))
     # If the VMs land in an inventory that has no jump host yet, give it the
     # hypervisor as one so Ansible/Salt hop through it (no-op when there's none).
     if hv_bastion and inv_target:
@@ -2736,11 +2757,10 @@ def _verify_infra_key_access(project_id: int, inventory_id: int, emit) -> None:
         if not hosts:
             return
         pub = keydist.public_key()
-        # A stored Vault password reference lets us install the key over the password
-        # login if key auth hasn't taken (never a literal — only the ref was kept).
+        # The stored login password (encrypted, or re-resolved from a Vault ref) lets
+        # us install the key over the password login if key auth hasn't taken.
         meta = db.get_infra(project_id) or {}
-        pw_ref = (meta.get("ssh_password_ref") or "").strip()
-        password = _resolve_secret_ref(f"vault.{pw_ref}") if pw_ref else ""
+        password = _infra_login_password(meta)
 
         def _target(h):
             user = (h.get("variables") or {}).get("ansible_user") or ""
@@ -2821,8 +2841,7 @@ def _distribute_managed_key(project_id: int, emit=None):
     pub = keydist.public_key()
     if not pub:
         return [], "SLEP has no managed key. Reset it under Credentials, then re-apply."
-    pw_ref = (meta.get("ssh_password_ref") or "").strip()
-    password = _resolve_secret_ref(f"vault.{pw_ref}") if pw_ref else ""
+    password = _infra_login_password(meta)
     if not password:
         return [], ("No login password is stored for this project, so SLEP can't log in to install the "
                     "key. Set one (a Vault variable) under ⚙ Access, or re-apply to rebuild the VMs with "
@@ -2939,9 +2958,12 @@ def infra_update(project_id: int, body: dict = Body(...), user: str = Depends(re
                                        f"or enter a literal password.")
         if pw:
             _refresh_infra_cloudinit(project_id, password=pw)
-            # Persist a vault REFERENCE (name only) so the reachability check can
-            # re-resolve it later; a literal password is never stored.
+            # Persist the password so "Fix SSH" / the reachability check can reuse it:
+            # the vault REFERENCE (name only) when it's a variable, AND the resolved
+            # password ENCRYPTED at rest — so a LITERAL is kept too (encrypted), not
+            # thrown away. Both let SLEP log in later; neither stores plaintext.
             db.set_infra_ssh_password_ref(project_id, _secret_ref_name(raw))
+            db.set_infra_ssh_password_enc(project_id, vault.encrypt(pw))
             db.log_audit("infra_ssh_password_set", user,
                          f"project #{project_id} ({'vault' if raw != pw else 'literal'})")
     if "deploy_credential_id" in body:
