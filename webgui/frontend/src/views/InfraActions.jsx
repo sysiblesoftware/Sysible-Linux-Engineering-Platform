@@ -46,6 +46,15 @@ function buildActions(r, { controllers, setPipe, setVms, setEnrollFor, setJumpFo
     try { const d = await api(`infra/${r.project_id}/vms`, { method: 'POST' }); setVms({ name: r.project_name, list: d.vms || [], error: d.ok ? '' : d.output }) }
     catch (e) { setVms({ name: r.project_name, error: e.message }) }
   }
+  const fixSsh = async () => {
+    try {
+      const d = await api(`infra/${r.project_id}/distribute-key`, { method: 'POST' })
+      if (d.note && !d.total) { alert(d.note); return }
+      const lines = (d.results || []).map((h) => `${h.ok ? '✓' : '✗'} ${h.name} ${h.ip} — ${h.detail}`).join('\n')
+      alert(`Installed SLEP's current key on ${d.installed}/${d.total} VM(s) over the password login:\n\n${lines}\n\n` +
+            (d.installed ? 'Re-run your Ansible/Salt step — key auth should work now.' : ''))
+    } catch (e) { alert(e.message) }
+  }
   const cadence = async () => {
     try {
       await api(`infra/${r.project_id}/scaffold`, { method: 'POST', json: { stage: 'configure' } })
@@ -67,6 +76,7 @@ function buildActions(r, { controllers, setPipe, setVms, setEnrollFor, setJumpFo
     ['Destroy', () => run('destroy'), 'danger ghost', 'Terraform/OpenTofu destroy', true],
     ['🖥 VMs', listVms, 'ghost', "List the VMs on this project's hypervisor"],
     ['→ Inventory', toInventory, 'ghost', 'Read the applied VMs into a SLEP inventory'],
+    ['🔑 Fix SSH', fixSsh, 'ghost', "Install SLEP's current key on the VMs over the password login (repairs key drift, no rebuild)"],
     ['⚙ Access', () => setJumpFor(r), 'ghost', 'Login user, password (Vault) and jump host'],
     ['Enroll → Controller', () => enroll(), 'primary', 'Register the applied VMs into a Controller'],
     ['Configure', () => scaffold('configure'), 'ghost', 'Scaffold an Ansible playbook and open it'],

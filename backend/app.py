@@ -2795,6 +2795,66 @@ def _verify_infra_key_access(project_id: int, inventory_id: int, emit) -> None:
         pass
 
 
+def _distribute_managed_key(project_id: int, emit=None):
+    """Install SLEP's CURRENT managed public key onto this project's VMs over their
+    PASSWORD login (through the jump host), so a VM built with an older key — the
+    classic 'the managed key stops working after it was regenerated' — accepts the
+    current one WITHOUT a rebuild. Uses the Vault password reference stored on the
+    infra (never a literal). Returns (results, note): results is a list of
+    {name, ip, ok, detail}."""
+    import shutil
+    from . import keydist
+    meta = db.get_infra(project_id) or {}
+    iid = meta.get("inventory_id")
+    hosts = db.list_hosts(iid) if iid else []
+    if not hosts:
+        return [], "No VMs in this project's inventory yet — apply first, then '→ Inventory'."
+    pub = keydist.public_key()
+    if not pub:
+        return [], "SLEP has no managed key. Reset it under Credentials, then re-apply."
+    pw_ref = (meta.get("ssh_password_ref") or "").strip()
+    password = _resolve_secret_ref(f"vault.{pw_ref}") if pw_ref else ""
+    if not password:
+        return [], ("No login password is stored for this project, so SLEP can't log in to install the "
+                    "key. Set one (a Vault variable) under ⚙ Access, or re-apply to rebuild the VMs with "
+                    "the current key.")
+    if not shutil.which("sshpass"):
+        return [], "`sshpass` isn't installed on the SLEP host — can't do the password install here."
+    bastion = (db.get_inventory(iid) or {}).get("bastion") or ""
+    results = []
+    for h in hosts:
+        u = (h.get("variables") or {}).get("ansible_user") or ""
+        target = (f"{u}@" if u else "") + h["address"]
+        env = dict(os.environ); env["SSHPASS"] = password
+        cmd = keydist._pw_cmd("sshpass", keydist.hop_for(bastion, h["address"]), target, keydist._install_cmd(pub))
+        ok, detail = False, ""
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=30, env=env)
+            ok = r.returncode == 0
+            detail = "key installed" if ok else keydist._err_line(r, bool(bastion))
+        except subprocess.TimeoutExpired:
+            detail = "timed out"
+        except Exception as e:  # noqa: BLE001
+            detail = str(e)
+        results.append({"name": h["name"], "ip": h["address"], "ok": ok, "detail": detail})
+        if emit:
+            emit(f"   {'✓' if ok else '✗'} {h['name']} ({target}) — {detail}")
+    return results, ""
+
+
+@app.post("/infra/{project_id}/distribute-key")
+def infra_distribute_key(project_id: int, user: str = Depends(require_operator)):
+    """Fix 'the SLEP managed key isn't working with the VM' without a rebuild: log in
+    to each VM with the stored (Vault) password and install SLEP's CURRENT key. This
+    repairs key drift — a VM built with a key that was later regenerated — so the
+    next Ansible/Salt run authenticates. Returns per-host results."""
+    if not db.get_infra(project_id):
+        raise HTTPException(status_code=404, detail="Not an infrastructure project.")
+    results, note = _distribute_managed_key(project_id)
+    db.log_audit("infra_distribute_key", user, f"project #{project_id}: {sum(1 for r in results if r['ok'])}/{len(results)} ok")
+    return {"results": results, "note": note, "installed": sum(1 for r in results if r["ok"]), "total": len(results)}
+
+
 @app.post("/infra/{project_id}/inventory")
 def infra_to_inventory(project_id: int, user: str = Depends(require_operator)):
     """After apply, read the created VMs (sysible_hosts) into a SLEP Ansible

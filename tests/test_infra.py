@@ -1408,3 +1408,43 @@ def test_infra_create_into_existing_project(client):
     # Building again into an already-infra project is refused.
     assert client.post("/infra", json={"name": "Apps", "provider": "libvirt",
                                        "project_id": pid, "options": {"count": 1, "base_image": "x"}}).status_code == 400
+
+
+def test_distribute_key_over_password(client, monkeypatch):
+    """/infra/{id}/distribute-key installs SLEP's current key on the VMs via the
+    stored Vault password (sshpass), and reports per-host results."""
+    import backend.app as appmod
+    import backend.keydist as keydist
+    import backend.db as db
+    import backend.vault as vault
+    import shutil
+    pid = client.post("/infra", json={"name": "fix", "provider": "libvirt",
+                                      "options": {"count": 1, "base_image": "x", "ssh_user": "admin"}}).json()["project_id"]
+    iid = db.create_inventory("fix (VMs)", project_id=pid, source="infra")
+    db.set_infra_inventory(pid, iid)
+    db.upsert_host(iid, "prod-app-1", "192.168.100.115", variables={"ansible_user": "admin"}, source="infra")
+    db.upsert_secret("kvm_pw", vault.encrypt("hunter2"))
+    db.set_infra_ssh_password_ref(pid, "kvm_pw")
+    monkeypatch.setattr(keydist, "public_key", lambda: "ssh-ed25519 CURRENT slep-managed")
+    monkeypatch.setattr(shutil, "which", lambda b: "/usr/bin/" + b)
+    seen = {}
+    class R: returncode = 0; stdout = ""; stderr = ""
+    def fake_run(cmd, *a, **k):
+        seen["env"] = k.get("env") or {}
+        seen["cmd"] = cmd
+        return R()
+    monkeypatch.setattr(appmod.subprocess, "run", fake_run)
+    d = client.post(f"/infra/{pid}/distribute-key").json()
+    assert d["installed"] == 1 and d["total"] == 1
+    assert d["results"][0]["ok"] is True
+    assert seen["env"].get("SSHPASS") == "hunter2"      # password via env, not argv
+    assert "hunter2" not in " ".join(seen["cmd"])
+
+    # No stored password → a clear note, no crash.
+    pid2 = client.post("/infra", json={"name": "fix2", "provider": "libvirt",
+                                       "options": {"count": 1, "base_image": "x"}}).json()["project_id"]
+    iid2 = db.create_inventory("fix2 (VMs)", project_id=pid2, source="infra")
+    db.set_infra_inventory(pid2, iid2)
+    db.upsert_host(iid2, "vm-1", "10.0.0.9", source="infra")
+    d2 = client.post(f"/infra/{pid2}/distribute-key").json()
+    assert d2["total"] == 0 and "password" in d2["note"].lower()
