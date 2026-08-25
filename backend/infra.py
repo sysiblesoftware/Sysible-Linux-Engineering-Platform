@@ -424,9 +424,12 @@ resource "libvirt_cloudinit_disk" "ci" {{
   user_data = file("${{path.module}}/cloudinit.cfg")
   # Per-VM hostname via NoCloud meta-data (the shared user_data can't differ per
   # VM). One VM gets the bare base name; several get it suffixed so they stay
-  # unique. instance-id is per-VM too, which also keeps cloud-init from treating a
-  # cloned disk as an already-configured instance.
-  meta_data = "instance-id: ${{var.name_prefix}}-${{count.index + 1}}\\nlocal-hostname: ${{var.vm_count > 1 ? "${{var.hostname}}-${{count.index + 1}}" : var.hostname}}\\n"
+  # unique. The instance-id is per-VM AND carries a hash of the cloud-init: cloud-init
+  # only re-runs the per-boot user/password/key setup when the instance-id changes, so
+  # tying it to filemd5(cloudinit.cfg) means editing the account (e.g. a new password)
+  # and re-applying forces cloud-init to apply it — a fixed instance-id would make
+  # cloud-init treat the machine as "already configured" and silently skip the change.
+  meta_data = "instance-id: ${{var.name_prefix}}-${{count.index + 1}}-${{substr(filemd5("${{path.module}}/cloudinit.cfg"), 0, 10)}}\\nlocal-hostname: ${{var.vm_count > 1 ? "${{var.hostname}}-${{count.index + 1}}" : var.hostname}}\\n"
 }}
 
 {storage}
