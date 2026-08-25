@@ -81,11 +81,7 @@ def _delete_libvirt_volumes(project_id: int, names: list[str], emit) -> bool:
         emit("-- can't auto-clean: `virsh` isn't installed on the SLEP host. Delete the "
              "volume(s) on the hypervisor: " + ", ".join(f"virsh vol-delete {n} --pool <pool>" for n in names))
         return False
-    try:
-        from .. import app as _app
-        uri = _app._libvirt_uri_for_project(project_id)
-    except Exception:  # noqa: BLE001
-        uri = ""
+    uri = _libvirt_uri_for(project_id)
     if not uri:
         return False
     # Pool the cloud-init disk lands in: the project's configured pool (default).
@@ -107,6 +103,61 @@ def _delete_libvirt_volumes(project_id: int, names: list[str], emit) -> bool:
         except Exception:  # noqa: BLE001
             pass
     return any_ok
+
+
+def _orphan_domains(log_path) -> list[str]:
+    """Domain (VM) names from any 'domain '<name>' already exists' errors in the run
+    log — VMs a partial apply defined on the hypervisor but didn't record in state,
+    so the next apply collides. De-duplicated."""
+    import re
+    try:
+        text = log_path.read_text()[-12000:]
+    except OSError:
+        return []
+    seen, out = set(), []
+    for n in re.findall(r"domain '([^']+)' already exists", text):
+        if n not in seen:
+            seen.add(n)
+            out.append(n)
+    return out
+
+
+def _delete_libvirt_domains(project_id: int, names: list[str], emit) -> bool:
+    """Destroy + undefine orphaned libvirt domains so a re-apply can recreate them.
+    Storage is deliberately NOT removed (the disk volumes are managed by the config
+    and are cleaned separately when stale) — only the domain definition goes. Best-
+    effort; returns True if at least one was removed."""
+    import shutil
+    if not shutil.which("virsh"):
+        emit("-- can't auto-clean: `virsh` isn't installed on the SLEP host. Remove the "
+             "domain(s) on the hypervisor: "
+             + "; ".join(f"virsh destroy {n} ; virsh undefine {n} --nvram" for n in names))
+        return False
+    uri = _libvirt_uri_for(project_id)
+    if not uri:
+        return False
+    any_ok = False
+    for n in names:
+        _run_quiet(["virsh", "-c", uri, "destroy", n])   # power off if running (ok to fail)
+        # Cover UEFI nvram + managed-save + snapshot metadata, falling back to a
+        # plain undefine. NEVER --remove-all-storage — the disks must survive.
+        rc = _run_quiet(["virsh", "-c", uri, "undefine", n, "--nvram",
+                         "--managed-save", "--snapshots-metadata"])
+        if rc != 0:
+            rc = _run_quiet(["virsh", "-c", uri, "undefine", n])
+        if rc == 0:
+            any_ok = True
+            emit(f"-- removed stale domain '{n}' (its disk volumes were left intact).")
+    return any_ok
+
+
+def _libvirt_uri_for(project_id: int) -> str:
+    """The project's libvirt connection URI (from app), or '' if unavailable."""
+    try:
+        from .. import app as _app
+        return _app._libvirt_uri_for_project(project_id)
+    except Exception:  # noqa: BLE001
+        return ""
 
 
 def _run_quiet(cmd) -> int:
@@ -266,21 +317,37 @@ def launch(run_id: int) -> None:
                 emit("-- version in required_providers (e.g. a tighter version constraint), then apply.")
                 emit("-- (dmacvicar/libvirt 0.9.x rewrote its resource schema vs 0.7/0.8.) --")
 
-        # Self-heal tier 3 — orphaned cloud-init ISO: a previous apply that failed
-        # PART-way (e.g. the disk was created but the run died before state was
-        # saved) can leave the NoCloud ISO volume '<name>-ci.iso' in the pool. The
-        # next apply then dies with "storage volume '<name>-ci.iso' exists already"
-        # because libvirt_cloudinit_disk won't clobber it. SLEP regenerates the
-        # cloud-init every apply, so a leftover ISO is always stale and safe to
-        # delete — remove the named orphans and retry once.
+        # Self-heal tier 3 — orphaned libvirt objects from a partial apply. A run
+        # that died mid-apply can leave the domain '<name>' and/or its cloud-init
+        # ISO '<name>-ci.iso' on the hypervisor WITHOUT recording them in state, so
+        # the next apply dies with "domain '<name>' already exists" or "storage
+        # volume '<name>-ci.iso' exists already". SLEP owns those names (it just
+        # tried to create them and regenerates the cloud-init every apply), so the
+        # orphans are safe to remove. Clean whatever the log names and retry — up to
+        # twice, because the domain and ISO collisions can surface one after the
+        # other (undefine the domain first, then its ISO). Disk volumes are never
+        # touched here.
         if rc != 0 and action == "apply":
-            orphans = _orphan_cloudinit_isos(log_path)
-            if orphans:
-                emit(f"\n-- stale cloud-init ISO volume(s) left by an earlier partial apply: "
-                     f"{', '.join(orphans)}.")
-                emit("-- deleting them (SLEP rebuilds the cloud-init each apply) and retrying --\n")
-                if _delete_libvirt_volumes(run["project_id"], orphans, emit):
-                    rc = run_action(upgrade=False)
+            for _heal in range(2):
+                doms = _orphan_domains(log_path)
+                isos = _orphan_cloudinit_isos(log_path)
+                if not doms and not isos:
+                    break
+                cleaned = False
+                if doms:
+                    emit(f"\n-- stale libvirt domain(s) left by an earlier partial apply: "
+                         f"{', '.join(doms)}.")
+                    cleaned = _delete_libvirt_domains(run["project_id"], doms, emit) or cleaned
+                if isos:
+                    emit(f"\n-- stale cloud-init ISO(s) left by an earlier partial apply: "
+                         f"{', '.join(isos)}.")
+                    cleaned = _delete_libvirt_volumes(run["project_id"], isos, emit) or cleaned
+                if not cleaned:
+                    break
+                emit("-- retrying apply after cleanup --\n")
+                rc = run_action(upgrade=False)
+                if rc == 0:
+                    break
 
         # After a successful apply of a Create-Infrastructure project, read the new
         # VMs into the project's own inventory automatically — so they're immediately

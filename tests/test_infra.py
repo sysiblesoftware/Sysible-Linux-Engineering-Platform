@@ -1172,3 +1172,28 @@ def test_libvirt_hostname_option_in_schema(client):
     opts = client.get("/infra/providers").json()["providers"]["libvirt"]["options"]
     ho = next((o for o in opts if o["key"] == "hostname"), None)
     assert ho and ho["default"] == "sysible"
+
+
+def test_orphan_domain_parse_and_delete(tmp_path, monkeypatch):
+    """The self-heal parses 'domain '<name>' already exists' errors and undefines
+    the orphaned domains via virsh — without ever removing their storage."""
+    from backend.runners import terraform_runner as tr
+    log = tmp_path / "run.log"
+    log.write_text(
+        "Error: error defining libvirt domain: operation failed: domain 'app-1' "
+        "already exists with uuid 8cdee394-22a8-4175-b423-ceec277f6417\n"
+        "domain 'app-2' already exists\n"
+    )
+    assert tr._orphan_domains(log) == ["app-1", "app-2"]
+
+    import shutil
+    monkeypatch.setattr(shutil, "which", lambda b: "/usr/bin/virsh")
+    monkeypatch.setattr(tr, "_libvirt_uri_for", lambda pid: "qemu:///system")
+    calls = []
+    monkeypatch.setattr(tr, "_run_quiet", lambda cmd: calls.append(cmd) or 0)
+    msgs = []
+    assert tr._delete_libvirt_domains(1, ["app-1"], lambda m: msgs.append(m)) is True
+    # destroy then undefine; and NEVER --remove-all-storage
+    assert any(c[-2:] == ["destroy", "app-1"] or ("destroy" in c and "app-1" in c) for c in calls)
+    assert any("undefine" in c for c in calls)
+    assert not any("--remove-all-storage" in c for c in calls)
