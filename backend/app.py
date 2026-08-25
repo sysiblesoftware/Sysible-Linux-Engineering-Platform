@@ -1952,6 +1952,15 @@ def _refresh_infra_cloudinit(project_id: int, emit=None, password=None) -> bool:
         if any(s.startswith(t) for t in keytypes):
             existing.append(s)
     keys = existing + _slep_authorized_keys()
+    # Bake the chosen deploy credential's public key too, so that stored credential
+    # can log in (set from ⚙ Access). Deduped by _cloudinit.
+    dcid = meta.get("deploy_credential_id")
+    if dcid:
+        cred = db.get_credential(int(dcid), include_secret=True)
+        if cred and cred.get("kind") == "ssh":
+            dpub = _derive_public_key(cred.get("secret") or "")
+            if dpub:
+                keys.append(dpub)
     ssh_user = (meta.get("ssh_user") or "").strip()
     if not ssh_user:
         m = re.search(r"name:\s*(\S+)", text)
@@ -2935,6 +2944,21 @@ def infra_update(project_id: int, body: dict = Body(...), user: str = Depends(re
             db.set_infra_ssh_password_ref(project_id, _secret_ref_name(raw))
             db.log_audit("infra_ssh_password_set", user,
                          f"project #{project_id} ({'vault' if raw != pw else 'literal'})")
+    if "deploy_credential_id" in body:
+        # Pick a stored SSH credential whose public key is baked into the VMs, so
+        # that credential can log in. Empty/null clears it. Its key lands in the
+        # cloud-init on the rebuild below (re-apply to push it to existing VMs).
+        v = body.get("deploy_credential_id")
+        cid = int(v) if v not in (None, "", 0) else None
+        if cid is not None:
+            cred = db.get_credential(cid)
+            if not cred:
+                raise HTTPException(status_code=404, detail="Credential not found.")
+            if cred.get("kind") != "ssh":
+                raise HTTPException(status_code=400, detail="Pick an SSH key credential (not a password/cloud one).")
+        db.set_infra_deploy_credential(project_id, cid)
+        _refresh_infra_cloudinit(project_id)
+        db.log_audit("infra_deploy_credential_set", user, f"project #{project_id} → {cid}")
     return db.get_infra(project_id)
 
 

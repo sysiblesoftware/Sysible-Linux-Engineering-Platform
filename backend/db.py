@@ -305,6 +305,11 @@ def init_db() -> None:
         # the vault, encrypted.
         if "ssh_password_ref" not in infra_cols:
             c.execute("ALTER TABLE infra ADD COLUMN ssh_password_ref TEXT DEFAULT ''")
+        # The SSH credential whose PUBLIC key is baked into the VMs (so that
+        # credential can log in) — settable after create from the ⚙ Access editor,
+        # not only at wizard time.
+        if "deploy_credential_id" not in infra_cols:
+            c.execute("ALTER TABLE infra ADD COLUMN deploy_credential_id INTEGER")
         # Multi-tenancy: every owned resource carries an org_id. Add the column
         # where missing, then adopt any orphaned rows + existing users into a
         # 'Default' organization so pre-tenancy installs keep working unchanged.
@@ -664,6 +669,12 @@ def set_infra_ssh_password_ref(project_id, ref):
     SLEP's key over the password login. Empty clears it."""
     with _connect() as c:
         c.execute("UPDATE infra SET ssh_password_ref=? WHERE project_id=?", (ref or "", project_id))
+
+
+def set_infra_deploy_credential(project_id, credential_id):
+    """Set the SSH credential whose public key is baked into the VMs. None clears it."""
+    with _connect() as c:
+        c.execute("UPDATE infra SET deploy_credential_id=? WHERE project_id=?", (credential_id, project_id))
 
 
 def list_infra():

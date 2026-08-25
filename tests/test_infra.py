@@ -1448,3 +1448,28 @@ def test_distribute_key_over_password(client, monkeypatch):
     db.upsert_host(iid2, "vm-1", "10.0.0.9", source="infra")
     d2 = client.post(f"/infra/{pid2}/distribute-key").json()
     assert d2["total"] == 0 and "password" in d2["note"].lower()
+
+
+def test_access_deploy_credential_baked(client):
+    """Picking a stored SSH credential in Access stores it and bakes its public key
+    into the project's cloud-init."""
+    import shutil
+    if not shutil.which("ssh-keygen"):
+        import pytest
+        pytest.skip("ssh-keygen not available")
+    import subprocess as sp, tempfile, os as _os
+    import backend.db as db
+    with tempfile.TemporaryDirectory() as td:
+        kp = _os.path.join(td, "k")
+        sp.run(["ssh-keygen", "-t", "ed25519", "-N", "", "-f", kp], check=True, capture_output=True)
+        priv, pub = open(kp).read(), open(kp + ".pub").read().strip()
+    cid = client.post("/credentials", json={"name": "team-key", "kind": "ssh", "username": "admin", "secret": priv}).json()["id"]
+    pid = client.post("/infra", json={"name": "acc", "provider": "libvirt",
+                                      "options": {"count": 1, "base_image": "x", "ssh_user": "admin"}}).json()["project_id"]
+    r = client.patch(f"/infra/{pid}", json={"deploy_credential_id": cid})
+    assert r.status_code == 200 and db.get_infra(pid)["deploy_credential_id"] == cid
+    ci = (db.project_dir(pid) / "cloudinit.cfg").read_text()
+    assert pub in ci                     # the credential's public key is now baked in
+    # Clearing it is accepted.
+    assert client.patch(f"/infra/{pid}", json={"deploy_credential_id": None}).status_code == 200
+    assert (db.get_infra(pid)["deploy_credential_id"] or None) is None

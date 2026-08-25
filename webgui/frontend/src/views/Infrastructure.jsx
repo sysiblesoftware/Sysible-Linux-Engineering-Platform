@@ -75,6 +75,9 @@ export function JumpHostEditor({ r, onClose, onSaved }) {
   const [sshUser, setSshUser] = useState(r.ssh_user || '')
   const [pw, setPw] = useState('')
   const [bastion, setBastion] = useState(r.bastion || '')
+  const [creds, setCreds] = useState([])
+  const [credId, setCredId] = useState(r.deploy_credential_id ? String(r.deploy_credential_id) : '')
+  useEffect(() => { api('credentials').then((d) => setCreds((d.credentials || []).filter((c) => c.kind === 'ssh'))) }, [])
   const { wrap, node } = useErr()
   return (
     <Modal title={`VM access — ${r.project_name}`} onClose={onClose}>
@@ -89,6 +92,16 @@ export function JumpHostEditor({ r, onClose, onSaved }) {
       <Field label="Login password — a Vault variable, e.g. vault.admin_pw (turns on password SSH; leave blank to keep unchanged)">
         <input value={pw} onChange={(e) => setPw(e.target.value)} placeholder="vault.admin_pw" />
       </Field>
+      <Field label="Deploy SSH credential — a stored credential whose key is baked into the VMs (so it can log in)">
+        <select value={credId} onChange={(e) => setCredId(e.target.value)}>
+          <option value="">SLEP managed key (default)</option>
+          {creds.map((c) => <option key={c.id} value={c.id}>{c.name}{c.username ? ` (${c.username})` : ''}</option>)}
+        </select>
+        <div className="faint" style={{ fontSize: 11 }}>
+          {creds.length === 0 ? <>No stored SSH credentials — add one under <b>Credentials</b>.</>
+            : 'Its public key is added to the cloud-init; re-apply to push it to existing VMs.'}
+        </div>
+      </Field>
       <Field label="Jump host (user@host[:port]) — empty for a direct connection">
         <input value={bastion} onChange={(e) => setBastion(e.target.value)} placeholder="admin@192.168.8.212" />
       </Field>
@@ -99,6 +112,7 @@ export function JumpHostEditor({ r, onClose, onSaved }) {
           const body = { bastion: bastion.trim() }
           if (sshUser.trim() && sshUser.trim() !== (r.ssh_user || '')) body.ssh_user = sshUser.trim()
           if (pw.trim()) body.ssh_password = pw.trim()
+          if (credId !== (r.deploy_credential_id ? String(r.deploy_credential_id) : '')) body.deploy_credential_id = credId ? Number(credId) : null
           await api(`infra/${r.project_id}`, { method: 'PATCH', json: body })
           onSaved()
         })}>Save</button>
