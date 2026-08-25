@@ -489,6 +489,17 @@ resource "libvirt_domain" "vm" {{
     target_type = "serial"
     target_port = "0"
   }}
+
+  # cloud-init only re-reads the account/password/keys at BOOT. Updating the domain to
+  # point at a rebuilt cloud-init ISO does not power-cycle it, so without this the new
+  # config would sit unused until a manual reboot. replace_triggered_by rebuilds the
+  # domain (a fresh boot) whenever the cloud-init ISO changes — i.e. whenever you edit
+  # the account and re-apply — so the change actually lands. The disk is a separate
+  # resource and is NOT replaced, so the machine's data survives; only the per-instance
+  # cloud-init re-runs (new instance-id). This mirrors AWS user_data_replace_on_change.
+  lifecycle {{
+    replace_triggered_by = [libvirt_cloudinit_disk.ci[count.index].id]
+  }}
 }}
 '''
     variables = _vars({
@@ -515,6 +526,45 @@ resource "libvirt_domain" "vm" {{
 '''
     return {"main.tf": main, "variables.tf": variables, "outputs.tf": outputs,
             "cloudinit.cfg": _cloudinit(ssh_user, keys, _opt(spec, "ssh_password", ""))}
+
+
+def migrate_libvirt_main_tf(text: str) -> tuple[str, list[str]]:
+    """Bring an EXISTING libvirt project's main.tf up to the current cloud-init re-run
+    behaviour, in place (the infra row doesn't store the full spec, so we patch rather
+    than re-render — which also preserves any hand-edits). Two idempotent patches:
+
+      1. Fold a hash of the cloud-init into the NoCloud instance-id, so editing the
+         account/password and re-applying changes the ISO → cloud-init re-runs.
+      2. Add `lifecycle { replace_triggered_by = [the ci ISO] }` to the domain, so that
+         changed ISO actually rebuilds the VM (a fresh boot) instead of updating the
+         domain in place (which never re-runs cloud-init).
+
+    Returns (new_text, notes). notes is empty when nothing changed (already current, or
+    not a libvirt project). Only touches libvirt projects."""
+    import re
+    if 'libvirt_cloudinit_disk' not in text:
+        return text, []
+    notes = []
+    # 1) instance-id hash — only if not already folded in.
+    if 'filemd5(' not in text:
+        new = re.sub(
+            r'(instance-id: \$\{var\.name_prefix\}-\$\{count\.index \+ 1\})(\\n|")',
+            r'\1-${substr(filemd5("${path.module}/cloudinit.cfg"), 0, 10)}\2',
+            text, count=1)
+        if new != text:
+            text = new
+            notes.append("instance-id now tracks the cloud-init (re-apply re-runs it)")
+    # 2) domain replace_triggered_by — anchor on the unique cloudinit assignment so the
+    #    lifecycle block lands INSIDE the libvirt_domain resource.
+    if 'replace_triggered_by' not in text:
+        anchor = 'cloudinit = libvirt_cloudinit_disk.ci[count.index].id'
+        if anchor in text:
+            text = text.replace(
+                anchor,
+                anchor + '\n\n  lifecycle {\n    replace_triggered_by = [libvirt_cloudinit_disk.ci[count.index].id]\n  }',
+                1)
+            notes.append("domain rebuilds on a cloud-init change (forces the reboot that applies it)")
+    return text, notes
 
 
 def _render_proxmox(spec, keys):

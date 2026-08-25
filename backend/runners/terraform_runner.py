@@ -336,6 +336,24 @@ def launch(run_id: int) -> None:
             except Exception:  # noqa: BLE001 — never block the apply over this
                 pass
 
+            # Backfill the cloud-init re-run behaviour into projects generated before it
+            # existed: fold a cloud-init hash into the NoCloud instance-id and add the
+            # domain's replace_triggered_by. Without this, editing the account/password
+            # on an OLDER project rewrites cloudinit.cfg but the VM never re-runs it
+            # (static instance-id, in-place domain update, no reboot). Idempotent — a
+            # no-op once a project is current or for non-libvirt providers.
+            try:
+                from .. import infra as _infra
+                main_tf = db.project_dir(run["project_id"]) / "main.tf"
+                if main_tf.exists():
+                    patched, notes = _infra.migrate_libvirt_main_tf(main_tf.read_text())
+                    if notes:
+                        main_tf.write_text(patched)
+                        for n in notes:
+                            emit(f"-- updated infrastructure: {n}")
+            except Exception:  # noqa: BLE001 — never block the apply over this
+                pass
+
         env = _common.credential_env(credential, os.environ)
         env.setdefault("TF_IN_AUTOMATION", "1")
 
