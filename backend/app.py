@@ -879,13 +879,18 @@ def create_credential(request: Request, body: dict = Body(...), user: str = Depe
     name = str(body.get("name") or "").strip()
     if not name:
         raise HTTPException(status_code=400, detail="Credential name is required.")
+    uname = str(body.get("username") or "").strip()
+    if uname and not _valid_user(uname):
+        # The username becomes an ssh `user@host` target and an inventory ansible_user;
+        # a leading '-' or a shell metacharacter would be an option/injection vector.
+        raise HTTPException(status_code=400, detail="Invalid username — use letters, digits, . _ - (no spaces or leading '-').")
     org_id = body.get("org_id") or db.default_org_id()
     _require_org(request, org_id, "operator")
     # The SSH key / cloud secret and the sudo/become password are encrypted at rest
     # by the db layer — pass them as plaintext.
     cid = db.create_credential(
         name, kind=str(body.get("kind") or "ssh"),
-        username=str(body.get("username") or ""), secret=str(body.get("secret") or ""),
+        username=uname, secret=str(body.get("secret") or ""),
         become_secret=str(body.get("become_password") or ""), org_id=org_id,
     )
     return db.get_credential(cid)
@@ -1024,18 +1029,51 @@ def inventories(request: Request, project_id: int | None = None, user: str = Dep
     return {"inventories": db.list_inventories(project_id, org_ids=_visible_org_ids(request))}
 
 
+# A host is a hostname, an IPv4, or a bracketed IPv6. A user is a Unix/SSH login
+# name. These charsets deliberately exclude spaces, quotes, newlines, and every shell
+# metacharacter ($ ` ; | & ( ) < > \ etc.) and forbid a leading '-' — so a value that
+# reaches an ssh argument, an ssh ProxyCommand string (which ssh re-tokenises through
+# /bin/sh), an INI inventory line, or a salt roster YAML value can never inject an
+# option or a command. Validation happens at the INPUT boundary; renderers re-check.
+_RE_HOST = re.compile(r"^(?:\[[0-9A-Fa-f:]+\]|[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)$")
+_RE_USER = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]*$")
+
+
+def _valid_host(s: str) -> bool:
+    return bool(s) and not s.startswith("-") and bool(_RE_HOST.fullmatch(s))
+
+
+def _valid_user(s: str) -> bool:
+    return bool(s) and not s.startswith("-") and bool(_RE_USER.fullmatch(s))
+
+
 def _validate_bastion(bastion: str) -> str:
-    """A jump host is `[user@]host[:port]`. When the host part looks like a dotted
-    IPv4, make sure every octet is 0–255 — a typo like 192.268.8.212 otherwise sails
-    through and every play fails UNREACHABLE with a cryptic SSH error at run time."""
+    """A jump host is `[user@]host[:port]`. Strictly validate each part: the user and
+    host against a safe charset (no shell metacharacters, spaces, or leading '-') and
+    the port as 1–65535. This value is later interpolated into an ssh ProxyCommand
+    string that ssh runs via /bin/sh, so anything looser is a remote-code-execution
+    vector on the SLEP host. Returns the (unchanged) value, or '' when empty."""
     import ipaddress
-    import re as _re
     b = (bastion or "").strip()
     if not b:
         return ""
-    host = b.split("@", 1)[1] if "@" in b else b
-    host = host.rsplit(":", 1)[0] if _re.fullmatch(r".+:\d+", host) else host
-    if _re.fullmatch(r"\d+(\.\d+){3}", host):
+    user = ""
+    rest = b
+    if "@" in rest:
+        user, rest = rest.split("@", 1)
+        if not _valid_user(user):
+            raise HTTPException(status_code=400, detail="Invalid jump-host username — use letters, digits, . _ -")
+    host = rest
+    port = ""
+    m = re.fullmatch(r"(.+):(\d+)", rest)
+    if m:
+        host, port = m.group(1), m.group(2)
+    if port and not (0 < int(port) <= 65535):
+        raise HTTPException(status_code=400, detail="Invalid jump-host port.")
+    if not _valid_host(host):
+        raise HTTPException(status_code=400,
+                            detail="Invalid jump-host address — use a hostname, IPv4, or [IPv6], no spaces or special characters.")
+    if re.fullmatch(r"\d+(\.\d+){3}", host):
         try:
             ipaddress.ip_address(host)
         except ValueError:
@@ -1104,9 +1142,39 @@ def add_host(iid: int, body: dict = Body(...), user: str = Depends(current_user)
     address = str(body.get("address") or "").strip() or name
     if not name:
         raise HTTPException(status_code=400, detail="Host name is required.")
+    # The address flows into ssh args, an INI inventory line, and a salt roster YAML
+    # value — reject anything that isn't a plain hostname/IP so it can't inject an
+    # ssh option, an ansible connection var, or a roster directive.
+    if not _valid_host(address):
+        raise HTTPException(status_code=400,
+                            detail="Invalid host address — use a hostname, IPv4, or [IPv6], no spaces or special characters.")
+    variables = _sanitize_host_vars(body.get("variables") or {})
     hid = db.add_host(iid, name, address, groups=str(body.get("groups") or ""),
-                      variables=body.get("variables") or {})
+                      variables=variables)
     return {"status": "added", "id": hid}
+
+
+def _sanitize_host_vars(variables) -> dict:
+    """Host variables can become inventory/roster connection settings (ansible_user,
+    ansible_ssh_common_args, …). Reject a control-char/newline value (INI/YAML
+    injection) and require plain-identifier keys. A connection-identity value
+    (ansible_user / ansible_host) must also pass the strict host/user charset."""
+    if not isinstance(variables, dict):
+        raise HTTPException(status_code=400, detail="Host variables must be an object.")
+    out = {}
+    for k, v in variables.items():
+        ks = str(k)
+        if not re.fullmatch(r"[A-Za-z0-9_]+", ks):
+            raise HTTPException(status_code=400, detail=f"Invalid variable name “{ks}” — use letters, digits, underscore.")
+        vs = str(v)
+        if any(ord(c) < 32 for c in vs):
+            raise HTTPException(status_code=400, detail=f"Variable “{ks}” contains a control character or newline.")
+        if ks == "ansible_user" and vs and not _valid_user(vs):
+            raise HTTPException(status_code=400, detail="ansible_user must be a plain username (letters, digits, . _ -).")
+        if ks == "ansible_host" and vs and not _valid_host(vs):
+            raise HTTPException(status_code=400, detail="ansible_host must be a hostname or IP.")
+        out[ks] = v
+    return out
 
 
 @app.delete("/hosts/{hid}")
@@ -2454,6 +2522,10 @@ def _set_infra_login_user(project_id: int, su: str):
     su = infra._one_line(su or "").strip()
     if not su:
         return
+    # The login user is written into cloud-init (a root shell script on the VM), the
+    # Terraform output, and the inventory ansible_user — require a plain Unix username.
+    if not _valid_user(su):
+        raise HTTPException(status_code=400, detail="Invalid login username — use letters, digits, . _ - (no spaces or leading '-').")
     db.set_infra_ssh_user(project_id, su)
     outp = db.project_dir(project_id) / "outputs.tf"
     if outp.exists():

@@ -12,6 +12,7 @@ the IDE and is easy to tweak by hand afterwards.
 """
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 
@@ -238,7 +239,10 @@ def _hash_password(password: str) -> str:
 
 def _cloudinit(ssh_user: str, keys: list[str], password: str = "", hashed_password: str = "") -> str:
     # Single-line each value so nothing can inject a top-level cloud-init directive.
-    ssh_user = _one_line(ssh_user) or "user"
+    # Also restrict the login name to a Unix-username charset: it's interpolated into a
+    # root shell script (useradd/chpasswd/sudoers) on the VM, so a stray shell
+    # metacharacter must never reach it even if an upstream validator is bypassed.
+    ssh_user = re.sub(r"[^A-Za-z0-9_.-]", "", _one_line(ssh_user)) or "user"
     # Keep the password verbatim (first line only, no strip): a leading/trailing space
     # is a legitimate part of a password, and stripping it would bake a hash that never
     # matches what the operator types. Only a newline (YAML/shell-breaking) is dropped.

@@ -15,13 +15,20 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import tempfile
 import time
 from pathlib import Path
 
+import yaml
+
 from .. import db
 from . import _common
+
+# Render-time injection guards (defence-in-depth; the API validates on input too).
+_SAFE_HOST = re.compile(r"^(?:\[[0-9A-Fa-f:]+\]|[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)$")
+_SAFE_USER = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]*$")
 
 
 def _render_roster(hosts, credential, key_path, dest: Path, bastion: str = "",
@@ -39,32 +46,33 @@ def _render_roster(hosts, credential, key_path, dest: Path, bastion: str = "",
                      f"-o BatchMode=yes -o ConnectTimeout=15 -i '{bastion_key}' -W %h:%p {bastion}")
         else:
             proxy = ""   # fall back to ProxyJump below if we have no key
-    lines = []
+    # Build the roster as a dict and serialise with yaml.safe_dump: it quotes/escapes
+    # every value, so a host address, username, ProxyCommand, or password can never
+    # inject a sibling roster key (the salt-ssh equivalent of the INI-injection RCE).
+    roster: dict = {}
     for h in hosts:
+        addr = str(h.get("address") or "")
+        if not _SAFE_HOST.fullmatch(addr):
+            continue   # skip a host whose address isn't a plain hostname/IP
         # Target the inventory's ansible_user (the cloud-init login account) FIRST, so
         # Salt logs in as the same user Ansible does; then the credential username, then
         # root. Previously Salt used only credential.username/root and diverged from
         # Ansible whenever the credential had no username.
         huser = (h.get("variables") or {}).get("ansible_user") or cred_user or "root"
-        lines.append(f"{h['name']}:")
-        lines.append(f"  host: {h['address']}")
-        lines.append(f"  user: {huser}")
-        lines.append("  host_key_checking: False")
+        if not _SAFE_USER.fullmatch(str(huser)):
+            huser = "root"
+        entry: dict = {"host": addr, "user": str(huser), "host_key_checking": False}
         if credential and kind == "ssh" and key_path:
-            lines.append(f"  priv: {key_path}")
-            lines.append("  sudo: True")   # key logins need sudo too (VMs grant NOPASSWD)
+            entry["priv"] = str(key_path)
+            entry["sudo"] = True   # key logins need sudo too (VMs grant NOPASSWD)
         elif credential and kind == "ssh_password" and credential.get("secret"):
-            lines.append(f"  passwd: {credential['secret']}")
-            lines.append("  sudo: True")
-        # Optional SSH jump host (bastion): reach every host through it.
+            entry["passwd"] = str(credential["secret"])
+            entry["sudo"] = True
         if bastion:
-            lines.append("  ssh_options:")
-            if proxy:
-                lines.append(f"    - ProxyCommand={proxy}")
-            else:
-                lines.append(f"    - ProxyJump={bastion}")
-            lines.append("    - StrictHostKeyChecking=no")
-    dest.write_text("\n".join(lines) + "\n")
+            entry["ssh_options"] = ([f"ProxyCommand={proxy}"] if proxy else [f"ProxyJump={bastion}"]) \
+                + ["StrictHostKeyChecking=no"]
+        roster[h["name"]] = entry
+    dest.write_text(yaml.safe_dump(roster, default_flow_style=False))
 
 
 def _write_key(secret: str, dest: Path) -> None:

@@ -67,6 +67,24 @@ def _ansible_group(name: str) -> str:
     return g or "ungrouped"
 
 
+# Render-time injection guards (defence-in-depth; the API validates on input too).
+_RE_HOST = re.compile(r"^(?:\[[0-9A-Fa-f:]+\]|[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)$")
+_RE_USER = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]*$")
+_RE_VAL = re.compile(r"^[A-Za-z0-9_.:/@=+-]+$")   # safe as a bare INI host-var token
+
+
+def _ini_safe_host(s) -> bool:
+    return bool(s) and not str(s).startswith("-") and bool(_RE_HOST.fullmatch(str(s)))
+
+
+def _ini_safe_user(s) -> bool:
+    return bool(s) and not str(s).startswith("-") and bool(_RE_USER.fullmatch(str(s)))
+
+
+def _ini_safe_val(s) -> bool:
+    return bool(_RE_VAL.fullmatch(str(s)))
+
+
 def _render_inventory(hosts, credential, dest: Path, bastion: str = "", bastion_key: str = "") -> None:
     """Write an Ansible INI inventory from SLEP hosts. Hosts are grouped by their
     comma-separated `groups`; every host also lands in the implicit `all`. SSH
@@ -81,17 +99,29 @@ def _render_inventory(hosts, credential, dest: Path, bastion: str = "", bastion_
     # themselves closes the connection ("Connection closed by UNKNOWN").
     direct_names: list[str] = []
 
+    cuser = conn_user if _ini_safe_user(conn_user) else ""
     for h in hosts:
-        parts = [h["name"], f"ansible_host={h['address']}"]
-        if conn_user:
-            parts.append(f"ansible_user={conn_user}")
+        # Defence-in-depth: never emit an address/user/var that could inject an INI
+        # token (extra ansible_ssh_common_args → ProxyCommand → RCE). Inputs are
+        # validated at the API boundary; this guards already-stored/imported data too.
+        addr = h["address"]
+        if not _ini_safe_host(addr):
+            continue   # unsafe address — skip rather than risk an injected connection var
+        parts = [h["name"], f"ansible_host={addr}"]
+        if cuser:
+            parts.append(f"ansible_user={cuser}")
         # ssh_password credentials pass the password as a host var (server-side
         # only — never rendered into the console). Key creds use --private-key.
         if credential and credential.get("kind") == "ssh_password" and credential.get("secret"):
             parts.append(f"ansible_password={credential['secret']}")
             parts.append(f"ansible_become_password={credential['secret']}")
         for k, v in (h.get("variables") or {}).items():
-            parts.append(f"{k}={json.dumps(v) if not isinstance(v, str) else v}")
+            if not re.fullmatch(r"[A-Za-z0-9_]+", str(k)):
+                continue
+            vs = v if isinstance(v, str) else json.dumps(v)
+            if not _ini_safe_val(vs):
+                continue   # a value with whitespace/quotes can't sit safely on an INI host line
+            parts.append(f"{k}={vs}")
         line = " ".join(parts)
         if bhost and h["address"] == bhost:
             direct_names.append(h["name"])
