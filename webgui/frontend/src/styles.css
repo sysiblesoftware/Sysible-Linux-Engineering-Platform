@@ -112,7 +112,10 @@ th{color:var(--muted);font-weight:600;font-size:12px}
 .tree-h-btn{border:none;background:transparent;color:var(--muted);cursor:pointer;font-size:15px;line-height:1;padding:0 4px}
 .tree-h-btn:hover{color:var(--accent)}
 .ide-actions button{width:100%;justify-content:center}
-.ide-actions .spacer{flex:1;min-height:8px}
+/* Group Sequence/Run directly under the file actions instead of growing to shove
+   them to the very bottom of a full-height column (they ended up off at the bottom
+   edge of the screen). A short non-growing rule with a divider keeps them together. */
+.ide-actions .spacer{flex:0 0 auto;min-height:1px;margin-top:2px;padding-top:10px;border-top:1px solid var(--line)}
 .tree{background:var(--panel);border-right:1px solid var(--line);overflow:auto;padding:8px}
 .ide-gutter{align-self:stretch;cursor:col-resize;background:linear-gradient(var(--line),var(--line)) center/2px 100% no-repeat}
 .ide-gutter:hover{background:linear-gradient(var(--accent),var(--accent)) center/2px 100% no-repeat}
