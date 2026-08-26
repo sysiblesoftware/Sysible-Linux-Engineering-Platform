@@ -2241,6 +2241,12 @@ def _refresh_infra_cloudinit(project_id: int, emit=None, password=None) -> bool:
         if s.startswith("- "):
             s = s[2:].strip()
         if any(s.startswith(t) for t in keytypes):
+            # Drop STALE SLEP-managed keys (comment 'slep-managed'): they're re-added
+            # fresh from the CURRENT managed key below. Keeping the old ones is what made
+            # the cloud-init accumulate a new slep-managed key on every apply after a key
+            # regeneration. Non-SLEP keys (deploy credential, Controller, pasted) stay.
+            if s.rstrip().endswith(" slep-managed"):
+                continue
             existing.append(s)
     keys = existing + _slep_authorized_keys()
     # Bake the chosen deploy credential's public key too, so that stored credential
