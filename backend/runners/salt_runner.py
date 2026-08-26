@@ -132,10 +132,18 @@ def launch(run_id: int) -> None:
             # Minimal master config: states come from the project dir; keep all
             # of salt's scratch dirs inside the per-run temp so no root paths are
             # touched and nothing leaks between runs.
+            #
+            # ssh_log_file is critical: salt-ssh defaults it to /var/log/salt/ssh
+            # (root-owned), so a non-root SLEP process dies with "No permissions to
+            # access /var/log/salt/ssh". Redirect it — plus the general log_file
+            # (/var/log/salt/master) — into the per-run temp so no root path is
+            # touched and the logs are cleaned up with the run.
             (conf_dir / "master").write_text(
                 "file_roots:\n  base:\n    - %s\n"
                 "cachedir: %s\npki_dir: %s\nroster_file: %s\n"
-                % (workdir, tmp / "cache", tmp / "pki", roster)
+                "log_file: %s\nssh_log_file: %s\n"
+                % (workdir, tmp / "cache", tmp / "pki", roster,
+                   tmp / "salt-master.log", tmp / "salt-ssh.log")
             )
 
             func = "state.highstate" if state.lower() == "highstate" or not state else "state.apply"
