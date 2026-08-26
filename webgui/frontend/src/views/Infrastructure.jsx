@@ -74,11 +74,21 @@ export default function Infrastructure({ onOpenProject }) {
 export function JumpHostEditor({ r, onClose, onSaved }) {
   const [bastion, setBastion] = useState(r.bastion || '')
   const [creds, setCreds] = useState([])
+  const [jumps, setJumps] = useState([])
+  // Jump-host source: '' (direct), a stored jump-host id, or '__manual' (type it).
+  const [jhSel, setJhSel] = useState(r.bastion ? '__manual' : '')
   // Login source: a stored credential id, or '__manual' (type user + password).
   const [src, setSrc] = useState(r.login_credential_id ? String(r.login_credential_id) : '__manual')
   const [sshUser, setSshUser] = useState(r.ssh_user || '')
   const [pw, setPw] = useState('')
   useEffect(() => {
+    api('jump-hosts').then((d) => {
+      const list = d.jump_hosts || []
+      setJumps(list)
+      // If the stored bastion matches a defined jump host, select it; else keep manual.
+      const match = list.find((j) => j.bastion === (r.bastion || ''))
+      if (match) setJhSel(String(match.id))
+    }).catch(() => {})
     api('credentials').then((d) => {
       const list = (d.credentials || []).filter((c) => c.kind === 'ssh' || c.kind === 'ssh_password')
       setCreds(list)
@@ -120,9 +130,25 @@ export function JumpHostEditor({ r, onClose, onSaved }) {
           </Field>
         </>
       )}
-      <Field label="Jump host (user@host[:port]) — empty for a direct connection">
-        <input value={bastion} onChange={(e) => setBastion(e.target.value)} placeholder="admin@192.168.8.212" />
+      <Field label="Jump host — the bastion SLEP hops through to reach the VMs">
+        <select value={jhSel} onChange={(e) => {
+          const v = e.target.value; setJhSel(v)
+          if (v === '' ) setBastion('')
+          else if (v !== '__manual') { const j = jumps.find((x) => String(x.id) === v); setBastion(j ? j.bastion : '') }
+        }}>
+          <option value="">Direct connection (no jump host)</option>
+          {jumps.map((j) => <option key={j.id} value={j.id}>{j.name} — {j.bastion}{j.prepared ? ' ✓' : ''}</option>)}
+          <option value="__manual">＋ Enter a jump host manually…</option>
+        </select>
+        <div className="faint" style={{ fontSize: 11.5 }}>
+          Manage reusable jump hosts under <b>Jump Hosts</b> (define + prepare once). {jumps.length === 0 && 'None defined yet — add one there, or enter one manually.'}
+        </div>
       </Field>
+      {jhSel === '__manual' && (
+        <Field label="Jump host (user@host[:port])">
+          <input value={bastion} onChange={(e) => setBastion(e.target.value)} placeholder="admin@192.168.8.212" />
+        </Field>
+      )}
       <div style={{ background: 'rgba(240,180,40,0.10)', border: '1px solid rgba(240,180,40,0.35)',
         borderRadius: 8, padding: '8px 10px', margin: '10px 0 2px', fontSize: 12, color: 'var(--warn, #e0a83a)' }}>
         ⚠ These settings take effect when a VM is <b>built</b>. Existing VMs keep the account they were created

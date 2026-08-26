@@ -1019,6 +1019,68 @@ def vault_delete(sid: int, request: Request, user: str = Depends(require_operato
     return {"status": "deleted"}
 
 
+# ------------------------------------------------------------------ jump hosts
+@app.get("/jump-hosts")
+def jump_hosts_list(request: Request, user: str = Depends(current_user)):
+    """Reusable SSH jump hosts (bastions), scoped to the caller's orgs. Each carries a
+    `bastion` (user@host[:port]) and `prepared` (epoch the managed key was installed)."""
+    return {"jump_hosts": db.list_jump_hosts(_visible_org_ids(request))}
+
+
+@app.post("/jump-hosts")
+def jump_hosts_create(request: Request, body: dict = Body(...), user: str = Depends(require_operator)):
+    """Define a named jump host. host/user are validated to the same safe charset as a
+    project bastion (they end up in an ssh ProxyCommand)."""
+    name = str(body.get("name") or "").strip()
+    host = str(body.get("host") or "").strip()
+    ssh_user = str(body.get("username") or "root").strip() or "root"
+    port = body.get("port") or 22
+    if not name:
+        raise HTTPException(status_code=400, detail="A name is required.")
+    if not _valid_host(host):
+        raise HTTPException(status_code=400, detail="Invalid host — a hostname, IPv4, or [IPv6], no spaces or special characters.")
+    if not _valid_user(ssh_user):
+        raise HTTPException(status_code=400, detail="Invalid username — letters, digits, . _ - (no leading '-').")
+    try:
+        port = int(port)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Port must be a number.")
+    if not (0 < port <= 65535):
+        raise HTTPException(status_code=400, detail="Port must be 1–65535.")
+    org_id = _coerce_org_id(body.get("org_id"))
+    _require_org(request, org_id, "operator")
+    jid = db.create_jump_host(name, host, ssh_user, port, org_id=org_id)
+    db.log_audit("jump_host_created", user, f"#{jid} {ssh_user}@{host}:{port}")
+    return db.get_jump_host(jid)
+
+
+@app.delete("/jump-hosts/{jid}")
+def jump_hosts_delete(jid: int, request: Request, user: str = Depends(require_operator)):
+    jh = db.get_jump_host(jid)
+    if not jh:
+        raise HTTPException(status_code=404, detail="Jump host not found.")
+    _guard_object_org(request, jh.get("org_id"), "operator")
+    db.delete_jump_host(jid)
+    return {"status": "deleted"}
+
+
+@app.post("/jump-hosts/{jid}/prepare")
+def jump_hosts_prepare(jid: int, request: Request, body: dict = Body(default={}), user: str = Depends(require_operator)):
+    """Install SLEP's managed key on this jump host with a one-time password, so runs
+    hop through it with the key. Reuses the hypervisor-key install; marks the jump host
+    prepared on success."""
+    jh = db.get_jump_host(jid)
+    if not jh:
+        raise HTTPException(status_code=404, detail="Jump host not found.")
+    _guard_object_org(request, jh.get("org_id"), "operator")
+    result = infra_install_hypervisor_key(
+        body={"host": jh["host"], "user": jh["username"], "port": str(jh["port"]),
+              "password": str((body or {}).get("password") or "")}, user=user)
+    if isinstance(result, dict) and result.get("ok"):
+        db.set_jump_host_prepared(jid)
+    return result
+
+
 # ------------------------------------------------------------------ users (RBAC admin)
 @app.get("/users")
 def users_list(user: str = Depends(require_superuser)):

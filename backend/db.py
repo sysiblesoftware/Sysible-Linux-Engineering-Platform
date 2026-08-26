@@ -106,6 +106,20 @@ def init_db() -> None:
                 created INTEGER NOT NULL
             );
 
+            -- Reusable SSH jump hosts (bastions). Defined once, prepared once (SLEP's
+            -- managed key installed on them), then picked per project by name instead
+            -- of retyping user@host. `prepared` is the epoch we last installed the key.
+            CREATE TABLE IF NOT EXISTS jump_hosts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                host TEXT NOT NULL,
+                username TEXT NOT NULL DEFAULT 'root',
+                port INTEGER NOT NULL DEFAULT 22,
+                org_id INTEGER,
+                prepared INTEGER,
+                created INTEGER NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS inventories (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 project_id INTEGER,
@@ -1038,6 +1052,55 @@ def upsert_secret(name, ciphertext, org_id=None):
         cur = c.execute("INSERT INTO secrets(name,value,created,org_id) VALUES(?,?,?,?)",
                         (name, ciphertext, _now(), org_id))
         return cur.lastrowid
+
+
+# ---------------------------------------------------------------- jump hosts
+def _jump_bastion(row) -> str:
+    """The user@host[:port] string a row represents (port omitted when 22)."""
+    if not row:
+        return ""
+    hp = row["host"] if int(row["port"] or 22) == 22 else f"{row['host']}:{row['port']}"
+    return f"{row['username']}@{hp}" if row["username"] else hp
+
+
+def list_jump_hosts(org_ids=None):
+    frag, params = _org_filter(org_ids)
+    if frag is None:
+        return []
+    with _connect() as c:
+        q = "SELECT * FROM jump_hosts" + (f" WHERE {frag}" if frag else "") + " ORDER BY name"
+        rows = [dict(r) for r in c.execute(q, params)]
+    for r in rows:
+        r["bastion"] = _jump_bastion(r)
+    return rows
+
+
+def get_jump_host(jid: int):
+    with _connect() as c:
+        r = c.execute("SELECT * FROM jump_hosts WHERE id=?", (jid,)).fetchone()
+    if not r:
+        return None
+    d = dict(r)
+    d["bastion"] = _jump_bastion(d)
+    return d
+
+
+def create_jump_host(name, host, username="root", port=22, org_id=None):
+    with _connect() as c:
+        cur = c.execute(
+            "INSERT INTO jump_hosts(name,host,username,port,org_id,created) VALUES(?,?,?,?,?,?)",
+            (name, host, username or "root", int(port or 22), org_id, _now()))
+        return cur.lastrowid
+
+
+def set_jump_host_prepared(jid: int, ts=None):
+    with _connect() as c:
+        c.execute("UPDATE jump_hosts SET prepared=? WHERE id=?", (ts if ts is not None else _now(), jid))
+
+
+def delete_jump_host(jid: int):
+    with _connect() as c:
+        c.execute("DELETE FROM jump_hosts WHERE id=?", (jid,))
 
 
 def get_secret_org(sid: int):

@@ -8,6 +8,7 @@ import Ide from './views/Ide.jsx'
 import Inventories from './views/Inventories.jsx'
 import Controllers from './views/Controllers.jsx'
 import Credentials from './views/Credentials.jsx'
+import JumpHosts from './views/JumpHosts.jsx'
 import Vault from './views/Vault.jsx'
 import Users from './views/Users.jsx'
 import Infrastructure from './views/Infrastructure.jsx'
@@ -26,6 +27,7 @@ const NAV = [
   { key: 'infra', label: 'Infrastructure', icon: 'cloud' },
   { key: 'controllers', label: 'Controllers', icon: 'link' },
   { key: 'credentials', label: 'Credentials', icon: 'key' },
+  { key: 'jumphosts', label: 'Jump Hosts', icon: 'jump' },
   { key: 'vault', label: 'Variable Vault', icon: 'lock' },
   { key: 'runs', label: 'Runs', icon: 'play' },
   { key: 'pipelines', label: 'Pipelines', icon: 'pipeline' },
@@ -48,6 +50,7 @@ const ICONS = {
   clock: <><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></>,
   activity: <path d="M3 12h4l3 8 4-16 3 8h4" />,
   cloud: <path d="M6.5 19a4.5 4.5 0 0 1-.5-8.97 6 6 0 0 1 11.64-1.36A4 4 0 0 1 17.5 19z" />,
+  jump: <><circle cx="5" cy="18" r="2" /><circle cx="19" cy="18" r="2" /><path d="M5 16V9a3 3 0 0 1 3-3h8a3 3 0 0 1 3 3v7" /><path d="M12 6V3M9 5l3-2 3 2" /></>,
   org: <><rect x="4" y="3" width="7" height="18" rx="1" /><rect x="13" y="8" width="7" height="13" rx="1" /><line x1="7" y1="7" x2="7.01" y2="7" /><line x1="7" y1="11" x2="7.01" y2="11" /><line x1="16" y1="12" x2="16.01" y2="12" /></>,
 }
 
@@ -130,6 +133,7 @@ export default function App() {
                 : view === 'pipelines' ? <Pipelines onOpenRun={setRunId} />
                 : view === 'controllers' ? <Controllers />
                   : view === 'credentials' ? <Credentials />
+                    : view === 'jumphosts' ? <JumpHosts />
                     : view === 'vault' ? <Vault />
                       : view === 'schedules' ? <Schedules />
                         : view === 'activity' ? <Activity />
