@@ -147,7 +147,11 @@ def launch(run_id: int) -> None:
             )
 
             func = "state.highstate" if state.lower() == "highstate" or not state else "state.apply"
-            cmd = ["salt-ssh", "-c", str(conf_dir), "-i", "--no-color", "'*'", func]
+            # Target glob is a bare `*` (all roster hosts). It must NOT be quoted here:
+            # we exec via subprocess with an argv list (no shell), so "'*'" would be
+            # passed literally — salt-ssh then matches a glob named `'*'` against the
+            # roster keys and finds nothing ("No matching targets found in roster").
+            cmd = ["salt-ssh", "-c", str(conf_dir), "-i", "--no-color", "*", func]
             if func == "state.apply":
                 cmd.append(state)
             # extra_vars become salt kwargs (e.g. test=True for a dry run, or
