@@ -444,6 +444,11 @@ def _render_libvirt(spec, keys):
                    '  base_volume_name = var.base_volume\n'
                    '  base_volume_pool = var.pool\n'
                    '  format           = "qcow2"\n'
+                   '  # Grow the copy-on-write clone to the requested size. Cloud images ship a\n'
+                   '  # tiny (~2GB) root, so without this a VM fills up on the first apt update\n'
+                   '  # ("No space left on device"); cloud-init growpart expands the filesystem\n'
+                   '  # to fill this on first boot.\n'
+                   '  size             = var.disk_size * 1073741824\n'
                    '}')
     else:
         storage = ('# Base image pulled into the pool ONCE and shared; per-VM disks are fast\n'
@@ -460,6 +465,8 @@ def _render_libvirt(spec, keys):
                    '  pool           = var.pool\n'
                    '  base_volume_id = libvirt_volume.base.id\n'
                    '  format         = "qcow2"\n'
+                   '  # Grow the CoW clone past the cloud image\'s tiny root (see above).\n'
+                   '  size           = var.disk_size * 1073741824\n'
                    '}')
     # Pin to the 0.7.x line. dmacvicar/libvirt 0.9.x is a terraform-plugin-framework
     # rewrite that changed the HCL surface (nested blocks like disk/network_interface/
@@ -531,6 +538,7 @@ resource "libvirt_domain" "vm" {{
         "pool": ("string", spec.get("pool", "default")),
         "base_image": ("string", spec.get("base_image", "")),
         "base_volume": ("string", base_volume),
+        "disk_size": ("number", int(spec.get("disk_size", 20))),   # GB; grows the CoW clone
         "network": ("string", spec.get("network", "default")),
         "hostname": ("string", spec.get("hostname", "sysible")),
         "vm_count": ("number", spec.get("count", 1)),
