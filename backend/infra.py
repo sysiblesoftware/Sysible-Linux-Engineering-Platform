@@ -265,6 +265,12 @@ def _cloudinit(ssh_user: str, keys: list[str], password: str = "", hashed_passwo
     #    trouble.
     lines = ["#cloud-config", "users:", "  - default", f"  - name: {ssh_user}",
              "    groups: [sudo, wheel]",
+             # Don't create a private group named after the user: if the base image
+             # already has a GROUP by that name (a stale 'admin' group with no user, a
+             # common leftover), useradd fails with "group admin exists" and the account
+             # is never created. --no-user-group sidesteps that; sudo comes from the
+             # sudo: rule below, not group membership.
+             "    no_user_group: true",
              "    sudo: ALL=(ALL) NOPASSWD:ALL",
              "    shell: /bin/bash",
              f"    lock_passwd: {'false' if hashed else 'true'}"]
@@ -290,7 +296,11 @@ def _cloudinit(ssh_user: str, keys: list[str], password: str = "", hashed_passwo
     #    so the (hardcoded, single-lined) keys need no shell escaping. This is what
     #    makes the VM reliably reachable regardless of the base image.
     script = ["#!/bin/sh",
-              f"id -u {ssh_user} >/dev/null 2>&1 || useradd -m -s /bin/bash {ssh_user}",
+              # --no-user-group (-N) so a pre-existing group of the same name (e.g. a
+              # stale 'admin' group in the base image) doesn't make useradd fail with
+              # "group <user> exists"; fall back to a plain useradd if -N isn't supported.
+              f"id -u {ssh_user} >/dev/null 2>&1 || useradd -m -s /bin/bash -N {ssh_user} 2>/dev/null "
+              f"|| useradd -m -s /bin/bash {ssh_user} 2>/dev/null || true",
               f"getent group sudo  >/dev/null 2>&1 && usermod -aG sudo  {ssh_user} 2>/dev/null || true",
               f"getent group wheel >/dev/null 2>&1 && usermod -aG wheel {ssh_user} 2>/dev/null || true",
               f"install -d -m 700 /home/{ssh_user}/.ssh"]
