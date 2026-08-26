@@ -290,7 +290,10 @@ def _cloudinit(ssh_user: str, keys: list[str], password: str = "", hashed_passwo
     # the image default lands). cloud-init processes top-level groups BEFORE users, and
     # creating an already-existing group is a harmless no-op.
     lines.append("groups: [sudo, wheel]")
-    lines.append("package_update: true")
+    # NOTE: deliberately NOT setting `package_update: true`. It runs apt-get update at
+    # boot, which piles onto Ubuntu's own unattended-upgrades and holds the dpkg lock —
+    # so a playbook's apt task right after apply blocks ("stuck") waiting for the lock.
+    # Playbooks refresh the cache themselves (update_cache), so this only caused the race.
     lines.append(f"ssh_pwauth: {'true' if hashed else 'false'}")
 
     # 2) A setup script (dropped via write_files, run from runcmd) that GUARANTEES,
