@@ -601,6 +601,16 @@ def migrate_libvirt_main_tf(text: str) -> tuple[str, list[str]]:
                 anchor + '\n\n  lifecycle {\n    replace_triggered_by = [libvirt_cloudinit_disk.ci[count.index].id]\n  }',
                 1)
             notes.append("domain rebuilds on a cloud-init change (forces the reboot that applies it)")
+    # 3) Size the VM disk. Older projects cloned the base image's tiny (~2GB) root with no
+    #    size, so a VM fills up on the first apt update. Add a 20GB literal to the disk
+    #    volume (a literal, not var.disk_size, so no variables.tf change is needed on an
+    #    existing project). cloud-init growpart then expands the filesystem to fill it.
+    if 'size' not in text and 'disk_size' not in text:   # no volume size set yet
+        for anchor in ('base_volume_pool = var.pool', 'base_volume_id = libvirt_volume.base.id'):
+            if anchor in text:
+                text = text.replace(anchor, anchor + '\n  size             = 21474836480  # 20 GiB', 1)
+                notes.append("VM disk sized to 20GB (was the cloud image's ~2GB root — no more 'No space left')")
+                break
     return text, notes
 
 
