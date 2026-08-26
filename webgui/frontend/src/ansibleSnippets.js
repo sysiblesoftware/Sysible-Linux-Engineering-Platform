@@ -76,7 +76,7 @@ export const SNIPPET_GROUPS = [
     group: 'Packages & Repositories',
     items: [
       t('Install packages (any distro)', 'package install', `    - name: Install packages\n      ansible.builtin.package:\n        name:\n          - your-package\n        state: present\n      become: true\n`),
-      t('Install (apt)', 'apt debian ubuntu', `    - name: Install apt packages\n      ansible.builtin.apt:\n        name: [your-package]\n        state: present\n        update_cache: true\n      become: true\n`),
+      t('Install (apt)', 'apt debian ubuntu', `    - name: Install apt packages\n      ansible.builtin.apt:\n        # Don't pin an exact build (e.g. name: nginx=1.24.0-2ubuntu7.11): Ubuntu keeps\n        # only the current build in the pool, so a pinned one 404s once a security\n        # update supersedes it. Name the package alone for the current version.\n        name: [your-package]\n        state: present\n        update_cache: true\n        cache_valid_time: 3600\n      become: true\n`),
       t('Install (dnf)', 'dnf yum rocky fedora rhel', `    - name: Install dnf packages\n      ansible.builtin.dnf:\n        name: [your-package]\n        state: present\n      become: true\n`),
       t('Update all packages', 'upgrade update patch', `    - name: Upgrade all packages\n      ansible.builtin.package:\n        name: "*"\n        state: latest\n      become: true\n`),
       t('Add apt repository', 'repo apt ppa', `    - name: Add an apt repository\n      ansible.builtin.apt_repository:\n        repo: "deb https://example.com/apt stable main"\n        state: present\n      become: true\n`),

@@ -150,6 +150,17 @@ function lintYaml(text) {
       .replace(/"(?:\\.|[^"\\])*"|'[^']*'/g, '')
     if (count(c, /\[/g) !== count(c, /\]/g)) M(line, 1, raw.length + 1, "Unbalanced '[ ]' on this line.", 'warning')
     if (count(c, /\{/g) !== count(c, /\}/g)) M(line, 1, raw.length + 1, "Unbalanced '{ }' on this line.", 'warning')
+    // Exact apt/deb version pin (e.g. nginx=1.24.0-2ubuntu7.11). Ubuntu keeps only the
+    // current build in its pool, so a pinned one 404s once a security update replaces it
+    // (a common, confusing 'Failed to fetch … 404' at apt time). Require a Debian-style
+    // revision (…-N / …~ / …+) after '=' so plain key=value / '==' comparisons don't trip it.
+    const pin = /(^|[\s,\[-])([A-Za-z][A-Za-z0-9.+-]*)=([0-9][A-Za-z0-9.+~:]*[-~+][A-Za-z0-9.+~:]*)/.exec(s)
+    if (pin) {
+      const col = pin.index + pin[0].indexOf(pin[2]) + 1
+      M(line, col, col + pin[2].length + 1 + pin[3].length,
+        `Exact version pin "${pin[2]}=${pin[3]}" — Ubuntu drops superseded builds from the pool, so this 404s after a security update. Install "${pin[2]}" unpinned for the current version (or expect to bump this pin).`,
+        'warning')
+    }
   })
   return out
 }
