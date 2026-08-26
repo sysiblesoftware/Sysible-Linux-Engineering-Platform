@@ -16,7 +16,19 @@ def _seed_inventory():
     return iid
 
 
+def _clear_managed_key():
+    """Clean slate: remove the on-disk managed key AND any 'SLEP managed key' credential
+    (other tests leave one in the shared session DB, which would otherwise make ensure_key
+    RESTORE from it instead of generating)."""
+    db.init_db()   # idempotent; these tests don't use the `client` fixture
+    keydist.remove_key()
+    for c in db.list_credentials(include_secret=True):
+        if c.get("name") == keydist._CRED_NAME:
+            db.delete_credential(c["id"])
+
+
 def test_ensure_key_generates_once(monkeypatch, tmp_path):
+    _clear_managed_key()
     calls = {"n": 0}
 
     def fake_run(cmd, **k):
@@ -33,6 +45,28 @@ def test_ensure_key_generates_once(monkeypatch, tmp_path):
     pub2 = keydist.ensure_key()   # reuses, doesn't regenerate
     assert pub1 == pub2 == "ssh-ed25519 AAAAKEY slep-managed"
     assert calls["n"] == 1
+
+
+def test_ensure_key_restores_from_credential_not_regenerate(monkeypatch):
+    """A wiped data/ssh/ dir must NOT rotate the key: ensure_key restores the SAME key
+    from the 'SLEP managed key' credential (the DB copy) instead of minting a new one."""
+    _clear_managed_key()
+
+    def fake_run(cmd, **k):
+        if "-y" in cmd:                      # ssh-keygen -y: derive .pub from the priv
+            return Done(out="ssh-ed25519 RESTOREDPUB")
+        priv = cmd[cmd.index("-f") + 1]      # ssh-keygen -t: would mint a FRESH keypair
+        open(priv, "w").write("FRESHPRIV")
+        open(priv + ".pub", "w").write("ssh-ed25519 FRESHPUB slep-managed")
+        return Done()
+
+    monkeypatch.setattr(keydist.subprocess, "run", fake_run)
+    monkeypatch.setattr(keydist.shutil, "which", lambda n: "/usr/bin/" + n)
+    db.create_credential(keydist._CRED_NAME, kind="ssh", username="", secret="EXISTINGPRIV")
+    pub = keydist.ensure_key()               # data/ssh/ empty → must RESTORE, not regenerate
+    assert pub == "ssh-ed25519 RESTOREDPUB slep-managed"     # restored, not "FRESHPUB"
+    priv, _ = keydist._key_paths()
+    assert priv.read_text().strip() == "EXISTINGPRIV"        # the ORIGINAL key is back on disk
 
 
 def test_distribute_installs_and_creates_credential(client, monkeypatch):

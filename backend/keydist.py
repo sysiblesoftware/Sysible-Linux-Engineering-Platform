@@ -50,20 +50,85 @@ def _key_paths() -> tuple[Path, Path]:
     return d / "slep_ed25519", d / "slep_ed25519.pub"
 
 
-def ensure_key() -> str:
-    """Generate the SLEP managed keypair if absent; return the public key text."""
+def _restore_key_from_credential() -> bool:
+    """If the on-disk managed key is gone but the 'SLEP managed key' credential still
+    holds the private key (the DB persisted, but data/ssh/ did not — an ephemeral
+    container / unmounted volume), write it BACK to disk and re-derive the .pub, instead
+    of minting a brand-new key. This is what keeps the managed key STABLE: it only ever
+    rotates on an explicit regenerate, never silently on a restart (which would break
+    every VM/hypervisor built with the previous key). Returns True if it restored one."""
     priv, pub = _key_paths()
-    if not priv.exists() or not pub.exists():
-        keygen = shutil.which("ssh-keygen")
-        if not keygen:
-            raise RuntimeError("ssh-keygen is not available in this image.")
-        # -N '' → no passphrase (unattended runs); -C labels the key.
-        subprocess.run([keygen, "-t", "ed25519", "-N", "", "-C", "slep-managed",
-                        "-f", str(priv)], capture_output=True, text=True, check=True)
-        try:
-            os.chmod(priv, 0o600)
-        except OSError:
-            pass
+    keygen = shutil.which("ssh-keygen")
+    if not keygen:
+        return False
+    try:
+        for c in db.list_credentials(include_secret=True):
+            if c.get("name") == _CRED_NAME and (c.get("secret") or "").strip():
+                _ssh_dir()
+                sec = c["secret"]
+                with open(priv, "w") as f:
+                    f.write(sec if sec.endswith("\n") else sec + "\n")
+                os.chmod(priv, 0o600)
+                r = subprocess.run([keygen, "-y", "-f", str(priv)], capture_output=True, text=True)
+                if r.returncode == 0 and r.stdout.strip():
+                    pubtxt = r.stdout.strip()
+                    if "slep-managed" not in pubtxt:
+                        pubtxt += " slep-managed"
+                    pub.write_text(pubtxt + "\n")
+                    return True
+                # couldn't derive the pub (bad key) — drop the restored priv, mint fresh
+                try:
+                    priv.unlink()
+                except OSError:
+                    pass
+                return False
+    except Exception:  # noqa: BLE001
+        pass
+    return False
+
+
+def _backup_key_to_credential() -> None:
+    """Keep the private key in the 'SLEP managed key' credential so it survives a wiped
+    data/ssh/ dir (see _restore_key_from_credential). Updates the credential if it
+    exists (preserving its username), else creates it."""
+    priv = _key_paths()[0]
+    if not priv.exists():
+        return
+    try:
+        want = priv.read_text()
+        for c in db.list_credentials(include_secret=True):
+            if c.get("name") == _CRED_NAME:
+                if (c.get("secret") or "") != want:
+                    db.set_credential_secret(c["id"], want)
+                return
+        db.create_credential(_CRED_NAME, kind="ssh", username="", secret=want)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def ensure_key() -> str:
+    """Return the SLEP managed public key, generating the keypair ONCE if it has never
+    existed. If the on-disk key is missing, first try to restore it from the DB-backed
+    credential (so a non-persistent data/ssh/ dir doesn't silently rotate the key);
+    only mint a brand-new key when there's nothing to restore, and back it up so it's
+    never regenerated again."""
+    priv, pub = _key_paths()
+    if priv.exists() and pub.exists():
+        return pub.read_text().strip()
+    # On-disk key gone — recover the SAME key from the DB before making a new one.
+    if _restore_key_from_credential():
+        return pub.read_text().strip()
+    keygen = shutil.which("ssh-keygen")
+    if not keygen:
+        raise RuntimeError("ssh-keygen is not available in this image.")
+    # -N '' → no passphrase (unattended runs); -C labels the key.
+    subprocess.run([keygen, "-t", "ed25519", "-N", "", "-C", "slep-managed",
+                    "-f", str(priv)], capture_output=True, text=True, check=True)
+    try:
+        os.chmod(priv, 0o600)
+    except OSError:
+        pass
+    _backup_key_to_credential()   # so a future wiped data/ssh/ restores this key, not a new one
     return pub.read_text().strip()
 
 
