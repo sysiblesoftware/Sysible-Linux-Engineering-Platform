@@ -687,9 +687,13 @@ function NetworkPoolPicker({ values, set }) {
 // URI is what the generated Terraform uses; you can still edit it by hand.
 function LibvirtConnect({ values, set }) {
   const startRemote = /^qemu\+/.test(values.uri || '')
+  // Hydrate host/user from an existing qemu+ssh URI so reopening the panel shows the
+  // configured connection (otherwise the fields were blank and the Install-key button
+  // greyed out even though a hypervisor was already set).
+  const _m = /^qemu\+ssh:\/\/([^@/]+)@([^/]+)\//.exec(values.uri || '')
   const [mode, setMode] = useState(startRemote ? 'remote' : 'local')
-  const [host, setHost] = useState('')
-  const [user, setUser] = useState('root')
+  const [host, setHost] = useState(_m ? _m[2].split(':')[0] : '')
+  const [user, setUser] = useState(_m ? _m[1] : 'root')
   const [pw, setPw] = useState('')             // one-time host password (or vault.NAME)
   const [installing, setInstalling] = useState(null)  // {ok, output} | 'installing'
   const [key, setKey] = useState(null)        // {public_key, keyfile}

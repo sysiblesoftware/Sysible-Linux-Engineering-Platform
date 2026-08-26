@@ -2370,7 +2370,10 @@ def infra_hypervisor_volumes(body: dict = Body(...), user: str = Depends(current
         return {"ok": False, "volumes": [],
                 "output": "`virsh` (libvirt-clients) isn't installed on the SLEP host — type the volume name instead."}
     try:
-        p = subprocess.run(["virsh", "-c", uri, "--readonly", "vol-list", pool, "--name"],
+        # NOTE: no `--name` — older virsh builds reject it on vol-list ("doesn't support
+        # option --name"). Parse the default two-column (Name / Path) table instead,
+        # which works on every version; the volume name is the first column.
+        p = subprocess.run(["virsh", "-c", uri, "--readonly", "vol-list", pool],
                            capture_output=True, text=True, timeout=25, env=dict(os.environ))
     except subprocess.TimeoutExpired:
         return {"ok": False, "volumes": [], "output": "timed out talking to the hypervisor."}
@@ -2378,8 +2381,13 @@ def infra_hypervisor_volumes(body: dict = Body(...), user: str = Depends(current
         return {"ok": False, "volumes": [], "output": str(e)}
     if p.returncode != 0:
         return {"ok": False, "volumes": [], "output": (p.stderr or p.stdout or "vol-list failed").strip()}
-    # Disk images only — skip cloud-init ISOs and non-image artifacts.
-    vols = [v.strip() for v in p.stdout.splitlines() if v.strip()]
+    # First column of each data row is the volume name; drop the header + separator.
+    vols = []
+    for ln in p.stdout.splitlines():
+        ln = ln.strip()
+        if not ln or ln.startswith("Name") or set(ln) <= set("-"):
+            continue
+        vols.append(ln.split()[0])
     vols = [v for v in vols if not v.endswith("-ci.iso") and (
         v.endswith((".qcow2", ".img", ".raw", ".qcow", ".vmdk")) or "." not in v)]
     return {"ok": True, "volumes": sorted(vols), "output": f"{len(vols)} image(s) in pool '{pool}'."}
