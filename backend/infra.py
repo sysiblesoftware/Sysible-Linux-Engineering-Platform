@@ -602,16 +602,29 @@ def migrate_libvirt_main_tf(text: str) -> tuple[str, list[str]]:
                 1)
             notes.append("domain rebuilds on a cloud-init change (forces the reboot that applies it)")
     # 3) Size the VM disk. Older projects cloned the base image's tiny (~2GB) root with no
-    #    size, so a VM fills up on the first apt update. Add a 20GB literal to the disk
-    #    volume (a literal, not var.disk_size, so no variables.tf change is needed on an
-    #    existing project). cloud-init growpart then expands the filesystem to fill it.
+    #    size, so a VM fills up on the first apt update. Size the disk from var.disk_size
+    #    (GB) so it's editable — the companion variables.tf gets the variable (default 20)
+    #    via ensure_disk_size_var(). cloud-init growpart then expands the filesystem.
     if 'size' not in text and 'disk_size' not in text:   # no volume size set yet
         for anchor in ('base_volume_pool = var.pool', 'base_volume_id = libvirt_volume.base.id'):
             if anchor in text:
-                text = text.replace(anchor, anchor + '\n  size             = 21474836480  # 20 GiB', 1)
-                notes.append("VM disk sized to 20GB (was the cloud image's ~2GB root — no more 'No space left')")
+                text = text.replace(anchor, anchor + '\n  size             = var.disk_size * 1073741824', 1)
+                notes.append("VM disk sized from var.disk_size (default 20GB — edit variables.tf to change)")
                 break
     return text, notes
+
+
+def ensure_disk_size_var(variables_text: str) -> tuple[str, bool]:
+    """Ensure a libvirt project's variables.tf defines `disk_size` (GB), so the size
+    added to main.tf by migrate_libvirt_main_tf resolves. Appends the variable with a
+    20GB default if absent — the operator edits that default (or terraform.tfvars) to
+    pick any size. Returns (text, changed)."""
+    if 'disk_size' in variables_text:
+        return variables_text, False
+    block = ('\nvariable "disk_size" {\n  type    = number\n  default = 20   '
+             '# VM root disk in GB — set to whatever you need (e.g. 100)\n}\n')
+    sep = '' if variables_text.endswith('\n') else '\n'
+    return variables_text + sep + block, True
 
 
 def _render_proxmox(spec, keys):

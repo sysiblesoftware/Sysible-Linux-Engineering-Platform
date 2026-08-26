@@ -351,6 +351,19 @@ def launch(run_id: int) -> None:
                         main_tf.write_text(patched)
                         for n in notes:
                             emit(f"-- updated infrastructure: {n}")
+                    # If the disk-size patch put `var.disk_size` into main.tf, the
+                    # companion variables.tf must define it or terraform errors on an
+                    # undefined variable. Backfill it (default 20GB) whenever main.tf
+                    # references it — idempotent, and independent of `notes` so a project
+                    # already carrying the size but missing the var still gets repaired.
+                    if 'var.disk_size' in patched:
+                        vars_tf = db.project_dir(run["project_id"]) / "variables.tf"
+                        base = vars_tf.read_text() if vars_tf.exists() else ""
+                        new_vars, changed = _infra.ensure_disk_size_var(base)
+                        if changed:
+                            vars_tf.write_text(new_vars)
+                            emit("-- updated infrastructure: added disk_size variable "
+                                 "(default 20GB — edit variables.tf for any size)")
             except Exception:  # noqa: BLE001 — never block the apply over this
                 pass
 

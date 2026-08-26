@@ -1552,3 +1552,35 @@ def test_access_pick_password_credential_as_login(client):
     # No auto-created duplicate "<project> — login".
     names = [c["name"] for c in client.get("/credentials").json()["credentials"]]
     assert "Apps — login" not in names and "admin_pass" in names
+
+
+def test_migrate_libvirt_sizes_disk_from_var():
+    """A legacy libvirt main.tf (no volume size) gets `size = var.disk_size * ...`
+    folded into the clone, so the VM isn't stuck at the base image's tiny root."""
+    legacy = (
+        'resource "libvirt_volume" "disk" {\n'
+        '  base_volume_id = libvirt_volume.base.id\n'
+        '  pool             = var.pool\n'
+        '}\n'
+        'resource "libvirt_cloudinit_disk" "ci" {\n'
+        '  meta_data = "instance-id: ${var.name_prefix}-${count.index + 1}\\n"\n'
+        '}\n'
+        'resource "libvirt_domain" "vm" {\n'
+        '  cloudinit = libvirt_cloudinit_disk.ci[count.index].id\n'
+        '}\n'
+    )
+    patched, notes = infra.migrate_libvirt_main_tf(legacy)
+    assert "var.disk_size * 1073741824" in patched
+    assert any("disk" in n.lower() for n in notes)
+    # Idempotent: a second pass over the patched text adds nothing new.
+    again, notes2 = infra.migrate_libvirt_main_tf(patched)
+    assert "var.disk_size" not in again or notes2 == [] or "disk" not in " ".join(notes2).lower()
+
+
+def test_ensure_disk_size_var_appends_once():
+    """variables.tf gains a `disk_size` variable (default 20) exactly once."""
+    base = 'variable "pool" {\n  type = string\n}\n'
+    out, changed = infra.ensure_disk_size_var(base)
+    assert changed and 'variable "disk_size"' in out and "default = 20" in out
+    out2, changed2 = infra.ensure_disk_size_var(out)
+    assert changed2 is False and out2 == out
