@@ -40,10 +40,6 @@ function buildActions(r, { controllers, setPipe, setVms, setEnrollFor, setJumpFo
     try { const d = await api(`infra/${r.project_id}/inventory`, { method: 'POST' }); alert(`Built inventory “${d.name}” with ${d.hosts} host(s).`) }
     catch (e) { alert(e.message) }
   }
-  const scaffold = async (stage) => {
-    try { const d = await api(`infra/${r.project_id}/scaffold`, { method: 'POST', json: { stage } }); openProj({ openFile: d.path }) }
-    catch (e) { alert(e.message) }
-  }
   const listVms = async () => {
     setVms({ name: r.project_name, loading: true })
     try { const d = await api(`infra/${r.project_id}/vms`, { method: 'POST' }); setVms({ name: r.project_name, list: d.vms || [], error: d.ok ? '' : d.output }) }
@@ -85,9 +81,7 @@ function buildActions(r, { controllers, setPipe, setVms, setEnrollFor, setJumpFo
     ['Access', () => setJumpFor(r), 'ghost', 'Login user, password (Vault) and jump host'],
     ['Prepare jump host', () => setPrepFor(r), 'ghost', "Install SLEP's key on the jump host (hypervisor) with a one-time password, so runs hop through it with the key"],
     ['Enroll', () => enroll(), 'primary', 'Register the applied VMs into a Controller'],
-    ['Configure', () => scaffold('configure'), 'ghost', 'Scaffold an Ansible playbook and open it'],
-    ['Maintain', () => scaffold('maintain'), 'ghost', 'Scaffold a Salt state and open it'],
-    ['Cadence', cadence, 'primary', 'Run the whole cadence: apply → configure → maintain'],
+    ['Cadence', cadence, 'primary', 'Run the whole flow: apply → inventory → configure (Ansible) → maintain (Salt). Scaffolds the playbook/state if missing.'],
   ].map(([label, fn, cls, title, danger]) => ({ label, fn, cls, title, danger, enroll }))
 }
 
