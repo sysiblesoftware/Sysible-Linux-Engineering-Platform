@@ -75,7 +75,14 @@ def _render_roster(hosts, credential, key_path, dest: Path, bastion: str = "",
             entry["sudo"] = True
         if bastion:
             proxy = _proxy_for(addr)
-            entry["ssh_options"] = ([f"ProxyCommand={proxy}"] if proxy else [f"ProxyJump={bastion}"]) \
+            # The ProxyCommand VALUE must be double-quoted inside the roster string:
+            # salt-ssh emits each ssh_options entry as a raw `-o {opt}` into a shell
+            # command with no quoting of its own, so an unquoted `ProxyCommand=ssh -o …`
+            # is split on the first space — the outer ssh reads ProxyCommand as the bare
+            # word "ssh", runs it with no destination, and dies with an ssh usage error
+            # ("Connection closed by UNKNOWN port 65535"). Quoting keeps the whole nested
+            # ssh together as one option value (this is the form salt's own docs show).
+            entry["ssh_options"] = ([f'ProxyCommand="{proxy}"'] if proxy else [f"ProxyJump={bastion}"]) \
                 + ["StrictHostKeyChecking=no"]
         roster[h["name"]] = entry
     dest.write_text(yaml.safe_dump(roster, default_flow_style=False))
