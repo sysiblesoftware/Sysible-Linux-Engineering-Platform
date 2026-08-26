@@ -92,6 +92,10 @@ PROVIDERS = {
             {"key": "memory", "label": "Memory (MB)", "type": "select", "default": "2048",
              "choices": ["1024", "2048", "4096", "8192", "16384"]},
             {"key": "vcpu", "label": "vCPUs", "type": "select", "default": "2", "choices": ["1", "2", "4", "8"]},
+            {"key": "disk_size", "label": "Root disk (GB)", "type": "number", "default": 20,
+             "help": "The VM's root disk. Cloud images ship a tiny (~2GB) root, so pick enough headroom "
+                     "for packages — the copy-on-write clone is grown to this and cloud-init's growpart "
+                     "expands the filesystem to fill it on first boot."},
             {"key": "pool", "label": "Storage pool", "type": "text", "default": "default"},
             {"key": "base_volume", "label": "Existing pool volume (optional — skips download)", "type": "text",
              "default": "",
