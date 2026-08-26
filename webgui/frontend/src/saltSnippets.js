@@ -14,6 +14,7 @@ export const SNIPPET_GROUPS = [
       t('Run once (creates/unless)', 'cmd.run unless idempotent creates', `bootstrap_once:\n  cmd.run:\n    - name: /usr/local/bin/bootstrap.sh\n    - creates: /var/lib/bootstrapped\n`),
       t('Show a message (test)', 'debug print test show_notification', `show_message:\n  test.show_notification:\n    - text: "value applied by SLEP"\n`),
       t('No-op / succeed', 'test.succeed_without_changes noop ping', `ok:\n  test.succeed_without_changes:\n    - name: reachable\n`),
+      t('Wait for a port', 'wait port ready block until listen retry', `# Salt has no wait_for state; poll the port with a short retry loop.\nwait_for_port:\n  cmd.run:\n    - name: 'for i in $(seq 1 30); do (exec 3<>/dev/tcp/127.0.0.1/8080) 2>/dev/null && exit 0; sleep 2; done; exit 1'\n`),
       t('Gather grains (facts)', 'grains facts setup', `# Grains are Salt's facts. Reference them inline, e.g. {{ grains['os_family'] }}\n# or dump them:  salt-ssh '*' grains.items\nshow_os:\n  test.show_notification:\n    - text: "os_family is {{ grains['os_family'] }}"\n`),
       t('Include another state', 'include import', `include:\n  - common\n  - webserver\n`),
       t('Require / dependency', 'require order dependency', `start_app:\n  service.running:\n    - name: app\n    - require:\n      - pkg: install_app\n`),
@@ -24,6 +25,7 @@ export const SNIPPET_GROUPS = [
     items: [
       t('Create a user', 'user.present account add', `create_user:\n  user.present:\n    - name: deploy\n    - shell: /bin/bash\n    - home: /home/deploy\n    - groups:\n      - sudo\n`),
       t('Set / unlock password', 'password lock passwd hash', `set_password:\n  user.present:\n    - name: deploy\n    # sha512 crypt hash (e.g. from: openssl passwd -6)\n    - password: "$6$rounds=656000$examplehash"\n`),
+      t('Add a user to group(s)', 'user group append supplementary member add', `# user.present's 'groups' REPLACES the user's group list. Keep the others with\n# remove_groups: False (or use optional_groups to only ADD, never remove).\nadd_user_to_groups:\n  user.present:\n    - name: deploy\n    - groups:\n      - docker\n      - sudo\n    - remove_groups: False\n`),
       t('Create a group', 'group.present', `create_group:\n  group.present:\n    - name: engineering\n`),
       t('Sudo access (drop-in)', 'sudo sudoers wheel', `engineering_sudo:\n  file.managed:\n    - name: /etc/sudoers.d/engineering\n    - contents: "%engineering ALL=(ALL) NOPASSWD:ALL"\n    - mode: "0440"\n    - check_cmd: visudo -cf\n`),
       t('Authorized SSH key', 'ssh_auth authorized key', `deploy_key:\n  ssh_auth.present:\n    - user: deploy\n    - source: salt://files/id_ed25519.pub\n`),
@@ -35,6 +37,7 @@ export const SNIPPET_GROUPS = [
       t('Install a package', 'pkg.installed install', `install_package:\n  pkg.installed:\n    - name: your-package\n`),
       t('Install several packages', 'pkg.installed list multiple', `install_tools:\n  pkg.installed:\n    - pkgs:\n      - git\n      - curl\n      - htop\n`),
       t('Keep package at latest', 'pkg.latest upgrade', `keep_updated:\n  pkg.latest:\n    - name: your-package\n`),
+      t('Install Python packages (pip)', 'pip python packages pip3', `install_pip_pkgs:\n  pip.installed:\n    - pkgs:\n      - requests\n`),
       t('Update all packages', 'pkg.uptodate upgrade patch dist', `upgrade_all:\n  pkg.uptodate:\n    - refresh: True\n`),
       t('Add an apt repository', 'pkgrepo apt repo ppa', `add_apt_repo:\n  pkgrepo.managed:\n    - humanname: Example repo\n    - name: deb https://example.com/apt stable main\n    - file: /etc/apt/sources.list.d/example.list\n`),
       t('Add a yum/dnf repository', 'pkgrepo yum dnf repo', `add_yum_repo:\n  pkgrepo.managed:\n    - name: example\n    - humanname: Example repo\n    - baseurl: https://example.com/rpm/\n    - gpgcheck: 0\n`),
@@ -78,6 +81,7 @@ export const SNIPPET_GROUPS = [
     group: 'Files & Permissions',
     items: [
       t('Manage a file', 'file.managed copy content', `app_config:\n  file.managed:\n    - name: /etc/app/app.conf\n    - source: salt://files/app.conf\n    - user: root\n    - group: root\n    - mode: "0644"\n`),
+      t('Download a file', 'download url http source get fetch curl wget', `# An http(s) source needs a source_hash so Salt can verify the download.\ndownload_file:\n  file.managed:\n    - name: /opt/app.tar.gz\n    - source: https://example.com/app.tar.gz\n    - source_hash: sha256=REPLACE_WITH_SHA256\n    - mode: "0644"\n`),
       t('Manage a file (template)', 'file.managed jinja template', `rendered_config:\n  file.managed:\n    - name: /etc/app/app.conf\n    - source: salt://templates/app.conf.jinja\n    - template: jinja\n    - context:\n        port: 8080\n`),
       t('Directory with permissions', 'file.directory mkdir chmod', `app_dir:\n  file.directory:\n    - name: /opt/app\n    - user: deploy\n    - group: deploy\n    - mode: "0755"\n    - makedirs: True\n`),
       t('Ensure a line in a file', 'file.line lineinfile edit', `enable_forwarding:\n  file.line:\n    - name: /etc/sysctl.conf\n    - content: "net.ipv4.ip_forward = 1"\n    - mode: ensure\n    - match: "net.ipv4.ip_forward"\n`),

@@ -60,12 +60,14 @@ export const SNIPPET_GROUPS = [
       t('Ping', 'ping', `    - name: Ping the host\n      ansible.builtin.ping:\n`),
       t('Gather facts', 'setup facts', `    - name: Gather facts\n      ansible.builtin.setup:\n`),
       t('Assert a condition', 'assert check', `    - name: Assert a condition\n      ansible.builtin.assert:\n        that:\n          - ansible_facts['os_family'] is defined\n        fail_msg: "condition not met"\n`),
+      t('Wait for a port / file', 'wait_for port ready block until listen', `    - name: Wait for a port to accept connections\n      ansible.builtin.wait_for:\n        host: 127.0.0.1\n        port: 8080\n        state: started\n        timeout: 60\n`),
     ],
   },
   {
     group: 'Users & Groups',
     items: [
       t('Create user', 'user account add', `    - name: Create a user\n      ansible.builtin.user:\n        name: deploy\n        groups: sudo,wheel\n        append: true\n        shell: /bin/bash\n        create_home: true\n      become: true\n`),
+      t('Add a user to group(s)', 'user group append supplementary member usermod add', `    - name: Add an existing user to supplementary groups\n      ansible.builtin.user:\n        name: deploy\n        groups: docker,sudo\n        append: true      # WITHOUT this, 'groups' REPLACES the user's memberships\n      become: true\n`),
       t('Set / lock password', 'password lock passwd', `    - name: Set a user's password (hashed) and unlock\n      ansible.builtin.user:\n        name: deploy\n        password: "{{ 'changeme' | password_hash('sha512') }}"\n        password_lock: false\n      become: true\n`),
       t('Create group', 'group', `    - name: Create a group\n      ansible.builtin.group:\n        name: engineering\n        state: present\n      become: true\n`),
       t('Sudo access (drop-in)', 'sudo sudoers wheel', `    - name: Grant passwordless sudo to a group\n      ansible.builtin.copy:\n        dest: /etc/sudoers.d/engineering\n        content: "%engineering ALL=(ALL) NOPASSWD:ALL\\n"\n        mode: "0440"\n        validate: 'visudo -cf %s'\n      become: true\n`),
@@ -78,6 +80,7 @@ export const SNIPPET_GROUPS = [
       t('Install packages (any distro)', 'package install', `    - name: Install packages\n      ansible.builtin.package:\n        name:\n          - your-package\n        state: present\n      become: true\n`),
       t('Install (apt)', 'apt debian ubuntu', `    - name: Install apt packages\n      ansible.builtin.apt:\n        # Don't pin an exact build (e.g. name: nginx=1.24.0-2ubuntu7.11): Ubuntu keeps\n        # only the current build in the pool, so a pinned one 404s once a security\n        # update supersedes it. Name the package alone for the current version.\n        name: [your-package]\n        state: present\n        update_cache: true\n        cache_valid_time: 3600\n      become: true\n`),
       t('Install (dnf)', 'dnf yum rocky fedora rhel', `    - name: Install dnf packages\n      ansible.builtin.dnf:\n        name: [your-package]\n        state: present\n      become: true\n`),
+      t('Install Python packages (pip)', 'pip python packages pip3 requirements', `    - name: Install Python packages\n      ansible.builtin.pip:\n        name:\n          - requests\n        state: present\n      become: true\n`),
       t('Update all packages', 'upgrade update patch', `    - name: Upgrade all packages\n      ansible.builtin.package:\n        name: "*"\n        state: latest\n      become: true\n`),
       t('Add apt repository', 'repo apt ppa', `    - name: Add an apt repository\n      ansible.builtin.apt_repository:\n        repo: "deb https://example.com/apt stable main"\n        state: present\n      become: true\n`),
       t('Add yum/dnf repository', 'repo yum dnf', `    - name: Add a yum/dnf repository\n      ansible.builtin.yum_repository:\n        name: example\n        description: Example repo\n        baseurl: https://example.com/rpm/\n        gpgcheck: false\n      become: true\n`),
@@ -123,6 +126,7 @@ export const SNIPPET_GROUPS = [
     group: 'Files & Permissions',
     items: [
       t('Copy file', 'copy file', `    - name: Copy a file\n      ansible.builtin.copy:\n        src: files/app.conf\n        dest: /etc/app/app.conf\n        owner: root\n        group: root\n        mode: "0644"\n      become: true\n`),
+      t('Download a file', 'download get_url url http fetch curl wget', `    - name: Download a file\n      ansible.builtin.get_url:\n        url: https://example.com/app.tar.gz\n        dest: /opt/app.tar.gz\n        mode: "0644"\n      become: true\n`),
       t('Template (Jinja2)', 'template jinja', `    - name: Render a template\n      ansible.builtin.template:\n        src: templates/app.conf.j2\n        dest: /etc/app/app.conf\n        mode: "0644"\n      become: true\n`),
       t('Directory / permissions', 'file directory mkdir chmod chown', `    - name: Ensure a directory exists with permissions\n      ansible.builtin.file:\n        path: /opt/app\n        state: directory\n        owner: deploy\n        group: deploy\n        mode: "0755"\n      become: true\n`),
       t('Line in file', 'lineinfile config edit', `    - name: Ensure a config line is present\n      ansible.builtin.lineinfile:\n        path: /etc/sysctl.conf\n        regexp: '^net.ipv4.ip_forward'\n        line: 'net.ipv4.ip_forward = 1'\n      become: true\n`),
@@ -186,6 +190,7 @@ export const SNIPPET_GROUPS = [
     group: 'Backup & Maintenance',
     items: [
       t('Archive files', 'backup archive tar compress', `    - name: Archive a directory\n      community.general.archive:\n        path: /etc/app\n        dest: /backups/app.tgz\n        format: gz\n      become: true\n`),
+      t('Extract an archive', 'unarchive extract tar untar unzip decompress', `    - name: Extract an archive already on the host\n      ansible.builtin.unarchive:\n        src: /opt/app.tar.gz\n        dest: /opt/app\n        remote_src: true   # false = copy the archive from the control node first\n      become: true\n`),
       t('Rsync (synchronize)', 'backup rsync sync copy', `    - name: Sync a directory\n      ansible.posix.synchronize:\n        src: /data/\n        dest: /backups/data/\n`),
       t('Reboot the host', 'reboot restart', `    - name: Reboot the host\n      ansible.builtin.reboot:\n        reboot_timeout: 600\n      become: true\n`),
       t('OS release upgrade (assess)', 'upgrade release leapp do-release-upgrade', `    - name: Check for a distribution upgrade (Ubuntu)\n      ansible.builtin.command: do-release-upgrade -c\n      register: relup\n      changed_when: false\n      failed_when: false\n      become: true\n`),
