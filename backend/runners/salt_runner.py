@@ -39,13 +39,18 @@ def _render_roster(hosts, credential, key_path, dest: Path, bastion: str = "",
     # the SAME way the Ansible runner does it — because the bastion only trusts that key
     # ("Prepare jump host" installs it). A bare ProxyJump offers the bastion nothing
     # usable and the hop is refused (this was why Salt runs failed through a jump host).
-    proxy = ""
-    if bastion:
-        if bastion_key:
-            proxy = (f"ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
-                     f"-o BatchMode=yes -o ConnectTimeout=15 -i '{bastion_key}' -W %h:%p {bastion}")
-        else:
-            proxy = ""   # fall back to ProxyJump below if we have no key
+    #
+    # The ProxyCommand's forward target is the CONCRETE host address (built per host
+    # below), NOT the `%h:%p` tokens: salt-ssh doesn't percent-expand those inside a
+    # roster ProxyCommand the way a config-file ProxyCommand does, so the inner ssh
+    # received the literal string and died with "Bad stdio forwarding specification
+    # '%h:%p'". We know each target's address at render time, so substitute it directly.
+    def _proxy_for(target_addr: str) -> str:
+        if not (bastion and bastion_key):
+            return ""
+        return (f"ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
+                f"-o BatchMode=yes -o ConnectTimeout=15 -i '{bastion_key}' "
+                f"-W {target_addr}:22 {bastion}")
     # Build the roster as a dict and serialise with yaml.safe_dump: it quotes/escapes
     # every value, so a host address, username, ProxyCommand, or password can never
     # inject a sibling roster key (the salt-ssh equivalent of the INI-injection RCE).
@@ -69,6 +74,7 @@ def _render_roster(hosts, credential, key_path, dest: Path, bastion: str = "",
             entry["passwd"] = str(credential["secret"])
             entry["sudo"] = True
         if bastion:
+            proxy = _proxy_for(addr)
             entry["ssh_options"] = ([f"ProxyCommand={proxy}"] if proxy else [f"ProxyJump={bastion}"]) \
                 + ["StrictHostKeyChecking=no"]
         roster[h["name"]] = entry
