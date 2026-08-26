@@ -272,6 +272,14 @@ def _cloudinit(ssh_user: str, keys: list[str], password: str = "", hashed_passwo
         lines.append(f'    hashed_passwd: "{hashed}"')
     lines.append("    ssh_authorized_keys:")
     lines += [f"      - {k}" for k in clean] if clean else ["      []"]
+    # Create the sudo groups at the TOP LEVEL first, so the user's `groups:` above always
+    # references groups that EXIST. Without this, `groups: [sudo, wheel]` FAILS user
+    # creation on a distro that's missing one of them — `wheel` on Ubuntu/Debian, `sudo`
+    # on RHEL/Rocky/openSUSE — because useradd errors on an unknown group, so the login
+    # account is never created (cloud-init: "1 failure", and neither the named user nor
+    # the image default lands). cloud-init processes top-level groups BEFORE users, and
+    # creating an already-existing group is a harmless no-op.
+    lines.append("groups: [sudo, wheel]")
     lines.append("package_update: true")
     lines.append(f"ssh_pwauth: {'true' if hashed else 'false'}")
 
