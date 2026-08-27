@@ -285,13 +285,22 @@ label.fld{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--
 .pipe-dot{width:9px;height:9px;border-radius:50%;flex:0 0 auto}
 .pipe-arrow{display:inline-flex;align-items:center;color:var(--faint)}
 
-/* Stacked per-stage visualizations under the pipeline flow — every stage shown at
-   once, no clicking required. The header doubles as a jump-to-that-stage's-log. */
-.stage-block{border:1px solid var(--line);border-radius:10px;margin:10px 0;overflow:hidden}
-.stage-block.current{outline:2px solid var(--accent);outline-offset:1px}
-.stage-block-h{display:flex;align-items:center;gap:8px;padding:6px 10px;background:var(--panel);
-  cursor:pointer;font-size:12.5px;text-transform:capitalize}
+/* Every stage shown at once, flowing as ONE continuous window (no per-stage card /
+   frame). A thin rule separates stages; a small label above each doubles as a
+   jump-to-that-stage's-log. The label — not a box — marks the stage you're viewing. */
+.stage-block{margin:0}
+.stage-block + .stage-block{margin-top:14px;padding-top:12px;border-top:1px solid var(--line)}
+.stage-block-h{display:flex;align-items:center;gap:8px;padding:0 2px 6px;cursor:pointer;
+  font-size:12px;text-transform:capitalize;color:var(--muted)}
+.stage-block.current > .stage-block-h{color:var(--text)}
+.stage-block.current > .stage-block-h b{color:var(--accent)}
 .stage-block-h .pill{margin-left:auto}
+/* Inside the stacked view each stage's diagram flows at its NATURAL height — no fixed
+   300px resizable box, no framed panel — so the stages read as one continuous window.
+   (The single-run view, not inside .stage-block, keeps its resizable flow box.) */
+.stage-block .flow-resize{resize:none;height:auto;min-height:0;max-height:none;overflow-x:auto}
+.stage-block .viz-flow-box{border:0;background:transparent;padding:0}
+.stage-block .viz{gap:8px}
 
 /* Organizations / Teams — role pills, team member chips, selected row. */
 .pill.role-admin{background:rgba(109,219,115,.16);color:var(--green,#63c869)}
