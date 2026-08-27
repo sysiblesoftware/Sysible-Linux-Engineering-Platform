@@ -19,6 +19,45 @@ export default function RunViz({ engine, model, seedHosts }) {
   return <AnsibleViz model={model} seedHosts={seedHosts} />
 }
 
+// The WHOLE run as a stage flow — Terraform → Inventory → Ansible → Salt (whatever
+// steps were launched) — shown above the per-stage detail. Each node is one step's
+// run, coloured by its status, the one you're viewing ringed. Clicking a stage opens
+// that step's run, which swaps BOTH the detail viz and the log below to it — so the
+// log and steps track the stage you select. Renders nothing for a lone (non-pipeline)
+// run. `seq` is the group's runs [{id, kind, target, status}], from /pipelines/runs.
+const STAGE_ICON = { terraform: '⬢', inventory: '▤', ansible: '⏻', salt: '◆' }
+const STAGE_COLOR = {
+  success: 'var(--ok,#63c869)', failed: 'var(--err,#e5534b)', canceled: '#7d8ca3',
+  running: 'var(--warn,#e0a83b)', queued: '#7d8ca3', pending: '#7d8ca3',
+}
+export function PipelineFlow({ seq, runId, onOpenRun }) {
+  if (!seq || seq.length < 2) return null
+  return (
+    <div className="pipe-flow">
+      {seq.map((s, i) => {
+        const col = STAGE_COLOR[s.status] || STAGE_COLOR.pending
+        const current = s.id === runId
+        const label = (s.kind || '').charAt(0).toUpperCase() + (s.kind || '').slice(1)
+        return (
+          <React.Fragment key={s.id}>
+            <button className={'pipe-stage' + (current ? ' current' : '')} style={{ borderColor: col }}
+              title={`${s.kind} · ${s.target} · ${s.status}${current ? ' — viewing' : ' — click to view this stage'}`}
+              onClick={() => !current && onOpenRun && onOpenRun(s.id)}>
+              <span className="pipe-ico" style={{ color: col }}>{STAGE_ICON[s.kind] || '●'}</span>
+              <span className="pipe-body">
+                <b>{label}</b>
+                <span className="faint mono">{s.target}</span>
+              </span>
+              <span className={'pipe-dot' + (s.status === 'running' ? ' pulse' : '')} style={{ background: col }} />
+            </button>
+            {i < seq.length - 1 && <span className="pipe-arrow" aria-hidden="true">→</span>}
+          </React.Fragment>
+        )
+      })}
+    </div>
+  )
+}
+
 // The pipeline's auto-inventory pseudo-step: no hosts to reach, it just reads the
 // freshly-applied VMs into the project's inventory. Surface the hosts it built and
 // the outcome (parsed from the run log) rather than an empty Ansible grid.
@@ -258,7 +297,15 @@ const aggStatus = (rs) => rs.some((r) => r.status === 'error') ? 'error'
 
 function TerraformViz({ model }) {
   const sum = model.applied || model.plan
-  const label = model.applied ? 'Applied' : model.errored ? 'Error' : model.plan ? (Object.values(model.resources).some((r) => r.status !== 'planned') ? 'Applying…' : 'Planned') : 'Working…'
+  // Is this a destroy? (all-destroy actions, or a plan that only destroys.) Drives
+  // the wording so a teardown reads "Destroying…/Destroyed/destroyed" — not "created".
+  const acts = Object.values(model.resources).map((r) => r.action)
+  const isDestroy = (acts.length > 0 && acts.includes('destroy') && !acts.includes('create') && !acts.includes('update'))
+    || (!!model.plan && model.plan.add === 0 && model.plan.change === 0 && model.plan.destroy > 0)
+  const anyBusy = Object.values(model.resources).some((r) => r.status !== 'planned')
+  const label = isDestroy
+    ? (model.applied ? 'Destroyed' : model.errored ? 'Error' : model.plan ? (anyBusy ? 'Destroying…' : 'Planned') : 'Working…')
+    : (model.applied ? 'Applied' : model.errored ? 'Error' : model.plan ? (anyBusy ? 'Applying…' : 'Planned') : 'Working…')
 
   // Group resources by their trailing [N] index → one machine each; the rest is
   // shared infrastructure.
@@ -269,7 +316,15 @@ function TerraformViz({ model }) {
     else loose.push({ addr, kind: compKind(addr), ...r })
   }
   const mlist = Object.values(machines).sort((a, b) => Number(a.key) - Number(b.key))
-    .map((m) => ({ ...m, status: aggStatus(m.comps) }))
+    // Prefer the real VM name (the domain resource's `name = "…"`, e.g. prod-web-1)
+    // over a generic "Machine N"; fall back to any named component, then the index.
+    .map((m) => ({
+      ...m,
+      status: aggStatus(m.comps),
+      name: (m.comps.find((c) => c.kind === 'machine') || {}).name
+        || (m.comps.find((c) => c.name) || {}).name || '',
+    }))
+  const mlabel = (m) => m.name || `Machine ${Number(m.key) + 1}`
   const compOrder = { disk: 0, 'cloud-init': 1, NIC: 2, machine: 3 }
   const sortComps = (cs) => [...cs].sort((a, b) => (compOrder[a.kind] ?? 5) - (compOrder[b.kind] ?? 5))
 
@@ -295,12 +350,12 @@ function TerraformViz({ model }) {
             {mlist.length > 0 && (
               <div className="viz-flow-box">
                 <div className="flow-legend faint">
-                  <span><i style={{ background: TF_STATUS_COLOR.complete }} />created</span>
-                  <span><i style={{ background: TF_STATUS_COLOR['in-progress'] }} />building</span>
+                  <span><i style={{ background: TF_STATUS_COLOR.complete }} />{isDestroy ? 'destroyed' : 'created'}</span>
+                  <span><i style={{ background: TF_STATUS_COLOR['in-progress'] }} />{isDestroy ? 'destroying' : 'building'}</span>
                   <span><i style={{ background: TF_STATUS_COLOR.planned }} />planned</span>
                   <span><i style={{ background: TF_STATUS_COLOR.error }} />error</span>
                 </div>
-                <div className="flow-resize"><MachineFlow machines={mlist} /></div>
+                <div className="flow-resize"><MachineFlow machines={mlist} isDestroy={isDestroy} mlabel={mlabel} /></div>
               </div>
             )}
 
@@ -311,7 +366,7 @@ function TerraformViz({ model }) {
                 return (
                   <div key={m.key} className="viz-host" style={{ borderLeft: `3px solid ${col}` }}>
                     <div className="row" style={{ justifyContent: 'space-between' }}>
-                      <b className="mono" style={{ fontSize: 13 }}>Machine {Number(m.key) + 1}</b>
+                      <b className="mono" style={{ fontSize: 13 }}>{mlabel(m)}</b>
                       {m.status === 'in-progress'
                         ? <span className="dot pulse" style={{ background: col }} />
                         : <span className="dot" style={{ background: col }} />}
@@ -322,14 +377,14 @@ function TerraformViz({ model }) {
                           <span className="dot" style={{ background: TF_STATUS_COLOR[c.status], width: 7, height: 7 }} />
                           <span style={{ minWidth: 66 }}>{c.kind}</span>
                           <span className="faint">
-                            {c.status === 'complete' ? (c.took ? `done in ${c.took}` : 'done')
-                              : c.status === 'in-progress' ? (c.elapsed ? `building… ${c.elapsed}` : 'building…')
+                            {c.status === 'complete' ? (c.took ? `${isDestroy ? 'removed' : 'done'} in ${c.took}` : (isDestroy ? 'removed' : 'done'))
+                              : c.status === 'in-progress' ? (isDestroy ? (c.elapsed ? `destroying… ${c.elapsed}` : 'destroying…') : (c.elapsed ? `building… ${c.elapsed}` : 'building…'))
                                 : c.status === 'error' ? 'error' : 'planned'}
                           </span>
                         </div>
                       ))}
                     </div>
-                    {busy && busy.kind === 'disk' && <div className="faint" style={{ fontSize: 10.5, marginTop: 4 }}>disk is slow while the base image is copied</div>}
+                    {!isDestroy && busy && busy.kind === 'disk' && <div className="faint" style={{ fontSize: 10.5, marginTop: 4 }}>disk is slow while the base image is copied</div>}
                   </div>
                 )
               })}
@@ -361,7 +416,7 @@ function TerraformViz({ model }) {
 // status (green created · amber building · dim planned · red error), with a live
 // elapsed on whatever's still building — the Terraform analogue of the Ansible
 // host-reach flow.
-function MachineFlow({ machines }) {
+function MachineFlow({ machines, isDestroy = false, mlabel = (m) => `Machine ${Number(m.key) + 1}` }) {
   const n = machines.length
   const rowH = n > 12 ? 22 : 30
   const H = Math.max(90, n * rowH + 16)
@@ -385,11 +440,11 @@ function MachineFlow({ machines }) {
               {m.status === 'in-progress'
                 ? <circle cx={nodeX} cy={y} r={5.5} fill="none" stroke={col} strokeWidth="2" className="pulse" />
                 : <circle cx={nodeX} cy={y} r={5} fill={col} fillOpacity={active ? 1 : 0.3} />}
-              <text x={nameX} y={y - 2} fontSize="12" fill="var(--text)" className="mono">Machine {Number(m.key) + 1}</text>
+              <text x={nameX} y={y - 2} fontSize="12" fill="var(--text)" className="mono">{mlabel(m)}</text>
               <text x={nameX} y={y + 11} fontSize="10.5" fill="var(--muted)">
-                {m.status === 'complete' ? 'created'
+                {m.status === 'complete' ? (isDestroy ? 'destroyed' : 'created')
                   : m.status === 'error' ? 'error'
-                    : busy ? `building ${busy.kind}${busy.elapsed ? ' · ' + busy.elapsed : ''} (${done}/${m.comps.length})`
+                    : busy ? `${isDestroy ? 'destroying' : 'building'} ${busy.kind}${busy.elapsed ? ' · ' + busy.elapsed : ''} (${done}/${m.comps.length})`
                       : 'planned'}
               </text>
             </g>

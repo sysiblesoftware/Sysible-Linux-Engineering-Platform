@@ -65,13 +65,21 @@ export function parseTerraform(text) {
   const resources = {}
   const res = (addr) => resources[addr] || (resources[addr] = { action: 'noop', status: 'planned' })
   let plan = null, applied = null, errored = false
+  // Track the resource whose plan block we're inside so we can capture its real
+  // `name = "…"` attribute (the VM's name, e.g. prod-web-1) — shown in the viz
+  // instead of a generic "Machine N". Only the first name per block is the
+  // resource's own; reset on each new block.
+  let blockAddr = null, gotName = false
 
   for (const line of t.split('\n')) {
     let m
-    if ((m = line.match(/^\s*#\s*(\S+)\s+will be created/))) { res(m[1]).action = 'create' }
-    else if ((m = line.match(/^\s*#\s*(\S+)\s+will be updated/))) { res(m[1]).action = 'update' }
-    else if ((m = line.match(/^\s*#\s*(\S+)\s+will be destroyed/))) { res(m[1]).action = 'destroy' }
-    else if ((m = line.match(/^\s*#\s*(\S+)\s+must be replaced/))) { res(m[1]).action = 'replace' }
+    if ((m = line.match(/^\s*#\s*(\S+)\s+will be created/))) { res(m[1]).action = 'create'; blockAddr = m[1]; gotName = false }
+    else if ((m = line.match(/^\s*#\s*(\S+)\s+will be updated/))) { res(m[1]).action = 'update'; blockAddr = m[1]; gotName = false }
+    else if ((m = line.match(/^\s*#\s*(\S+)\s+will be destroyed/))) { res(m[1]).action = 'destroy'; blockAddr = m[1]; gotName = false }
+    else if ((m = line.match(/^\s*#\s*(\S+)\s+must be replaced/))) { res(m[1]).action = 'replace'; blockAddr = m[1]; gotName = false }
+    else if (blockAddr && !gotName && (m = line.match(/^\s*[+~-]?\s*name\s*=\s*"([^"]+)"/))) {
+      res(blockAddr).name = m[1]; gotName = true
+    }
     else if ((m = line.match(/^(\S+):\s*Creating\.\.\./))) { res(m[1]).action = 'create'; res(m[1]).status = 'in-progress' }
     else if ((m = line.match(/^(\S+):\s*Modifying\.\.\./))) { res(m[1]).action = 'update'; res(m[1]).status = 'in-progress' }
     else if ((m = line.match(/^(\S+):\s*Destroying\.\.\./))) { res(m[1]).action = 'destroy'; res(m[1]).status = 'in-progress' }
@@ -85,6 +93,8 @@ export function parseTerraform(text) {
       plan = { add: +m[1], change: +m[2], destroy: +m[3] }
     } else if ((m = line.match(/Apply complete!\s*Resources:\s*(\d+) added,\s*(\d+) changed,\s*(\d+) destroyed/))) {
       applied = { add: +m[1], change: +m[2], destroy: +m[3] }
+    } else if ((m = line.match(/Destroy complete!\s*Resources:\s*(\d+) destroyed/))) {
+      applied = { add: 0, change: 0, destroy: +m[1] }
     } else if (/^Error:/.test(line)) errored = true
   }
   return { engine: 'terraform', resources, plan, applied, errored }

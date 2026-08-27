@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { api, tail, getTheme } from '../api.js'
 import { parseRun } from '../runParse.js'
-import RunViz from './RunViz.jsx'
+import RunViz, { PipelineFlow } from './RunViz.jsx'
 import { RunModal } from './Ide.jsx'
 import { Modal, Field } from '../ui.jsx'
 
@@ -283,20 +283,6 @@ export function RunLog({ runId, onBack, onOpenRun }) {
           </div>
         </Modal>
       )}
-      {seq.length > 1 && (
-        <div className="seq-strip">
-          {seq.map((s, i) => (
-            <React.Fragment key={s.id}>
-              <button className={'seq-step pill ' + s.status + (s.id === runId ? ' current' : '')}
-                title={`${s.kind} · ${s.target} · ${s.status}`}
-                onClick={() => s.id !== runId && onOpenRun && onOpenRun(s.id)}>
-                <span className="seq-n">{i + 1}</span>{s.kind}<span className="muted"> · {s.target}</span>
-              </button>
-              {i < seq.length - 1 && <span className="seq-arrow" aria-hidden="true">→</span>}
-            </React.Fragment>
-          ))}
-        </div>
-      )}
       {/* Visualize and Log together, with a draggable divider to size them (they
           stack on narrow screens). Each pane scrolls on its own. */}
       <div className="run-split" ref={splitRef}
@@ -304,6 +290,9 @@ export function RunLog({ runId, onBack, onOpenRun }) {
         <div className="run-pane">
           <div className="pane-title">Visualize</div>
           <div className="run-scroll">
+            {/* The whole pipeline as a stage flow; clicking a stage switches this
+                pane AND the log to that step. Nothing for a lone (non-sequence) run. */}
+            <PipelineFlow seq={seq} runId={runId} onOpenRun={onOpenRun} />
             {text ? <RunViz engine={engine} model={model} seedHosts={seedHosts} />
               : <div className="muted" style={{ padding: 8 }}>connecting…</div>}
           </div>

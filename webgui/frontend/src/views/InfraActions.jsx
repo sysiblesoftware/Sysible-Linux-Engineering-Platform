@@ -69,17 +69,14 @@ function buildActions(r, { controllers, setPipe, setVms, setEnrollFor, setJumpFo
       })
     } catch (e) { alert(e.message) }
   }
+  // Only the infra LIFECYCLE lives on this bar now. The SSH/access helpers (VMs,
+  // Inventory, Test login, Diagnose, Fix SSH, Access) and jump-host prep are reached
+  // from their own places — the Inventories page, the Jump Hosts card, the run views —
+  // so they were dropped here as redundant. Kept: Plan/Apply/Destroy, Enroll, Cadence.
   return [
     ['Plan', () => run('plan'), 'ghost', 'Terraform/OpenTofu plan'],
     ['Apply', () => run('apply'), 'primary', 'Terraform/OpenTofu apply — create the VMs'],
     ['Destroy', () => run('destroy'), 'danger ghost', 'Terraform/OpenTofu destroy', true],
-    ['VMs', listVms, 'ghost', "List the VMs on this project's hypervisor"],
-    ['Inventory', toInventory, 'ghost', 'Read the applied VMs into a SLEP inventory'],
-    ['Test login', () => setTestFor(r), 'ghost', 'Test whether a key or password authenticates to the VMs through the jump host (read-only)'],
-    ['Diagnose', () => setDiagFor(r), 'ghost', 'Read each VM\'s disk on the hypervisor to see if cloud-init ran and the account exists (no VM login)'],
-    ['Fix SSH', fixSsh, 'ghost', "Install SLEP's current key on the VMs over the password login (repairs key drift, no rebuild)"],
-    ['Access', () => setJumpFor(r), 'ghost', 'Login user, password (Vault) and jump host'],
-    ['Prepare jump host', () => setPrepFor(r), 'ghost', "Install SLEP's key on the jump host (hypervisor) with a one-time password, so runs hop through it with the key"],
     ['Enroll', () => enroll(), 'primary', 'Register the applied VMs into a Controller'],
     ['Cadence', cadence, 'primary', 'Run the whole flow: apply → inventory → configure (Ansible) → maintain (Salt). Scaffolds the playbook/state if missing.'],
   ].map(([label, fn, cls, title, danger]) => ({ label, fn, cls, title, danger, enroll }))

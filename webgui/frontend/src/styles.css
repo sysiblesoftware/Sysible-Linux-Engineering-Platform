@@ -269,6 +269,22 @@ label.fld{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--
   font-size:10px;font-weight:700;background:var(--panel2);color:var(--muted)}
 .seq-arrow{color:var(--faint)}
 
+/* Pipeline stage flow inside the Visualize pane: Terraform → Inventory → Ansible →
+   Salt, each a clickable node that swaps the detail viz + log to that stage. */
+.pipe-flow{display:flex;align-items:stretch;gap:6px;flex-wrap:wrap;margin:0 0 12px;padding:8px;
+  border:1px solid var(--line);border-radius:10px;background:var(--panel)}
+.pipe-stage{display:inline-flex;align-items:center;gap:8px;cursor:pointer;text-align:left;
+  padding:6px 10px;border:1px solid var(--line);border-left-width:3px;border-radius:8px;
+  background:var(--panel2);color:var(--text)}
+.pipe-stage:hover{background:var(--panel)}
+.pipe-stage.current{outline:2px solid var(--accent);outline-offset:1px;cursor:default}
+.pipe-ico{font-size:14px;line-height:1}
+.pipe-body{display:flex;flex-direction:column;line-height:1.25}
+.pipe-body b{font-size:12.5px}
+.pipe-body .faint{font-size:11px}
+.pipe-dot{width:9px;height:9px;border-radius:50%;flex:0 0 auto}
+.pipe-arrow{display:inline-flex;align-items:center;color:var(--faint)}
+
 /* Organizations / Teams — role pills, team member chips, selected row. */
 .pill.role-admin{background:rgba(109,219,115,.16);color:var(--green,#63c869)}
 .pill.role-operator{background:rgba(122,162,255,.16);color:var(--accent,#7aa2ff)}
