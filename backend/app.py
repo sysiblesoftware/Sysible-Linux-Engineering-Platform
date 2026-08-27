@@ -1288,11 +1288,12 @@ def create_inventory(request: Request, body: dict = Body(...), user: str = Depen
 
 
 @app.patch("/inventories/{iid}")
-def update_inventory(iid: int, body: dict = Body(...), user: str = Depends(current_user)):
+def update_inventory(iid: int, request: Request, body: dict = Body(...), user: str = Depends(current_user)):
     """Update an inventory's SSH jump host (bastion) and/or environment. Empty
     string clears either."""
-    if not db.get_inventory(iid):
-        raise HTTPException(status_code=404, detail="Inventory not found.")
+    # Org guard: without it, any operator could repoint another tenant's inventory's
+    # jump host (redirecting their runs through an attacker-chosen bastion).
+    _guard_inventory(request, iid, "operator")
     if "bastion" in body:
         db.set_inventory_bastion(iid, _validate_bastion(str(body.get("bastion") or "")))
     if "environment" in body:
@@ -1356,18 +1357,27 @@ def _sanitize_host_vars(variables) -> dict:
 
 
 @app.delete("/hosts/{hid}")
-def delete_host(hid: int, user: str = Depends(current_user)):
+def delete_host(hid: int, request: Request, user: str = Depends(current_user)):
+    # Resolve host → inventory → org and guard: without this any operator could delete
+    # any host in any tenant's inventory by guessing the integer id.
+    host = db.get_host(hid)
+    if not host:
+        raise HTTPException(status_code=404, detail="Host not found.")
+    _guard_inventory(request, host.get("inventory_id"), "operator")
     db.delete_host(hid)
     return {"status": "deleted"}
 
 
 @app.get("/controllers/{cid}/hosts")
-def controller_hosts(cid: int, user: str = Depends(current_user)):
+def controller_hosts(cid: int, request: Request, user: str = Depends(current_user)):
     """List a connected Controller's hosts (agents + SSH) WITHOUT importing — the
     console shows this so the operator can pick which hosts go to which inventory."""
     ctrl = db.get_controller(cid, include_key=True)
     if not ctrl:
         raise HTTPException(status_code=404, detail="Controller connection not found.")
+    # Org guard: the stored Controller API key is powerful; without this any operator
+    # could drive another tenant's Controller key to enumerate that Controller's fleet.
+    _guard_object_org(request, ctrl.get("org_id"), "operator")
     try:
         return controller_import.fetch_hosts(ctrl["base_url"], ctrl["api_key"])
     except controller_import.ControllerImportError as e:
@@ -1466,6 +1476,25 @@ def disconnect_controller(cid: int, user: str = Depends(require_superuser)):
 
 
 # ------------------------------------------------------------------ runs
+def _assert_step_org(project_org, credential_id=None, inventory_id=None):
+    """Raise 403 if a run/pipeline step's credential or inventory belongs to a different
+    org than the project (or is legacy-unowned, which is allowed). Shared by _dispatch_run
+    AND _dispatch_pipeline so a pipeline step can't reference another tenant's secret —
+    without this, a pipeline was a hole around the per-run guard (cross-tenant cred theft)."""
+    if not project_org:
+        return
+    if credential_id:
+        cred = db.get_credential(int(credential_id))
+        corg = cred.get("org_id") if cred else None
+        if corg and corg != project_org:
+            raise HTTPException(status_code=403, detail="That credential belongs to a different organization.")
+    if inventory_id:
+        inv = db.get_inventory(int(inventory_id))
+        iorg = inv.get("org_id") if inv else None
+        if iorg and iorg != project_org:
+            raise HTTPException(status_code=403, detail="That inventory belongs to a different organization.")
+
+
 def _dispatch_run(project, kind, target, inventory_id, credential_id, extra_vars, actor,
                   become_password="", limit="", start_at_task="", tf_tool=""):
     """Create a run row and launch its engine on a background thread. Shared by the
@@ -1476,18 +1505,7 @@ def _dispatch_run(project, kind, target, inventory_id, credential_id, extra_vars
     # and inventory a run uses must belong to the PROJECT's org (or be legacy-unowned).
     # Otherwise an operator could run their own project with another org's credential
     # (its key/password gets written to disk for the play) — credential theft.
-    _porg = project.get("org_id")
-    if _porg:
-        if credential_id:
-            cred = db.get_credential(int(credential_id))
-            corg = cred.get("org_id") if cred else None
-            if corg and corg != _porg:
-                raise HTTPException(status_code=403, detail="That credential belongs to a different organization.")
-        if inventory_id:
-            inv = db.get_inventory(int(inventory_id))
-            iorg = inv.get("org_id") if inv else None
-            if iorg and iorg != _porg:
-                raise HTTPException(status_code=403, detail="That inventory belongs to a different organization.")
+    _assert_step_org(project.get("org_id"), credential_id, inventory_id)
     run_id = db.create_run(
         project["id"], kind, target, inventory_id=inventory_id,
         credential_id=credential_id, extra_vars=extra_vars or {}, created_by=actor,
@@ -1544,8 +1562,12 @@ def _dispatch_pipeline(project, steps, actor, stop_on_failure=True):
     from .runners import ansible_runner
     group_id = secrets.token_hex(8)
     prepared = []
+    _porg = project.get("org_id")
     for s in steps:
         kind = s.get("kind")
+        # Same cross-tenant guard the per-run path enforces: a step must not reference
+        # another org's credential/inventory (pipelines bypassed this before).
+        _assert_step_org(_porg, s.get("credential_id"), s.get("inventory_id"))
         target = str(s.get("target") or "").strip() or (
             "from VMs" if kind == "inventory" else "→ Controller" if kind == "enroll" else "")
         rid = db.create_run(
@@ -1655,13 +1677,16 @@ def _run_enroll_step(run_id: int, project, actor: str) -> bool:
 
 
 @app.post("/pipelines/run")
-def run_pipeline_adhoc(body: dict = Body(...), user: str = Depends(current_user)):
+def run_pipeline_adhoc(request: Request, body: dict = Body(...), user: str = Depends(current_user)):
     """Launch an ad-hoc sequence of runs (create → configure → maintain, or any
     order). Steps run one after another; by default the sequence stops on the first
     failure. Each step is the same shape as a /runs body."""
     project = db.get_project(body.get("project_id")) if body.get("project_id") else None
     if not project:
         raise HTTPException(status_code=404, detail="Project not found.")
+    # Operator on the PROJECT's org — without this, any operator could aim an ad-hoc
+    # pipeline (e.g. terraform destroy) at another tenant's project.
+    _guard_project(request, project["id"], "operator")
     steps = body.get("steps") or []
     _validate_steps(steps)
     run_ids, group_id = _dispatch_pipeline(project, steps, user, stop_on_failure=bool(body.get("stop_on_failure", True)))
@@ -1773,7 +1798,10 @@ def launch_run(request: Request, body: dict = Body(...), user: str = Depends(cur
 @app.get("/runs")
 def runs(request: Request, project_id: int | None = None, user: str = Depends(current_user)):
     role = _session_or_401(request)["role"]
-    return {"runs": [_mask_extra_vars(r, role) for r in db.list_runs(project_id)]}
+    # Org-scope: only runs whose project is in the caller's visible orgs — otherwise an
+    # operator saw every tenant's runs (and their extra_vars, which may hold secrets).
+    runs = db.list_runs(project_id, org_ids=_visible_org_ids(request))
+    return {"runs": [_mask_extra_vars(r, role) for r in runs]}
 
 
 def _guard_run(request: Request, run_id: int, min_role: str = "viewer"):
@@ -1811,14 +1839,13 @@ def run_log(run_id: int, request: Request, offset: int = 0, user: str = Depends(
 
 
 @app.post("/runs/{run_id}/cancel")
-def cancel_run(run_id: int, user: str = Depends(require_operator)):
+def cancel_run(run_id: int, request: Request, user: str = Depends(require_operator)):
     """Stop an in-flight run. Kills the engine's child process (its process group,
     so terraform provider / ssh grandchildren go too) and records the run as
     canceled. A run that hasn't started a child yet (queued, or between pipeline
     steps) is flagged and marked canceled directly."""
-    r = db.get_run(run_id)
-    if not r:
-        raise HTTPException(status_code=404, detail="Run not found.")
+    # Org guard: without it any operator could cancel another tenant's in-flight run.
+    r = _guard_run(request, run_id, "operator")
     if r.get("status") in ("success", "failed", "canceled"):
         return {"status": r["status"]}   # already finished — nothing to stop
     from .runners import _common
@@ -1861,8 +1888,10 @@ _CADENCES = {"hourly", "daily", "weekly"}
 
 
 @app.get("/schedules")
-def schedules_list(project_id: int | None = None, user: str = Depends(current_user)):
-    return {"schedules": db.list_schedules(project_id)}
+def schedules_list(request: Request, project_id: int | None = None, user: str = Depends(current_user)):
+    # Org-scope: only schedules whose project is in the caller's visible orgs — otherwise
+    # a viewer read every tenant's schedules (targets, ids, unmasked extra_vars).
+    return {"schedules": db.list_schedules(project_id, org_ids=_visible_org_ids(request))}
 
 
 @app.post("/schedules")
@@ -1901,10 +1930,21 @@ def schedules_create(request: Request, body: dict = Body(...), user: str = Depen
     return db.get_schedule(sid)
 
 
-@app.patch("/schedules/{sid}")
-def schedules_update(sid: int, body: dict = Body(...), user: str = Depends(require_operator)):
-    if not db.get_schedule(sid):
+def _guard_schedule(request: Request, sid: int, min_role: str = "operator"):
+    """Load a schedule and enforce access to its project's org. Returns the row.
+    Without this, an operator in any org could repoint or delete another tenant's
+    schedule (tamper with what their scheduler executes) by guessing the id."""
+    sched = db.get_schedule(sid)
+    if not sched:
         raise HTTPException(status_code=404, detail="Schedule not found.")
+    proj = db.get_project(sched["project_id"]) if sched.get("project_id") else None
+    _guard_object_org(request, (proj or {}).get("org_id"), min_role)
+    return sched
+
+
+@app.patch("/schedules/{sid}")
+def schedules_update(sid: int, request: Request, body: dict = Body(...), user: str = Depends(require_operator)):
+    _guard_schedule(request, sid, "operator")
     if "cadence" in body and body["cadence"] not in _CADENCES:
         raise HTTPException(status_code=400, detail=f"cadence must be one of: {', '.join(_CADENCES)}.")
     db.update_schedule(sid, **body)
@@ -1912,7 +1952,8 @@ def schedules_update(sid: int, body: dict = Body(...), user: str = Depends(requi
 
 
 @app.delete("/schedules/{sid}")
-def schedules_delete(sid: int, user: str = Depends(require_operator)):
+def schedules_delete(sid: int, request: Request, user: str = Depends(require_operator)):
+    _guard_schedule(request, sid, "operator")
     db.delete_schedule(sid)
     db.log_audit("schedule_deleted", user, str(sid))
     return {"status": "deleted"}
@@ -2039,9 +2080,13 @@ def keydist_distribute(iid: int, body: dict = Body(...), user: str = Depends(req
     is (re)created for key-based runs. Streams progress to the distribute log."""
     names = body.get("host_names")
     only = list(names) if isinstance(names, list) else None
+    # Validate the jump host: it is interpolated into an ssh ProxyCommand that /bin/sh
+    # runs, so an unvalidated value here is a shell-injection vector (superuser-only, but
+    # the inventory path already validates — close the gap).
+    bastion = _validate_bastion(str(body.get("bastion") or "").strip())
     try:
         keydist.start_distribute(iid, only, str(body.get("username") or "").strip(),
-                                 str(body.get("password") or ""), str(body.get("bastion") or "").strip())
+                                 str(body.get("password") or ""), bastion)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     db.log_audit("keydist", user, f"inventory:{iid}")
@@ -2062,7 +2107,7 @@ def keydist_prepare_bastion(iid: int, body: dict = Body(...), user: str = Depend
     inv = db.get_inventory(iid)
     if not inv:
         raise HTTPException(status_code=404, detail="Inventory not found.")
-    bastion = str(body.get("bastion") or inv.get("bastion") or "").strip()
+    bastion = _validate_bastion(str(body.get("bastion") or inv.get("bastion") or "").strip())
     try:
         keydist.start_prepare_bastion(iid, bastion, str(body.get("password") or ""))
     except ValueError as e:

@@ -116,3 +116,50 @@ def test_cross_org_resource_isolation(client):
     # The attacker's vault list never shows Acme's secret name.
     names = {s["name"] for s in op.get("/vault").json()["secrets"]}
     assert "acme_secret" not in names
+
+
+def test_cross_org_pipeline_runs_schedules_hosts_isolation(client):
+    """Regression for the audit findings: a pipeline step can't borrow another org's
+    credential; ad-hoc pipelines, runs, schedules, hosts, inventories and controllers
+    are all org-guarded (no read/tamper/cancel across the tenant boundary by id)."""
+    import backend.db as db
+    acme = client.post("/organizations", json={"name": "Iso2-Acme"}).json()
+    a_id = acme["id"]
+    default_id = _default_org(client)
+    # Victim resources in Acme (system admin sets them up; db for the non-HTTP ones).
+    vproj = client.post("/projects", json={"name": "iso2-acme-proj", "org_id": a_id}).json()
+    vpid = vproj["id"]
+    vcred = client.post("/credentials", json={"name": "iso2-cred", "kind": "ssh_password",
+                                              "username": "admin", "secret": "pw", "org_id": a_id}).json()
+    viid = db.create_inventory("iso2-inv", project_id=vpid, org_id=a_id)
+    vhid = db.add_host(viid, "vhost", "10.9.9.9")
+    vsid = db.create_schedule("iso2-sched", vpid, "ansible", "site.yml", "daily", "02:00")
+    vrid = db.create_run(vpid, "ansible", "site.yml")          # queued
+    vcid = db.create_controller("iso2-ctrl", "https://ctrl.example", "key", org_id=a_id)
+
+    # Attacker is an operator ONLY in Default.
+    client.post("/users", json={"username": "iso2_op", "password": "iso2-operator-pw", "role": "operator"})
+    op = _login("iso2_op", "iso2-operator-pw")
+
+    # Finding 2: ad-hoc pipeline aimed at a victim project (e.g. terraform destroy).
+    assert op.post("/pipelines/run", json={"project_id": vpid,
+                   "steps": [{"kind": "terraform", "target": "destroy"}]}).status_code == 403
+    # Finding 1: a pipeline in the attacker's OWN project may not borrow Acme's credential.
+    myproj = op.post("/projects", json={"name": "iso2-mine", "org_id": default_id}).json()
+    assert op.post("/pipelines/run", json={"project_id": myproj["id"],
+                   "steps": [{"kind": "ansible", "target": "site.yml", "credential_id": vcred["id"]}]}).status_code == 403
+    # Finding 3: GET /runs never lists another tenant's run.
+    assert vrid not in {r["id"] for r in op.get("/runs").json()["runs"]}
+    # Finding 9: can't cancel another tenant's run.
+    assert op.post(f"/runs/{vrid}/cancel").status_code == 403
+    # Finding 4: GET /schedules never lists another tenant's schedule.
+    assert vsid not in {s["id"] for s in op.get("/schedules").json()["schedules"]}
+    # Finding 5: can't repoint or delete another tenant's schedule.
+    assert op.patch(f"/schedules/{vsid}", json={"enabled": False}).status_code == 403
+    assert op.delete(f"/schedules/{vsid}").status_code == 403
+    # Finding 6: can't delete another tenant's host.
+    assert op.delete(f"/hosts/{vhid}").status_code == 403
+    # Finding 7: can't repoint another tenant's inventory (jump host / environment).
+    assert op.patch(f"/inventories/{viid}", json={"environment": "x"}).status_code == 403
+    # Finding 8: can't drive another tenant's Controller key to enumerate its fleet.
+    assert op.get(f"/controllers/{vcid}/hosts").status_code == 403

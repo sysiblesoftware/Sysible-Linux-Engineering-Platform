@@ -585,12 +585,27 @@ def _schedule_row(r) -> dict:
     return d
 
 
-def list_schedules(project_id: int | None = None):
+def list_schedules(project_id: int | None = None, org_ids=None):
+    """Schedules, newest first. `org_ids` (a list) restricts to schedules whose project
+    is in those orgs (or legacy-unowned); None = unscoped (system admin / the scheduler
+    thread); empty list = nothing. Without this a viewer could read every tenant's
+    schedules (targets, cred/inventory ids, unmasked extra_vars) via GET /schedules."""
     with _connect() as c:
+        where, params = [], []
         if project_id:
-            rows = c.execute("SELECT * FROM schedules WHERE project_id=? ORDER BY id DESC", (project_id,)).fetchall()
-        else:
-            rows = c.execute("SELECT * FROM schedules ORDER BY id DESC").fetchall()
+            where.append("project_id=?")
+            params.append(project_id)
+        if org_ids is not None:
+            if not org_ids:
+                return []
+            ph = ",".join("?" * len(org_ids))
+            where.append(f"project_id IN (SELECT id FROM projects WHERE org_id IN ({ph}) OR org_id IS NULL)")
+            params.extend(org_ids)
+        sql = "SELECT * FROM schedules"
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY id DESC"
+        rows = c.execute(sql, tuple(params)).fetchall()
     return [_schedule_row(r) for r in rows]
 
 
@@ -1304,6 +1319,14 @@ def upsert_host(inventory_id, name, address, groups="", variables=None, source="
         return cur.lastrowid
 
 
+def get_host(hid: int):
+    """One host row (incl. its inventory_id) or None — used to resolve a host to its
+    inventory's org for the delete guard."""
+    with _connect() as c:
+        r = c.execute("SELECT * FROM hosts WHERE id=?", (hid,)).fetchone()
+        return dict(r) if r else None
+
+
 def delete_host(hid: int):
     with _connect() as c:
         c.execute("DELETE FROM hosts WHERE id=?", (hid,))
@@ -1416,15 +1439,28 @@ def get_run(run_id: int):
         return dict(r) if r else None
 
 
-def list_runs(project_id=None, limit=100):
+def list_runs(project_id=None, limit=100, org_ids=None):
+    """Runs, newest first. `org_ids` (a list) restricts to runs whose project is in
+    those orgs (or legacy-unowned); None = unscoped (system admin / internal callers
+    like the scheduler); empty list = nothing. Without this an operator could read
+    every tenant's runs (and their extra_vars) via GET /runs."""
     with _connect() as c:
-        if project_id is None:
-            rows = c.execute("SELECT * FROM runs ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
-        else:
-            rows = c.execute(
-                "SELECT * FROM runs WHERE project_id=? ORDER BY id DESC LIMIT ?",
-                (project_id, limit),
-            ).fetchall()
+        where, params = [], []
+        if project_id is not None:
+            where.append("project_id=?")
+            params.append(project_id)
+        if org_ids is not None:
+            if not org_ids:
+                return []
+            ph = ",".join("?" * len(org_ids))
+            where.append(f"project_id IN (SELECT id FROM projects WHERE org_id IN ({ph}) OR org_id IS NULL)")
+            params.extend(org_ids)
+        sql = "SELECT * FROM runs"
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY id DESC LIMIT ?"
+        params.append(limit)
+        rows = c.execute(sql, tuple(params)).fetchall()
         return [dict(r) for r in rows]
 
 

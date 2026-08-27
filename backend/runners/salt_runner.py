@@ -169,7 +169,13 @@ def launch(run_id: int) -> None:
                 cmd.append(state)
             # extra_vars become salt kwargs (e.g. test=True for a dry run, or
             # pillar overrides key=value). Salt parses `k=v` trailing args itself.
+            # Constrain the KEY to a plain identifier: a key beginning with '-' (or
+            # carrying spaces) would otherwise be tokenised by salt-ssh as an OPTION
+            # rather than a kwarg, smuggling flags into the command.
             for k, v in extra_vars.items():
+                if not re.fullmatch(r"[A-Za-z0-9_]+", str(k)):
+                    emit(f"-- skipped variable with an unsafe name: {k!r}")
+                    continue
                 cmd.append(f"{k}={v}")
 
             dry = str(extra_vars.get("test", "")).lower() in ("true", "1", "yes")
