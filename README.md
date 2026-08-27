@@ -11,13 +11,14 @@ the Kubernetes execution-environments, service mesh, and operator sprawl that ma
 AAP a project to stand up. One container, SQLite by default, SSH-native, and an
 IDE built in.
 
-<img width="2177" height="833" alt="Screenshot 2026-08-27 at 2 23 17 PM" src="https://github.com/user-attachments/assets/a2391447-4c66-4865-a57d-84ac8f69f53b" />
-
 
 <img width="765" height="441" alt="Screenshot 2026-08-27 at 2 30 57 PM" src="https://github.com/user-attachments/assets/747efd2c-3668-47b5-b4f7-cf7aa1841c74" />
 
 
 ## What it does
+
+<img width="2474" height="878" alt="Screenshot 2026-08-27 at 2 35 02 PM" src="https://github.com/user-attachments/assets/4de59dd6-6a8a-4203-98c9-b138dc77dc34" />
+
 
 - **Projects** — a workspace of playbooks / Terraform configs / Salt states,
   either authored right in the browser IDE or synced from Git.
