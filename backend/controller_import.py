@@ -35,11 +35,21 @@ class ControllerImportError(Exception):
 
 
 def _tls_verify():
-    """Verify the Controller's TLS certificate by default. A self-signed on-prem
-    Controller can opt out with SLEP_CONTROLLER_INSECURE=1 — but never silently, and
-    never as the default (the old behaviour leaked the API key + credentials to any
-    on-path attacker)."""
-    return os.environ.get("SLEP_CONTROLLER_INSECURE", "").lower() not in ("1", "true", "yes")
+    """How to verify the Controller's TLS certificate. Verify by default.
+
+    For a standalone/on-prem Controller with a SELF-SIGNED cert (the usual cause of
+    'certificate verify failed: self-signed certificate'), the SECURE fix is to TRUST
+    that cert: point SLEP_CONTROLLER_CA at the Controller's certificate (or its CA) PEM
+    on the SLEP host — requests then verifies against it, so enrollment/import work with
+    no on-path window. Only as a last resort on a trusted LAN, SLEP_CONTROLLER_INSECURE=1
+    skips verification entirely (never for production — it leaks the API key + creds to
+    any on-path attacker). Returns True (default CA store), a CA-bundle path, or False."""
+    if os.environ.get("SLEP_CONTROLLER_INSECURE", "").lower() in ("1", "true", "yes"):
+        return False
+    ca = os.environ.get("SLEP_CONTROLLER_CA", "").strip()
+    if ca and os.path.isfile(ca):
+        return ca      # requests' verify= accepts a path to a CA bundle / trusted cert
+    return True
 
 
 def _guard_url(url: str) -> None:
