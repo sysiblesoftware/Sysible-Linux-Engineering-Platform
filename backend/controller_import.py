@@ -159,6 +159,28 @@ def get_controller_key(controller_url: str, api_key: str) -> str:
     return ""
 
 
+def fetch_agent_bundle(controller_url: str, api_key: str) -> bytes:
+    """Download a fresh one-time AGENT enrollment bundle (zip) from a Controller with the
+    machine API key (GET /remote/agent-bundle). Each call mints a new single-use token,
+    so fetch ONE bundle per host. This is the agent (pull) enrollment path — the target
+    runs the bundle and self-enrolls outbound, so there's no inbound SSH-as-root and no
+    human superuser token. Raises ControllerImportError on any failure."""
+    base = _normalize_base(controller_url)
+    url = base + "/remote/agent-bundle"
+    try:
+        resp = requests.get(url, headers={"X-API-Key": api_key}, verify=_tls_verify(), timeout=30)
+    except requests.exceptions.RequestException as e:
+        raise ControllerImportError(f"could not reach Controller: {e}")
+    if resp.status_code != 200:
+        detail = f"HTTP {resp.status_code}"
+        try:
+            detail = resp.json().get("detail") or detail
+        except ValueError:
+            detail = (resp.text or "").strip()[:200] or detail
+        raise ControllerImportError(f"agent bundle download failed: {detail}")
+    return resp.content
+
+
 def register_ssh_host(controller_url: str, api_key: str, name: str, ip: str,
                       user: str = "root", environment: str = ""):
     """Register one SSH-managed host in a Controller (POST /remote/hosts). The

@@ -1655,7 +1655,7 @@ def _run_enroll_step(run_id: int, project, actor: str) -> bool:
 
         emit(f"== SLEP run #{run_id} · project '{project['name']}' · enroll VMs into Controller ==")
         try:
-            out = _enroll_infra_hosts(project["id"])
+            out = _enroll_infra_agents(project["id"])
         except HTTPException as e:
             emit(f"!! {e.detail}")
             if "No Controller" in str(e.detail):
@@ -3730,16 +3730,84 @@ def _enroll_infra_hosts(project_id: int, controller_id=None):
     return {"results": results, "enrolled": ok_n, "total": len(hosts), "controller": ctrl["name"]}
 
 
+def _resolve_enroll_controller(project_id, controller_id=None):
+    """Shared setup for enrollment: the infra meta + its chosen Controller (with key),
+    persisting an operator-picked Controller. Raises HTTPException on the usual errors."""
+    meta = db.get_infra(project_id)
+    if not meta:
+        raise HTTPException(status_code=404, detail="Not an infrastructure project.")
+    cid = controller_id or meta.get("controller_id")
+    if not cid:
+        raise HTTPException(status_code=400, detail="No Controller was chosen for this infrastructure.")
+    ctrl = db.get_controller(cid, include_key=True)
+    if not ctrl:
+        raise HTTPException(status_code=400, detail="The chosen Controller no longer exists.")
+    if controller_id and not meta.get("controller_id"):
+        db.set_infra(project_id, meta["provider"], controller_id=cid,
+                     ssh_user=meta.get("ssh_user", ""), environment=meta.get("environment", ""),
+                     inventory_id=meta.get("inventory_id"), bastion=meta.get("bastion", ""))
+    return meta, ctrl
+
+
+def _enroll_infra_agents(project_id: int, controller_id=None):
+    """Enroll a project's applied VMs as AGENTS (the pull model): for each VM, download a
+    fresh one-time bundle from the project's Controller with the machine API key, then
+    install it over SSH (SLEP's managed key, through the jump host). The agent then
+    self-enrolls OUTBOUND — no inbound SSH-as-root and no human superuser token, which is
+    why plain SSH-host registration (POST /remote/hosts) failed. Returns the same shape
+    as _enroll_infra_hosts: {results, enrolled, total, controller}."""
+    import base64
+    import subprocess
+    meta, ctrl = _resolve_enroll_controller(project_id, controller_id)
+    bastion = meta.get("bastion") or ""
+    mk = keydist.managed_key_path()
+    if not mk:
+        raise HTTPException(status_code=400,
+                            detail="SLEP has no managed SSH key yet — distribute it to the VMs first.")
+    hosts = _infra_applied_hosts(project_id)
+    results, ok_n = [], 0
+    for h in hosts:
+        nm, ip = str(h.get("name") or ""), str(h.get("ip") or "")
+        huser = str(h.get("user") or meta.get("ssh_user") or "root")
+        if not ip:
+            results.append({"name": nm, "ip": "", "ok": False, "detail": "no IP yet"})
+            continue
+        try:
+            zip_bytes = controller_import.fetch_agent_bundle(ctrl["base_url"], ctrl["api_key"])
+        except controller_import.ControllerImportError as e:
+            results.append({"name": nm, "ip": ip, "ok": False, "detail": str(e)})
+            continue
+        cmd = keydist.agent_install_cmd(bastion, f"{huser}@{ip}", mk)
+        try:
+            r = subprocess.run(cmd, input=base64.b64encode(zip_bytes).decode(),
+                               capture_output=True, text=True, timeout=180)
+        except subprocess.TimeoutExpired:
+            results.append({"name": nm, "ip": ip, "ok": False, "detail": "timed out installing the agent"})
+            continue
+        ok = r.returncode == 0 and "SLEP_AGENT_OK" in (r.stdout or "")
+        detail = "agent installed — self-enrolling" if ok else keydist._err_line(r, bool(bastion))
+        ok_n += 1 if ok else 0
+        results.append({"name": nm, "ip": ip, "ok": ok, "detail": detail})
+    return {"results": results, "enrolled": ok_n, "total": len(hosts), "controller": ctrl["name"]}
+
+
 @app.post("/infra/{project_id}/enroll")
 def infra_enroll(project_id: int, request: Request, body: dict = Body(default=None),
                  user: str = Depends(require_operator)):
-    """After `terraform apply`, read the created VMs (the sysible_hosts output) and
-    register each into a Controller as an SSH host. Uses the infra's configured
-    Controller, or an optional `controller_id` in the body to pick one on demand
-    (which is then remembered for the project)."""
+    """After `terraform apply`, enroll the created VMs (the sysible_hosts output) into a
+    Controller. Default method is AGENT enrollment (the VM installs the Controller's
+    agent over SSH and self-enrolls) — this is what works with SLEP's machine API key.
+    Pass method:"ssh" to instead register them as SSH-transport hosts (Sysible Connect;
+    needs a Controller that accepts it). Uses the infra's configured Controller, or an
+    optional `controller_id` to pick one on demand (then remembered for the project)."""
     _guard_project(request, project_id, "operator")
-    cid = (body or {}).get("controller_id")
-    out = _enroll_infra_hosts(project_id, controller_id=int(cid) if cid else None)
+    b = body or {}
+    cid = b.get("controller_id")
+    cid = int(cid) if cid else None
+    if str(b.get("method") or "agent").lower() == "ssh":
+        out = _enroll_infra_hosts(project_id, controller_id=cid)
+    else:
+        out = _enroll_infra_agents(project_id, controller_id=cid)
     db.log_audit("infra_enrolled", user,
                  f"{out['enrolled']}/{out['total']} into Controller '{out['controller']}'")
     return out

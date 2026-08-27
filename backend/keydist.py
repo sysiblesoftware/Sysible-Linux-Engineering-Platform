@@ -407,6 +407,27 @@ def run_on_host_cmd(host: str, remote: str):
     return ["ssh", *opts, dest, remote]
 
 
+# Install a downloaded agent bundle on a VM: read the base64 of the zip on stdin,
+# extract it (unzip, or a python3 fallback for minimal images), and run its installer
+# with sudo (cloud-init VMs grant the login user NOPASSWD sudo). The agent then
+# self-enrolls to the Controller baked into the bundle. Prints SLEP_AGENT_OK on success.
+AGENT_INSTALL_REMOTE = (
+    'set -e; d=$(mktemp -d); base64 -d > "$d/agent.zip"; cd "$d"; '
+    'if command -v unzip >/dev/null 2>&1; then unzip -oq agent.zip; '
+    'else python3 -c "import zipfile; zipfile.ZipFile(\'agent.zip\').extractall()"; fi; '
+    'sudo bash run_agent.sh; echo SLEP_AGENT_OK'
+)
+
+
+def agent_install_cmd(bastion: str, target: str, keyfile: str):
+    """argv to install SLEP's downloaded agent bundle on `target` (user@host), through
+    `bastion` if set, using the given key. The base64 of the bundle zip is fed on the
+    process's stdin. Returns None when there's no key to authenticate with."""
+    if not keyfile:
+        return None
+    return _key_cmd(bastion, keyfile, target, AGENT_INSTALL_REMOTE)
+
+
 def parse_probe(stdout: str) -> tuple[str, str]:
     """Pull (login_user, cloud_init_line) out of a PROBE_REMOTE stdout."""
     who, ci = "", ""

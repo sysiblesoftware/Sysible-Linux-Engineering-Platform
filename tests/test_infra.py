@@ -222,9 +222,41 @@ def test_enroll_registers_hosts_in_controller(client, monkeypatch):
     monkeypatch.setattr(ci, "register_ssh_host",
                         lambda url, key, name, ip, user="root", environment="": (registered.append((name, ip)) or (True, "enrolled")))
 
-    d = client.post(f"/infra/{pid}/enroll").json()
+    # method:"ssh" selects the legacy SSH-transport (Connect) registration path.
+    d = client.post(f"/infra/{pid}/enroll", json={"method": "ssh"}).json()
     assert d["enrolled"] == 2 and d["total"] == 2
     assert {r[0] for r in registered} == {"web-1", "web-2"}
+
+
+def test_enroll_default_installs_agents(client, monkeypatch):
+    """The default enroll method is AGENT enrollment: SLEP downloads a bundle per VM
+    and installs it over SSH so the VM self-enrolls (no superuser token needed)."""
+    import backend.controller_import as ci
+    import backend.app as appmod
+    monkeypatch.setattr(ci.requests, "get", lambda url, **k: Resp(200, {"agents": []}))
+    cid = client.post("/controllers", json={"name": "Prod2", "base_url": "http://ctrl:9000", "api_key": "K"}).json()["controller"]["id"]
+    monkeypatch.setattr(ci, "get_controller_key", lambda url, key: "ssh-ed25519 CTRL")
+    pid = client.post("/infra", json={"name": "fleet2", "provider": "aws",
+                                     "options": {"count": 2, "name_prefix": "web", "ssh_user": "ubuntu"},
+                                     "controller_id": cid}).json()["project_id"]
+    # Applied hosts + a managed key + a fetched bundle, and a successful SSH install.
+    monkeypatch.setattr(appmod, "_infra_applied_hosts",
+                        lambda p: [{"name": "web-1", "ip": "10.0.0.11", "user": "ubuntu"},
+                                   {"name": "web-2", "ip": "10.0.0.12", "user": "ubuntu"}])
+    monkeypatch.setattr(appmod.keydist, "managed_key_path", lambda: "/data/mk")
+    fetched = []
+    monkeypatch.setattr(ci, "fetch_agent_bundle",
+                        lambda url, key: (fetched.append(url) or b"PKzip"))
+
+    class Out:
+        returncode = 0
+        stdout = "SLEP_AGENT_OK\n"
+        stderr = ""
+    monkeypatch.setattr(appmod.subprocess, "run", lambda *a, **k: Out())
+
+    d = client.post(f"/infra/{pid}/enroll").json()
+    assert d["enrolled"] == 2 and d["total"] == 2
+    assert len(fetched) == 2   # a fresh one-time bundle per host
 
 
 def test_enroll_without_controller_400(client):
