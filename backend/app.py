@@ -3806,6 +3806,28 @@ def _resolve_enroll_controller(project_id, controller_id=None):
     return meta, ctrl
 
 
+def _fetch_agent_bundle_tofu(ctrl: dict) -> bytes:
+    """Download an agent bundle, trusting the Controller's self-signed cert on first use.
+    Enroll runs long after connect, and a standalone Controller's self-signed cert changes
+    when it's rebuilt or moved (e.g. container → standalone app) — leaving the pinned cert
+    stale or never set, so the fetch fails 'certificate verify failed: self-signed'. On that
+    one error, fetch the Controller's CURRENT cert, PIN + PERSIST it (so the next enroll and
+    key-bake reuse it), and retry once. `ctrl` is mutated in place so a multi-host enroll
+    only re-pins once. Any non-cert error propagates unchanged."""
+    cert = ctrl.get("tls_cert", "") or ""
+    try:
+        return controller_import.fetch_agent_bundle(ctrl["base_url"], ctrl["api_key"], cert_pem=cert)
+    except controller_import.ControllerImportError as e:
+        if not controller_import._is_cert_error(e):
+            raise
+        fresh = controller_import.fetch_server_cert(ctrl["base_url"])
+        if not fresh or fresh == cert:
+            raise    # couldn't fetch a cert, or the pinned one already matches — real failure
+        db.set_controller_tls_cert(ctrl["id"], fresh)
+        ctrl["tls_cert"] = fresh
+        return controller_import.fetch_agent_bundle(ctrl["base_url"], ctrl["api_key"], cert_pem=fresh)
+
+
 def _enroll_infra_agents(project_id: int, controller_id=None):
     """Enroll a project's applied VMs as AGENTS (the pull model): for each VM, download a
     fresh one-time bundle from the project's Controller with the machine API key, then
@@ -3830,7 +3852,7 @@ def _enroll_infra_agents(project_id: int, controller_id=None):
             results.append({"name": nm, "ip": "", "ok": False, "detail": "no IP yet"})
             continue
         try:
-            zip_bytes = controller_import.fetch_agent_bundle(ctrl["base_url"], ctrl["api_key"], cert_pem=ctrl.get("tls_cert", ""))
+            zip_bytes = _fetch_agent_bundle_tofu(ctrl)
         except controller_import.ControllerImportError as e:
             results.append({"name": nm, "ip": ip, "ok": False, "detail": str(e)})
             continue

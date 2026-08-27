@@ -71,6 +71,53 @@ def test_fetch_agent_bundle_200_html_rejected(monkeypatch):
         assert "portal" in str(e) or "not an agent bundle" in str(e) or "instead of an" in str(e)
 
 
+_SSL_ERR = ("could not reach the Controller at https://ctrl:9000/remote/agent-bundle: "
+            "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: self-signed certificate")
+
+
+def test_bundle_fetch_tofu_pins_and_persists(monkeypatch):
+    # A standalone Controller's self-signed cert changed (container → standalone), so the
+    # stored/empty cert fails verification. The fetch must trust-on-first-use: pull the
+    # current cert, PERSIST it, and retry — so enrollment self-heals with no manual PEM copy.
+    import backend.app as app
+    import backend.db as db
+    seen = {"persist": None, "certs": []}
+
+    def fake_bundle(base, key, cert_pem=""):
+        seen["certs"].append(cert_pem)
+        if not cert_pem:
+            raise ci.ControllerImportError(_SSL_ERR)
+        return b"PK\x03\x04zip"
+
+    monkeypatch.setattr(ci, "fetch_agent_bundle", fake_bundle)
+    monkeypatch.setattr(ci, "fetch_server_cert", lambda url: "-----FRESHPEM-----")
+    monkeypatch.setattr(db, "set_controller_tls_cert", lambda cid, pem: seen.__setitem__("persist", (cid, pem)))
+
+    ctrl = {"id": 7, "base_url": "https://ctrl:9000", "api_key": "K", "tls_cert": ""}
+    out = app._fetch_agent_bundle_tofu(ctrl)
+    assert out == b"PK\x03\x04zip"
+    assert seen["persist"] == (7, "-----FRESHPEM-----")   # pinned cert saved for next time
+    assert ctrl["tls_cert"] == "-----FRESHPEM-----"        # mutated so a multi-host enroll re-pins once
+    assert seen["certs"] == ["", "-----FRESHPEM-----"]     # retried with the fetched cert
+
+
+def test_bundle_fetch_tofu_non_cert_error_propagates(monkeypatch):
+    # A 404 / key error is NOT a cert problem — don't fetch or pin anything, just raise.
+    import backend.app as app
+    import backend.db as db
+    pinned = {"n": 0}
+    monkeypatch.setattr(ci, "fetch_agent_bundle",
+                        lambda *a, **k: (_ for _ in ()).throw(ci.ControllerImportError("HTTP 404 · Not Found")))
+    monkeypatch.setattr(ci, "fetch_server_cert", lambda url: "X")
+    monkeypatch.setattr(db, "set_controller_tls_cert", lambda cid, pem: pinned.__setitem__("n", pinned["n"] + 1))
+    try:
+        app._fetch_agent_bundle_tofu({"id": 1, "base_url": "https://c:9000", "api_key": "K", "tls_cert": ""})
+        assert False, "should have raised"
+    except ci.ControllerImportError as e:
+        assert "404" in str(e)
+    assert pinned["n"] == 0   # never persisted a cert for a non-cert failure
+
+
 def test_agent_install_cmd_builds_ssh_argv():
     cmd = keydist.agent_install_cmd("root@jump", "admin@10.0.0.5", "/data/mk")
     assert cmd[0] == "ssh"
