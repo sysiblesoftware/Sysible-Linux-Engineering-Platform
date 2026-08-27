@@ -495,7 +495,7 @@ export default function Ide({ project, onBack, onRun, onInfraChanged, theme }) {
           </label>
           <button className="ghost sm" title="Version control — commit, push, pull, branches" onClick={() => setGitOpen(true)}>⎇ Git</button>
           <div className="spacer" />
-          <button className="ghost sm" title="Run several steps in succession (create → configure → maintain)" onClick={() => setPipeOpen(true)}>Sequence</button>
+          <button className="ghost sm" title="Run several steps as one pipeline (build → configure → maintain)" onClick={() => setPipeOpen(true)}>Pipeline</button>
           <button className="primary sm" onClick={() => setRunOpen(true)}>Run</button>
         </div>
         <div className="tree">
@@ -1138,8 +1138,8 @@ export function PipelineModal({ project, currentFile, initialSteps, initialName,
   const defTarget = (k) => (k === 'terraform' ? 'apply' : k === 'salt' ? 'highstate' : k === 'inventory' ? 'from VMs' : k === 'enroll' ? '→ Controller' : 'site.yml')
 
   return (
-    <Modal title="Run sequence" onClose={onClose} wide>
-      <div className="faint" style={{ fontSize: 12, marginBottom: 8 }}>Steps run one after another. The cadence is create (Terraform/OpenTofu) → configure (Ansible) → maintain (Salt).</div>
+    <Modal title="Run pipeline" onClose={onClose} wide>
+      <div className="faint" style={{ fontSize: 12, marginBottom: 8 }}>Steps run one after another — a common pipeline is build (Terraform/OpenTofu) → configure (Ansible) → maintain (Salt).</div>
       <div className="pipe-head">
         <span className="pipe-n-spacer" />
         <span style={{ width: 130 }}>Engine</span>

@@ -54,32 +54,17 @@ function buildActions(r, { controllers, setPipe, setVms, setEnrollFor, setJumpFo
             (d.installed ? 'Re-run your Ansible/Salt step — key auth should work now.' : ''))
     } catch (e) { alert(e.message) }
   }
-  const cadence = async () => {
-    try {
-      await api(`infra/${r.project_id}/scaffold`, { method: 'POST', json: { stage: 'configure' } })
-      await api(`infra/${r.project_id}/scaffold`, { method: 'POST', json: { stage: 'maintain' } })
-      setPipe({
-        project: { id: r.project_id, name: r.project_name, slug: r.project_slug },
-        steps: [
-          { kind: 'terraform', target: 'apply', tool: 'terraform' },
-          { kind: 'inventory', target: 'from VMs' },
-          { kind: 'ansible', target: 'configure.yml' },
-          { kind: 'salt', target: 'maintain.sls' },
-        ],
-      })
-    } catch (e) { alert(e.message) }
-  }
   // Only the infra LIFECYCLE lives on this bar now. The SSH/access helpers (VMs,
   // Inventory, Test login, Diagnose, Fix SSH, Access) and jump-host prep are reached
-  // from their own places — the Inventories page, the Jump Hosts card, the run views —
-  // so they were dropped here as redundant. Kept: Plan/Apply/Destroy, Enroll, Cadence.
+  // from their own places — the Inventories page, the Jump Hosts card, the run views.
+  // Cadence was dropped too: the IDE's "Pipeline" button already runs a multi-step
+  // build→configure→maintain flow, so a second one-click preset here was redundant.
   return [
     ['Plan', () => run('plan'), 'ghost', 'Terraform/OpenTofu plan'],
     ['Apply', () => run('apply'), 'primary', 'Terraform/OpenTofu apply — create the VMs'],
     ['Destroy', () => run('destroy'), 'danger ghost', 'Terraform/OpenTofu destroy', true],
     ['Edit', () => setEditFor && setEditFor(r), 'ghost', 'Edit this infrastructure and regenerate its Terraform (after a destroy — e.g. add a VM type)'],
     ['Enroll', () => enroll(), 'primary', 'Register the applied VMs into a Controller'],
-    ['Cadence', cadence, 'primary', 'Run the whole flow: apply → inventory → configure (Ansible) → maintain (Salt). Scaffolds the playbook/state if missing.'],
   ].map(([label, fn, cls, title, danger]) => ({ label, fn, cls, title, danger, enroll }))
 }
 

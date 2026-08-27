@@ -90,7 +90,7 @@ function NewSchedule({ onClose, onDone }) {
           <option value="ansible">Ansible — playbook</option>
           <option value="terraform">Terraform — plan / apply / destroy</option>
           <option value="salt">Salt — state.apply</option>
-          <option value="pipeline">Pipeline — saved sequence</option>
+          <option value="pipeline">Pipeline — a saved multi-step run</option>
         </select>
       </Field>
       {isPipeline ? (
@@ -124,7 +124,7 @@ function NewSchedule({ onClose, onDone }) {
         </Field>
       )}
       {isPipeline && <div className="faint" style={{ fontSize: 12, marginBottom: 6 }}>Each firing runs the whole saved sequence; inventory and credentials come from the pipeline's steps.</div>}
-      <Field label="Cadence">
+      <Field label="Frequency">
         <select value={cadence} onChange={(e) => setCadence(e.target.value)}>
           <option value="hourly">Hourly</option><option value="daily">Daily</option><option value="weekly">Weekly</option>
         </select>

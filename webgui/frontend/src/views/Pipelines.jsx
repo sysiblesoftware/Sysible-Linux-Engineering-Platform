@@ -33,9 +33,9 @@ export default function Pipelines({ onOpenRun }) {
         {writable && <button className="primary" onClick={() => setNewOpen(true)}>+ New pipeline</button>}
       </div>
       <div className="muted" style={{ marginBottom: 12 }}>Saved sequences you can re-run — steps execute one after another (create → configure → maintain, or any order).</div>
-      {rows.length === 0 ? <div className="muted">No saved pipelines yet. “New pipeline” to build one, or save a sequence from a project’s “Sequence” builder.</div> : (
+      {rows.length === 0 ? <div className="muted">No saved pipelines yet. “New pipeline” to build one, or save one from a project’s “Pipeline” builder.</div> : (
         <table>
-          <thead><tr><th>Name</th><th>Project</th><th>Sequence</th><th></th></tr></thead>
+          <thead><tr><th>Name</th><th>Project</th><th>Steps</th><th></th></tr></thead>
           <tbody>
             {rows.map((p) => (
               <tr key={p.id}>
