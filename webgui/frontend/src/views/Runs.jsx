@@ -92,7 +92,8 @@ export function RunLog({ runId, onBack, onOpenRun }) {
   const [seedHosts, setSeedHosts] = useState([])
   const [leftPct, setLeftPct] = useState(50)   // Visualize/Log split, % of width
   const [showLog, setShowLog] = useState(() => { try { return localStorage.getItem('slep_run_showlog') !== '0' } catch { return true } })
-  const toggleLog = () => setShowLog((v) => { const n = !v; try { localStorage.setItem('slep_run_showlog', n ? '1' : '0') } catch { /* ignore */ } return n })
+  const userToggledLog = useRef(false)
+  const toggleLog = () => { userToggledLog.current = true; setShowLog((v) => { const n = !v; try { localStorage.setItem('slep_run_showlog', n ? '1' : '0') } catch { /* ignore */ } return n }) }
   const [groupId, setGroupId] = useState('')   // pipeline group this run belongs to
   const [seq, setSeq] = useState([])           // the sibling runs of that pipeline
   const [stages, setStages] = useState({})     // runId -> {engine, text} for every stage (stacked viz)
@@ -220,6 +221,13 @@ export function RunLog({ runId, onBack, onOpenRun }) {
     }
   }, [status, seq, runId, groupId, onOpenRun])
 
+  // A pipeline lays its stages out side by side as one window, which wants the full
+  // pane width — so default the log pane hidden for a pipeline (until the operator
+  // toggles it themselves). A lone run keeps their saved preference.
+  useEffect(() => {
+    if (seq.length > 1 && !userToggledLog.current) setShowLog(false)
+  }, [seq.length])
+
   useEffect(() => {
     let alive = true, offset = 0, acc = ''
     ;(async () => {
@@ -310,13 +318,14 @@ export function RunLog({ runId, onBack, onOpenRun }) {
         style={{ gridTemplateColumns: showLog ? `minmax(0,${leftPct}fr) 8px minmax(0,${100 - leftPct}fr)` : '1fr' }}>
         <div className="run-pane">
           <div className="pane-title">Visualize</div>
-          <div className="run-scroll">
-            {/* The whole pipeline as a stage flow at the top (a nav + summary), then
-                EVERY stage's visualization stacked below — no need to click a card to
-                see a stage. A lone (non-sequence) run just shows its one viz. */}
-            <PipelineFlow seq={seq} runId={runId} onOpenRun={onOpenRun} />
-            {seq.length > 1 ? (
-              seq.map((s) => {
+          {/* The whole pipeline as a stage flow at the top (a nav + summary), then
+              EVERY stage's visualization — a lone run shows its one viz; a pipeline
+              lays all stages side by side as ONE window (columns, Terraform → Enroll),
+              so the entire run is visible at a glance rather than a long scroll. */}
+          <PipelineFlow seq={seq} runId={runId} onOpenRun={onOpenRun} />
+          {seq.length > 1 ? (
+            <div className="stage-row">
+              {seq.map((s) => {
                 const st = stages[s.id]
                 const m = st ? parseRun(st.engine, st.text) : null
                 return (
@@ -325,16 +334,20 @@ export function RunLog({ runId, onBack, onOpenRun }) {
                       <b>{s.kind}</b><span className="muted"> · {s.target}</span>
                       <span className={'pill ' + s.status}>{s.status}</span>
                     </div>
-                    {m ? <RunViz engine={st.engine} model={m} seedHosts={s.id === runId ? seedHosts : []} />
-                      : <div className="muted" style={{ padding: 8 }}>waiting…</div>}
+                    <div className="stage-block-body">
+                      {m ? <RunViz engine={st.engine} model={m} seedHosts={s.id === runId ? seedHosts : []} />
+                        : <div className="muted" style={{ padding: 8 }}>waiting…</div>}
+                    </div>
                   </div>
                 )
-              })
-            ) : (
-              text ? <RunViz engine={engine} model={model} seedHosts={seedHosts} />
-                : <div className="muted" style={{ padding: 8 }}>connecting…</div>
-            )}
-          </div>
+              })}
+            </div>
+          ) : (
+            <div className="run-scroll">
+              {text ? <RunViz engine={engine} model={model} seedHosts={seedHosts} />
+                : <div className="muted" style={{ padding: 8 }}>connecting…</div>}
+            </div>
+          )}
         </div>
         {showLog && <div className="run-gutter" onMouseDown={startDrag} title="Drag to resize" />}
         {showLog && (
