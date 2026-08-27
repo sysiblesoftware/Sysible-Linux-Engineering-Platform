@@ -1162,7 +1162,7 @@ export function PipelineModal({ project, currentFile, initialSteps, initialName,
           {st.kind === 'inventory'
             ? <span className="muted" style={{ flex: 1, fontSize: 12.5 }}>Reads the applied VMs into this project’s inventory, then points the Ansible/Salt steps below at it.</span>
             : st.kind === 'enroll'
-            ? <span className="muted" style={{ flex: 1, fontSize: 12.5 }}>Registers the applied VMs into this project’s Controller as SSH hosts. Set the Controller via Access; place this after Apply.</span>
+            ? <span className="muted" style={{ flex: 1, fontSize: 12.5 }}>Enrolls the applied VMs into this project’s Controller as agents — each VM installs the Controller’s agent and self-enrolls. Place this after Apply; pick the Controller on the Enroll action if none is set.</span>
             : (<>
                 {st.kind === 'terraform'
                   ? <select value={st.target} onChange={(e) => upd(i, { target: e.target.value })} title="Action" style={{ flex: '1 1 auto', minWidth: 0 }}><option>plan</option><option>apply</option><option>destroy</option></select>

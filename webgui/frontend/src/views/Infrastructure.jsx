@@ -181,7 +181,7 @@ export function EnrollPicker({ r, controllers, onClose, onPick }) {
   const [busy, setBusy] = useState(false)
   return (
     <Modal title={`Enroll “${r.project_name}” VMs into a Controller`} onClose={onClose}>
-      <p className="muted" style={{ marginTop: 0 }}>Register the VMs this project applied as SSH hosts in a connected Controller.</p>
+      <p className="muted" style={{ marginTop: 0 }}>Enroll the VMs this project applied into a connected Controller as agents — each installs the Controller’s agent and self-enrolls.</p>
       <Field label="Controller">
         <select value={cid} onChange={(e) => setCid(e.target.value)}>
           {controllers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
