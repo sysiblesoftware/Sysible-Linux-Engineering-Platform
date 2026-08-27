@@ -482,6 +482,10 @@ export function CreateWizard({ onClose, onDone, project }) {
 
   if (!schema) return <Modal title="Create infrastructure" onClose={onClose}><div className="muted">Loading…</div></Modal>
   const opts = schema[provider]?.options || []
+  // libvirt "multiple VM types" mode: values.groups holds a list of per-group specs.
+  const groupsOn = provider === 'libvirt' && Array.isArray(values.groups)
+  // Per-VM fields that a group owns individually (hidden from the flat grid in groups mode).
+  const perVmKeys = ['count', 'memory', 'vcpu', 'disk_size']
 
   return (
     <Modal title={project ? `Build infrastructure in “${project.name}”` : 'Create infrastructure'} onClose={onClose} wide>
@@ -496,11 +500,22 @@ export function CreateWizard({ onClose, onDone, project }) {
       <div className="faint" style={{ fontSize: 12, margin: '2px 0 8px' }}>{schema[provider]?.blurb}</div>
 
       {provider === 'libvirt' && <LibvirtConnect values={values} set={set} />}
-      {provider === 'libvirt' && <PoolVolumePicker values={values} set={set} />}
-      {provider === 'libvirt' && <BaseImageField values={values} set={set} catalog={cloudImages} />}
+      {provider === 'libvirt' && (
+        <label className="row" style={{ gap: 7, fontSize: 13, cursor: 'pointer', margin: '4px 0' }}
+          title="Build several kinds of VM (different images/sizes) in one apply">
+          <input type="checkbox" checked={groupsOn} style={{ width: 'auto' }}
+            onChange={(e) => set('groups', e.target.checked
+              ? [_blankGroup(values, cloudImages)] : undefined)} />
+          Multiple VM types (e.g. Ubuntu + Arch in one run)
+        </label>
+      )}
+      {provider === 'libvirt' && !groupsOn && <PoolVolumePicker values={values} set={set} />}
+      {provider === 'libvirt' && !groupsOn && <BaseImageField values={values} set={set} catalog={cloudImages} />}
+      {provider === 'libvirt' && groupsOn && <LibvirtGroups values={values} set={set} catalog={cloudImages} />}
 
       <div className="task-palette" style={{ gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-        {opts.filter((o) => !(provider === 'libvirt' && (o.key === 'uri' || o.key === 'base_volume' || o.key === 'base_image'))).map((o) => (
+        {opts.filter((o) => !(provider === 'libvirt' && (o.key === 'uri' || o.key === 'base_volume' || o.key === 'base_image'
+          || (groupsOn && perVmKeys.includes(o.key))))).map((o) => (
           <Field key={o.key} label={o.label}>
             {o.type === 'select'
               ? <select value={values[o.key] ?? ''} onChange={(e) => set(o.key, e.target.value)}>
@@ -548,8 +563,20 @@ export function CreateWizard({ onClose, onDone, project }) {
       {node}
       <button className="primary" onClick={() => wrap(async () => {
         if (!project && !name.trim()) throw new Error('Give it a name.')
+        let options = values
+        if (groupsOn) {
+          if (!values.groups.length) throw new Error('Add at least one VM type, or turn off “Multiple VM types”.')
+          for (const g of values.groups) {
+            if (!(g.base_image || '').trim() && !(g.base_volume || '').trim())
+              throw new Error(`VM type “${g.name || '(unnamed)'}” needs a base image or pool volume.`)
+          }
+          // The per-group specs drive the build; drop the now-unused flat per-VM fields
+          // so they don't linger in the stored options or trip base_image validation.
+          options = { ...values }
+          for (const k of ['base_image', 'base_volume', ...perVmKeys]) delete options[k]
+        }
         const d = await api('infra', { method: 'POST', json: {
-          name: name || project?.name, provider, options: values,
+          name: name || project?.name, provider, options,
           project_id: project ? project.id : undefined,
           controller_id: controllerId ? Number(controllerId) : null,
           deploy_credential_id: deployCredId ? Number(deployCredId) : null,
@@ -559,6 +586,70 @@ export function CreateWizard({ onClose, onDone, project }) {
         onDone(d.project_id, name || project?.name, d.slug)
       })}>{project ? 'Build in this project' : 'Generate Terraform'}</button>
     </Modal>
+  )
+}
+
+const _DEFAULT_IMG = 'https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img'
+
+function _blankGroup(values, catalog) {
+  return {
+    name: '', count: 1, memory: '2048', vcpu: '2', disk_size: 20,
+    base_image: (catalog && catalog[0] && catalog[0].url) || values.base_image || _DEFAULT_IMG,
+    base_volume: '',
+  }
+}
+
+// Editor for libvirt "multiple VM types": a repeatable list of groups, each with its
+// own name, count, memory, vCPUs, disk and image (a catalog URL, a free URL, or an
+// existing pool volume). Writes values.groups, which the backend turns into a per-group
+// Terraform resource set built together in one apply.
+function LibvirtGroups({ values, set, catalog }) {
+  const groups = values.groups || []
+  const upd = (i, patch) => { const g = groups.slice(); g[i] = { ...g[i], ...patch }; set('groups', g) }
+  const add = () => set('groups', [...groups, _blankGroup(values, catalog)])
+  const del = (i) => set('groups', groups.filter((_, j) => j !== i))
+  return (
+    <div style={{ border: '1px solid var(--line)', borderRadius: 8, padding: 8, margin: '4px 0' }}>
+      <div className="faint" style={{ fontSize: 12, marginBottom: 6 }}>
+        Each type becomes its own set of VMs in the same apply. Give each a short name
+        (used in the VM names), a count, size, and an image.
+      </div>
+      {groups.map((g, i) => (
+        <div key={i} className="row" style={{ gap: 6, flexWrap: 'wrap', alignItems: 'flex-end',
+          marginBottom: 8, paddingBottom: 8,
+          borderBottom: i < groups.length - 1 ? '1px dashed var(--line)' : 'none' }}>
+          <Field label="Name"><input style={{ width: 90 }} value={g.name} placeholder="ubuntu"
+            onChange={(e) => upd(i, { name: e.target.value })} /></Field>
+          <Field label="Count"><input type="number" min="1" style={{ width: 58 }} value={g.count}
+            onChange={(e) => upd(i, { count: Number(e.target.value) })} /></Field>
+          <Field label="Mem (MB)"><select value={String(g.memory)} onChange={(e) => upd(i, { memory: e.target.value })}>
+            {['1024', '2048', '4096', '8192', '16384'].map((m) => <option key={m}>{m}</option>)}</select></Field>
+          <Field label="vCPU"><select value={String(g.vcpu)} onChange={(e) => upd(i, { vcpu: e.target.value })}>
+            {['1', '2', '4', '8'].map((m) => <option key={m}>{m}</option>)}</select></Field>
+          <Field label="Disk (GB)"><input type="number" min="1" style={{ width: 68 }} value={g.disk_size}
+            onChange={(e) => upd(i, { disk_size: Number(e.target.value) })} /></Field>
+          <Field label="Image (catalog)">
+            <select value={catalog.find((c) => c.url === g.base_image) ? g.base_image : ''} style={{ maxWidth: 180 }}
+              onChange={(e) => upd(i, { base_image: e.target.value, base_volume: '' })}>
+              <option value="">Custom / pool volume…</option>
+              {catalog.map((c) => <option key={c.url} value={c.url}>{c.label}</option>)}
+            </select>
+          </Field>
+          <button className="danger ghost sm" title="Remove this type" onClick={() => del(i)}
+            disabled={groups.length === 1}>✕</button>
+          <div style={{ flexBasis: '100%' }} />
+          <Field label="…or base image URL / existing pool volume">
+            <div className="row" style={{ gap: 6 }}>
+              <input style={{ minWidth: 240 }} placeholder="https://…img" value={g.base_image}
+                onChange={(e) => upd(i, { base_image: e.target.value, base_volume: e.target.value ? '' : g.base_volume })} />
+              <input style={{ width: 130 }} placeholder="pool volume" value={g.base_volume}
+                onChange={(e) => upd(i, { base_volume: e.target.value, base_image: e.target.value ? '' : g.base_image })} />
+            </div>
+          </Field>
+        </div>
+      ))}
+      <button className="ghost sm" onClick={add}>＋ Add VM type</button>
+    </div>
   )
 }
 
