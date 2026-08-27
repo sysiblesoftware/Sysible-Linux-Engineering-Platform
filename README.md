@@ -15,6 +15,15 @@ IDE built in.
 <img width="765" height="441" alt="Screenshot 2026-08-27 at 2 30 57 PM" src="https://github.com/user-attachments/assets/747efd2c-3668-47b5-b4f7-cf7aa1841c74" />
 
 
+## Documentation
+
+- **[User Guide](docs/GUIDE.md)** — task-oriented walkthrough of every part of the
+  console: projects & the IDE, inventories, credentials, running Ansible/Terraform/
+  Salt, provisioning VMs, connecting a Controller and enrolling hosts, pipelines,
+  and troubleshooting.
+- **[Running SLEP](docs/RUNNING.md)** — install and day-2 operations (Docker, TLS,
+  the `slep` CLI, backups).
+
 ## What it does
 
 <img width="2474" height="878" alt="Screenshot 2026-08-27 at 2 35 02 PM" src="https://github.com/user-attachments/assets/4de59dd6-6a8a-4203-98c9-b138dc77dc34" />
