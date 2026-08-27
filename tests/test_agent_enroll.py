@@ -44,6 +44,33 @@ def test_fetch_agent_bundle_error_raises(monkeypatch):
         assert "no controller address" in str(e)
 
 
+def test_fetch_agent_bundle_404_is_actionable(monkeypatch):
+    # A bare FastAPI 404 ("Not Found") means the route is missing — an old Controller or
+    # a URL pointing at the wrong service. The message must name both causes, not echo
+    # "Not Found", so the operator knows what to actually do.
+    monkeypatch.setattr(ci.requests, "get",
+                        lambda *a, **k: _Resp(404, payload={"detail": "Not Found"}))
+    try:
+        ci.fetch_agent_bundle("https://ctrl.example:9000", "k")
+        assert False, "should have raised"
+    except ci.ControllerImportError as e:
+        m = str(e)
+        assert "/remote/agent-bundle" in m and "404" in m
+        assert "older build" in m or "wrong service" in m
+
+
+def test_fetch_agent_bundle_200_html_rejected(monkeypatch):
+    # A 200 that isn't a zip (e.g. the portal login page) must NOT be shipped to the host
+    # as an "agent bundle" — it's a misdirected URL, and we say so.
+    monkeypatch.setattr(ci.requests, "get",
+                        lambda *a, **k: _Resp(200, content=b"<!doctype html><html>login"))
+    try:
+        ci.fetch_agent_bundle("https://ctrl.example", "k")
+        assert False, "should have raised"
+    except ci.ControllerImportError as e:
+        assert "portal" in str(e) or "not an agent bundle" in str(e) or "instead of an" in str(e)
+
+
 def test_agent_install_cmd_builds_ssh_argv():
     cmd = keydist.agent_install_cmd("root@jump", "admin@10.0.0.5", "/data/mk")
     assert cmd[0] == "ssh"

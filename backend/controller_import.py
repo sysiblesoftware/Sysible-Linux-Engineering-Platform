@@ -266,15 +266,40 @@ def fetch_agent_bundle(controller_url: str, api_key: str) -> bytes:
     try:
         resp = requests.get(url, headers={"X-API-Key": api_key}, verify=_verify(), timeout=30)
     except requests.exceptions.RequestException as e:
-        raise ControllerImportError(f"could not reach Controller: {e}")
-    if resp.status_code != 200:
-        detail = f"HTTP {resp.status_code}"
-        try:
-            detail = resp.json().get("detail") or detail
-        except ValueError:
-            detail = (resp.text or "").strip()[:200] or detail
-        raise ControllerImportError(f"agent bundle download failed: {detail}")
-    return resp.content
+        raise ControllerImportError(f"could not reach the Controller at {url}: {e}")
+    if resp.status_code == 200:
+        # A minted bundle is a zip. If we somehow got HTML/JSON with a 200 (e.g. the URL
+        # points at the portal web UI, which happily 200s its login page), it isn't a
+        # bundle — surface that instead of shipping an HTML page to the host as an "agent".
+        ctype = (getattr(resp, "headers", {}) or {}).get("Content-Type", "").lower()
+        if "zip" in ctype or resp.content[:2] == b"PK":
+            return resp.content
+        raise ControllerImportError(
+            f"the Controller at {url} returned {ctype or 'a non-zip response'} instead of an "
+            f"agent bundle — {base} looks like the portal/web UI, not the Controller API. "
+            f"Reconnect this Controller using its backend API address + machine API key.")
+    # Non-200: decode the server's detail, then map the common cases to an actionable line.
+    detail = f"HTTP {resp.status_code}"
+    try:
+        detail = resp.json().get("detail") or detail
+    except ValueError:
+        detail = (resp.text or "").strip()[:200] or detail
+    if resp.status_code == 404:
+        # FastAPI returns {"detail":"Not Found"} for an unknown route. The credentials and
+        # host are fine — the route just isn't there — so point at the two real causes.
+        raise ControllerImportError(
+            f"the Controller at {url} has no agent-bundle route (HTTP 404 · {detail}). Either "
+            f"this Controller is an older build without agent (pull) enrollment — update it — "
+            f"or {base} points at the wrong service (e.g. the portal on its own port) instead "
+            f"of the Controller backend API. Reconnect the Controller with its API address.")
+    if resp.status_code in (401, 403):
+        raise ControllerImportError(
+            f"the Controller at {url} rejected SLEP's machine API key (HTTP {resp.status_code} · "
+            f"{detail}). Reconnect this Controller with a current backend API key.")
+    if resp.status_code == 409:
+        # bundle_addresses() came back empty — the Controller has no configured address.
+        raise ControllerImportError(f"the Controller can't build a bundle yet: {detail}")
+    raise ControllerImportError(f"agent bundle download failed ({url}): {detail}")
 
 
 @_accepts_cert
