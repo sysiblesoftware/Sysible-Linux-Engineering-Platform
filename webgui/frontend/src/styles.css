@@ -305,6 +305,20 @@ label.fld{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--
 .stage-block .viz-flow-box{border:0;background:transparent;padding:0}
 .stage-block .viz{gap:8px}
 
+/* Enroll pseudo-step viz — one row per VM registered into the Controller. */
+.enroll-list{display:flex;flex-direction:column;gap:6px;margin-top:6px}
+.enroll-row{display:flex;align-items:center;gap:8px;font-size:13px;min-width:0}
+.enroll-dot{width:9px;height:9px;border-radius:50%;flex:0 0 auto}
+.enroll-name{flex:0 0 auto}
+.enroll-ip{font-size:12px;flex:0 0 auto}
+.enroll-detail{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted)}
+.enroll-detail.ok{color:var(--ok,#63c869)}
+.enroll-detail.bad{color:var(--err,#e5534b)}
+.enroll-err{margin-top:8px;font-size:12.5px;color:var(--err,#e5534b);
+  background:color-mix(in srgb,var(--err,#e5534b) 12%,transparent);
+  border:1px solid color-mix(in srgb,var(--err,#e5534b) 35%,transparent);
+  border-radius:6px;padding:6px 8px}
+
 /* Organizations / Teams — role pills, team member chips, selected row. */
 .pill.role-admin{background:rgba(109,219,115,.16);color:var(--green,#63c869)}
 .pill.role-operator{background:rgba(122,162,255,.16);color:var(--accent,#7aa2ff)}

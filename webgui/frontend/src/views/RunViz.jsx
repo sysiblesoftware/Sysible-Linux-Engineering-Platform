@@ -16,6 +16,7 @@ export default function RunViz({ engine, model, seedHosts }) {
   if (engine === 'terraform') return <TerraformViz model={model} />
   if (engine === 'salt') return <SaltViz model={model} />
   if (engine === 'inventory') return <InventoryViz model={model} />
+  if (engine === 'enroll') return <EnrollViz model={model} />
   return <AnsibleViz model={model} seedHosts={seedHosts} />
 }
 
@@ -25,7 +26,7 @@ export default function RunViz({ engine, model, seedHosts }) {
 // that step's run, which swaps BOTH the detail viz and the log below to it — so the
 // log and steps track the stage you select. Renders nothing for a lone (non-pipeline)
 // run. `seq` is the group's runs [{id, kind, target, status}], from /pipelines/runs.
-const STAGE_ICON = { terraform: '⬢', inventory: '▤', ansible: '⏻', salt: '◆' }
+const STAGE_ICON = { terraform: '⬢', inventory: '▤', ansible: '⏻', salt: '◆', enroll: '◈' }
 const STAGE_COLOR = {
   success: 'var(--ok,#63c869)', failed: 'var(--err,#e5534b)', canceled: '#7d8ca3',
   running: 'var(--warn,#e0a83b)', queued: '#7d8ca3', pending: '#7d8ca3',
@@ -75,6 +76,51 @@ function InventoryViz({ model }) {
           : <div className="muted">Reading the applied VMs into this project’s inventory…</div>}
       <div className="faint" style={{ fontSize: 12, marginTop: 10 }}>
         The Ansible/Salt steps that follow in this sequence are pointed at the inventory built here.
+      </div>
+    </div>
+  )
+}
+
+// --------------------------------------------------------------- Enroll
+// The pipeline's 'enroll' pseudo-step: register the applied VMs into the project's
+// Controller. Not an Ansible play — so instead of an ok/changed grid, show one row
+// per VM with its ✓/✗ into the Controller and the reason on failure, plus the
+// "enrolled X/Y" tally. Reads the model from parseEnroll.
+function EnrollViz({ model }) {
+  const { hosts = [], enrolled, total, controller, errors = [], done } = model
+  const allOk = total != null && enrolled === total && total > 0
+  const summary = total != null
+    ? `${enrolled}/${total} enrolled${controller ? ` → ${controller}` : ''}`
+    : (done ? 'nothing enrolled' : 'enrolling…')
+  return (
+    <div className="viz">
+      <div className="viz-flow-box">
+        <div className="flow-head">
+          <div className="flow-title">
+            <span className="faint">Enroll{controller ? ` · ${controller}` : ' → Controller'}</span>
+            <b>{hosts.length ? `${hosts.length} VM(s)` : done ? 'Done' : 'Starting…'}</b>
+          </div>
+          <div className="spacer" />
+          <span className={'pill ' + (total == null ? 'running' : allOk ? 'success' : 'failed')}>{summary}</span>
+        </div>
+        {hosts.length === 0 && errors.length === 0 && (
+          <div className="muted" style={{ padding: '6px 2px' }}>
+            Registering this project’s VMs into the Controller…
+          </div>
+        )}
+        <div className="enroll-list">
+          {hosts.map((h, i) => (
+            <div key={i} className="enroll-row" title={h.detail}>
+              <span className="enroll-dot" style={{ background: h.ok ? STATUS_COLOR.ok : STATUS_COLOR.failed }} />
+              <b className="enroll-name">{h.name || '(host)'}</b>
+              {h.ip && <span className="faint mono enroll-ip">{h.ip}</span>}
+              <span className={'enroll-detail ' + (h.ok ? 'ok' : 'bad')}>{h.detail}</span>
+            </div>
+          ))}
+        </div>
+        {errors.map((e, i) => (
+          <div key={'e' + i} className="enroll-err">{e}</div>
+        ))}
       </div>
     </div>
   )

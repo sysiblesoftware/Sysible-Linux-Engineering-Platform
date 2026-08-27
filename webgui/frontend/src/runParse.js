@@ -126,9 +126,40 @@ export function parseSalt(text) {
   return { engine: 'salt', minions }
 }
 
+// ------------------------------------------------------------------ Enroll
+// Reads the 'enroll' pseudo-step log: one "✓/✗ <name> <ip> — <detail>" line per
+// VM as it's registered into the Controller, the "Enrolled X/Y into <controller>."
+// tally, and any "!! <error>" line (no Controller set, nothing applied yet, a
+// bundle-fetch failure). Its own model so the viz shows per-host enrollment, not a
+// borrowed Ansible ok/changed grid.
+export function parseEnroll(text) {
+  const t = stripAnsi(text)
+  const IP = /^\d{1,3}(?:\.\d{1,3}){3}$/
+  const hosts = []
+  let enrolled = null, total = null, controller = '', done = false
+  const errors = []
+  for (const line of t.split('\n')) {
+    let m
+    if ((m = line.match(/^([✓✗])\s+(.+?)\s+[—-]\s+(.*)$/))) {
+      const head = m[2].trim().split(/\s+/)
+      let ip = ''
+      if (head.length > 1 && IP.test(head[head.length - 1])) ip = head.pop()
+      hosts.push({ ok: m[1] === '✓', name: head.join(' '), ip, detail: m[3].trim() })
+    } else if ((m = line.match(/^Enrolled\s+(\d+)\/(\d+)\s+into\s+(.+?)\.?$/))) {
+      enrolled = +m[1]; total = +m[2]; controller = m[3].trim()
+    } else if ((m = line.match(/^!!\s*(.+)$/))) {
+      errors.push(m[1].trim())
+    } else if (/^==\s*finished:/.test(line)) {
+      done = true
+    }
+  }
+  return { engine: 'enroll', hosts, enrolled, total, controller, errors, done }
+}
+
 export function parseRun(engine, text) {
   if (engine === 'terraform') return parseTerraform(text)
   if (engine === 'salt') return parseSalt(text)
+  if (engine === 'enroll') return parseEnroll(text)
   // The pipeline's auto-inventory pseudo-step has no host/task model — its viz
   // reads the summary straight from the log, so hand back the raw text.
   if (engine === 'inventory') return { raw: text || '' }
