@@ -52,6 +52,89 @@ def _tls_verify():
     return True
 
 
+# The PEM SLEP has pinned for the Controller of the current operation (trust-on-first-use),
+# threaded to the internal requests calls via a context var so we don't have to add a
+# cert argument to every helper. Empty → fall back to _tls_verify() (env / public CA).
+import contextlib
+import contextvars
+
+_PINNED_CERT: contextvars.ContextVar[str] = contextvars.ContextVar("slep_pinned_cert", default="")
+_CERT_CACHE: dict[str, str] = {}
+
+
+def _cert_file(pem: str) -> str:
+    """A cached temp-file path for a PEM (requests' verify= needs a path, not a string)."""
+    import hashlib
+    import tempfile
+    key = hashlib.sha256(pem.encode()).hexdigest()
+    path = _CERT_CACHE.get(key)
+    if path and os.path.isfile(path):
+        return path
+    fd, path = tempfile.mkstemp(prefix="slep-ctrl-ca-", suffix=".pem")
+    try:
+        os.write(fd, pem.encode())
+    finally:
+        os.close(fd)
+    _CERT_CACHE[key] = path
+    return path
+
+
+def _verify():
+    """What to pass to requests' verify=: a pinned Controller cert if one is set for this
+    operation, else the env/public-CA default."""
+    pem = _PINNED_CERT.get()
+    return _cert_file(pem) if pem else _tls_verify()
+
+
+@contextlib.contextmanager
+def _pinned(cert_pem: str):
+    token = _PINNED_CERT.set(cert_pem or "")
+    try:
+        yield
+    finally:
+        _PINNED_CERT.reset(token)
+
+
+def _accepts_cert(fn):
+    """Give a public helper a keyword-only `cert_pem` that pins the Controller's cert for
+    the duration of the call (so its requests verify against it), without threading the
+    argument through the body."""
+    import functools
+
+    @functools.wraps(fn)
+    def wrapper(*args, cert_pem="", **kwargs):
+        with _pinned(cert_pem):
+            return fn(*args, **kwargs)
+    return wrapper
+
+
+def _is_cert_error(exc) -> bool:
+    """True if an exception/message looks like a TLS certificate-verification failure
+    (self-signed / unknown CA) — the signal to offer trust-on-first-use pinning."""
+    s = str(exc).lower()
+    return ("certificate verify failed" in s or "self-signed certificate" in s
+            or "self signed certificate" in s or "sslcertverificationerror" in s
+            or "certificate_verify_failed" in s)
+
+
+def fetch_server_cert(base_url: str) -> str:
+    """Retrieve the Controller's leaf TLS certificate as PEM WITHOUT verifying it — for
+    trust-on-first-use pinning of a self-signed/on-prem Controller. https only; SSRF-guarded
+    (no loopback/metadata). Raises ControllerImportError if it can't be fetched."""
+    import ssl
+    u = urlparse(base_url if "://" in base_url else "https://" + base_url)
+    if u.scheme != "https":
+        raise ControllerImportError("A certificate can only be pinned for an https Controller.")
+    host = u.hostname
+    if not host:
+        raise ControllerImportError("Invalid Controller URL.")
+    _guard_url(base_url if "://" in base_url else "https://" + base_url)
+    try:
+        return ssl.get_server_certificate((host, u.port or 443), timeout=15)
+    except Exception as e:  # noqa: BLE001
+        raise ControllerImportError(f"could not fetch the Controller's certificate: {e}")
+
+
 def _guard_url(url: str) -> None:
     """SSRF guard: resolve the target host and refuse loopback, link-local (cloud
     metadata at 169.254.169.254 / fd00:ec2::), unspecified, multicast, and reserved
@@ -92,7 +175,7 @@ def _get(base_url: str, path: str, api_key: str, allow_404: bool = False):
     url = base_url + path
     _guard_url(url)
     try:
-        resp = requests.get(url, headers={"X-API-Key": api_key}, verify=_tls_verify(), timeout=20)
+        resp = requests.get(url, headers={"X-API-Key": api_key}, verify=_verify(), timeout=20)
     except requests.exceptions.RequestException as e:
         raise ControllerImportError(f"Could not reach the Controller at {url}: {e}")
     if resp.status_code in (401, 403):
@@ -112,6 +195,7 @@ class ControllerMFARequired(ControllerImportError):
     supplied — the caller should collect a TOTP code and retry."""
 
 
+@_accepts_cert
 def exchange_credentials_for_key(controller_url: str, username: str, password: str, totp_code: str = ""):
     """Trade a Controller superuser's console username+password (and TOTP code,
     if their account has MFA) for the Controller's backend API key, via the
@@ -131,7 +215,7 @@ def exchange_credentials_for_key(controller_url: str, username: str, password: s
         payload["totp_code"] = totp_code
     try:
         _guard_url(url)
-        resp = requests.post(url, json=payload, verify=_tls_verify(), timeout=20)
+        resp = requests.post(url, json=payload, verify=_verify(), timeout=20)
     except requests.exceptions.RequestException as e:
         raise ControllerImportError(f"Could not reach the Controller at {url}: {e}")
     if resp.status_code == 404:
@@ -159,6 +243,7 @@ def exchange_credentials_for_key(controller_url: str, username: str, password: s
     return key
 
 
+@_accepts_cert
 def get_controller_key(controller_url: str, api_key: str) -> str:
     """Fetch a Controller's standing SSH public key (GET /remote/controller-key).
     Baked into a new VM's cloud-init so the Controller can SSH in after boot."""
@@ -169,6 +254,7 @@ def get_controller_key(controller_url: str, api_key: str) -> str:
     return ""
 
 
+@_accepts_cert
 def fetch_agent_bundle(controller_url: str, api_key: str) -> bytes:
     """Download a fresh one-time AGENT enrollment bundle (zip) from a Controller with the
     machine API key (GET /remote/agent-bundle). Each call mints a new single-use token,
@@ -178,7 +264,7 @@ def fetch_agent_bundle(controller_url: str, api_key: str) -> bytes:
     base = _normalize_base(controller_url)
     url = base + "/remote/agent-bundle"
     try:
-        resp = requests.get(url, headers={"X-API-Key": api_key}, verify=_tls_verify(), timeout=30)
+        resp = requests.get(url, headers={"X-API-Key": api_key}, verify=_verify(), timeout=30)
     except requests.exceptions.RequestException as e:
         raise ControllerImportError(f"could not reach Controller: {e}")
     if resp.status_code != 200:
@@ -191,6 +277,7 @@ def fetch_agent_bundle(controller_url: str, api_key: str) -> bytes:
     return resp.content
 
 
+@_accepts_cert
 def register_ssh_host(controller_url: str, api_key: str, name: str, ip: str,
                       user: str = "root", environment: str = ""):
     """Register one SSH-managed host in a Controller (POST /remote/hosts). The
@@ -200,7 +287,7 @@ def register_ssh_host(controller_url: str, api_key: str, name: str, ip: str,
     try:
         resp = requests.post(url, headers={"X-API-Key": api_key},
                              json={"name": name, "ip": ip, "user": user, "environment": environment},
-                             verify=_tls_verify(), timeout=20)
+                             verify=_verify(), timeout=20)
     except requests.exceptions.RequestException as e:
         return False, f"could not reach Controller: {e}"
     if resp.status_code == 200:
@@ -213,6 +300,7 @@ def register_ssh_host(controller_url: str, api_key: str, name: str, ip: str,
     return False, detail
 
 
+@_accepts_cert
 def test_connection(controller_url: str, api_key: str):
     """Probe a Controller with the given key — used by 'Connect to Controller'.
     Returns {ok, agents, ssh, total} (host counts it can see). Raises
@@ -229,6 +317,7 @@ def test_connection(controller_url: str, api_key: str):
     return {"ok": True, "agents": len(agents), "ssh": ssh, "total": len(agents) + ssh}
 
 
+@_accepts_cert
 def fetch_hosts(controller_url: str, api_key: str):
     """Return the Controller's hosts as a normalized, importable list WITHOUT
     writing anything — the console shows this so the operator can pick which hosts

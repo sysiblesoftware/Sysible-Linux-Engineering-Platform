@@ -1379,7 +1379,7 @@ def controller_hosts(cid: int, request: Request, user: str = Depends(current_use
     # could drive another tenant's Controller key to enumerate that Controller's fleet.
     _guard_object_org(request, ctrl.get("org_id"), "operator")
     try:
-        return controller_import.fetch_hosts(ctrl["base_url"], ctrl["api_key"])
+        return controller_import.fetch_hosts(ctrl["base_url"], ctrl["api_key"], cert_pem=ctrl.get("tls_cert", ""))
     except controller_import.ControllerImportError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -1435,10 +1435,28 @@ def connect_controller(body: dict = Body(...), user: str = Depends(require_super
     if not url:
         raise HTTPException(status_code=400, detail="Controller URL is required.")
 
+    # TLS trust-on-first-use: a standalone/on-prem Controller usually serves a SELF-SIGNED
+    # cert. Rather than make the operator copy a PEM to the SLEP host, run each call; the
+    # first time one fails cert verification, fetch the presented cert, PIN it, and retry
+    # verifying against it. The pinned cert is stored with the Controller and used for all
+    # later calls (enroll/import), so it's TOFU, not blanket-insecure.
+    cert_pem = ""
+
+    def _tofu(run):
+        nonlocal cert_pem
+        try:
+            return run(cert_pem)
+        except controller_import.ControllerImportError as e:
+            if cert_pem or not controller_import._is_cert_error(e):
+                raise
+            cert_pem = controller_import.fetch_server_cert(url)   # pin once, then retry
+            return run(cert_pem)
+
     # Username/password path: exchange console creds for the API key first.
     if not key and (username or password):
         try:
-            key = controller_import.exchange_credentials_for_key(url, username, password, totp_code)
+            key = _tofu(lambda c: controller_import.exchange_credentials_for_key(
+                url, username, password, totp_code, cert_pem=c))
         except controller_import.ControllerMFARequired as e:
             # Not an error for the SLEP session — tell the UI to collect a second
             # factor and resubmit. (A 401 here would trip api.js's auto-logout.)
@@ -1450,12 +1468,15 @@ def connect_controller(body: dict = Body(...), user: str = Depends(require_super
         raise HTTPException(status_code=400,
                             detail="Provide a Controller superuser username + password, or its backend API key.")
     try:
-        probe = controller_import.test_connection(url, key)   # fails closed on a bad key/URL
+        probe = _tofu(lambda c: controller_import.test_connection(url, key, cert_pem=c))   # fails closed on a bad key/URL
     except controller_import.ControllerImportError as e:
         raise HTTPException(status_code=400, detail=str(e))
     cid = db.create_controller(name or url, url, key,
-                               org_id=_coerce_org_id(body.get("org_id")))
-    return {"status": "connected", "controller": db.get_controller(cid), **probe}
+                               org_id=_coerce_org_id(body.get("org_id")), tls_cert=cert_pem)
+    out = {"status": "connected", "controller": db.get_controller(cid), **probe}
+    if cert_pem:
+        out["pinned_cert"] = True   # UI can note SLEP trusted a self-signed cert
+    return out
 
 
 @app.post("/controllers/{cid}/test")
@@ -1464,7 +1485,7 @@ def test_controller(cid: int, user: str = Depends(require_superuser)):
     if not ctrl:
         raise HTTPException(status_code=404, detail="Controller connection not found.")
     try:
-        return {"status": "ok", **controller_import.test_connection(ctrl["base_url"], ctrl["api_key"])}
+        return {"status": "ok", **controller_import.test_connection(ctrl["base_url"], ctrl["api_key"], cert_pem=ctrl.get("tls_cert", ""))}
     except controller_import.ControllerImportError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -2997,7 +3018,7 @@ def infra_create(body: dict = Body(...), user: str = Depends(require_operator)):
         if not ctrl:
             raise HTTPException(status_code=404, detail="Controller not found.")
         try:
-            controller_key = controller_import.get_controller_key(ctrl["base_url"], ctrl["api_key"])
+            controller_key = controller_import.get_controller_key(ctrl["base_url"], ctrl["api_key"], cert_pem=ctrl.get("tls_cert", ""))
         except controller_import.ControllerImportError:
             controller_key = ""   # non-fatal: generate anyway, enroll can install the key later
 
@@ -3766,7 +3787,8 @@ def _enroll_infra_hosts(project_id: int, controller_id=None):
             results.append({"name": nm, "ip": "", "ok": False, "detail": "no IP yet"})
             continue
         ok, detail = controller_import.register_ssh_host(
-            ctrl["base_url"], ctrl["api_key"], nm, ip, huser, meta.get("environment", ""))
+            ctrl["base_url"], ctrl["api_key"], nm, ip, huser, meta.get("environment", ""),
+            cert_pem=ctrl.get("tls_cert", ""))
         ok_n += 1 if ok else 0
         results.append({"name": nm, "ip": ip, "ok": ok, "detail": detail})
     return {"results": results, "enrolled": ok_n, "total": len(hosts), "controller": ctrl["name"]}
@@ -3815,7 +3837,7 @@ def _enroll_infra_agents(project_id: int, controller_id=None):
             results.append({"name": nm, "ip": "", "ok": False, "detail": "no IP yet"})
             continue
         try:
-            zip_bytes = controller_import.fetch_agent_bundle(ctrl["base_url"], ctrl["api_key"])
+            zip_bytes = controller_import.fetch_agent_bundle(ctrl["base_url"], ctrl["api_key"], cert_pem=ctrl.get("tls_cert", ""))
         except controller_import.ControllerImportError as e:
             results.append({"name": nm, "ip": ip, "ok": False, "detail": str(e)})
             continue

@@ -205,7 +205,7 @@ def test_enroll_registers_hosts_in_controller(client, monkeypatch):
     cid = client.post("/controllers", json={"name": "Prod", "base_url": "http://ctrl:9000", "api_key": "K"}).json()["controller"]["id"]
 
     # Create infra targeting that controller (controller-key fetch mocked to empty).
-    monkeypatch.setattr(ci, "get_controller_key", lambda url, key: "ssh-ed25519 CTRL")
+    monkeypatch.setattr(ci, "get_controller_key", lambda url, key, **kw: "ssh-ed25519 CTRL")
     pid = client.post("/infra", json={"name": "fleet", "provider": "aws",
                                      "options": {"count": 2, "name_prefix": "web", "ssh_user": "ubuntu"},
                                      "controller_id": cid}).json()["project_id"]
@@ -220,7 +220,7 @@ def test_enroll_registers_hosts_in_controller(client, monkeypatch):
     monkeypatch.setattr(appmod.subprocess, "run", lambda *a, **k: Out())
     registered = []
     monkeypatch.setattr(ci, "register_ssh_host",
-                        lambda url, key, name, ip, user="root", environment="": (registered.append((name, ip)) or (True, "enrolled")))
+                        lambda url, key, name, ip, user="root", environment="", **kw: (registered.append((name, ip)) or (True, "enrolled")))
 
     # method:"ssh" selects the legacy SSH-transport (Connect) registration path.
     d = client.post(f"/infra/{pid}/enroll", json={"method": "ssh"}).json()
@@ -235,7 +235,7 @@ def test_enroll_default_installs_agents(client, monkeypatch):
     import backend.app as appmod
     monkeypatch.setattr(ci.requests, "get", lambda url, **k: Resp(200, {"agents": []}))
     cid = client.post("/controllers", json={"name": "Prod2", "base_url": "http://ctrl:9000", "api_key": "K"}).json()["controller"]["id"]
-    monkeypatch.setattr(ci, "get_controller_key", lambda url, key: "ssh-ed25519 CTRL")
+    monkeypatch.setattr(ci, "get_controller_key", lambda url, key, **kw: "ssh-ed25519 CTRL")
     pid = client.post("/infra", json={"name": "fleet2", "provider": "aws",
                                      "options": {"count": 2, "name_prefix": "web", "ssh_user": "ubuntu"},
                                      "controller_id": cid}).json()["project_id"]
@@ -246,7 +246,7 @@ def test_enroll_default_installs_agents(client, monkeypatch):
     monkeypatch.setattr(appmod.keydist, "managed_key_path", lambda: "/data/mk")
     fetched = []
     monkeypatch.setattr(ci, "fetch_agent_bundle",
-                        lambda url, key: (fetched.append(url) or b"PKzip"))
+                        lambda url, key, **kw: (fetched.append(url) or b"PKzip"))
 
     class Out:
         returncode = 0
@@ -1680,7 +1680,7 @@ def test_infra_regenerate_edits_and_preserves_wiring(client, monkeypatch):
     import backend.controller_import as ci
     import backend.db as db
     monkeypatch.setattr(ci.requests, "get", lambda url, **k: Resp(200, {"agents": []}))
-    monkeypatch.setattr(ci, "get_controller_key", lambda url, key: "ssh-ed25519 CTRL")
+    monkeypatch.setattr(ci, "get_controller_key", lambda url, key, **kw: "ssh-ed25519 CTRL")
     cid = client.post("/controllers", json={"name": "P", "base_url": "http://c:9000", "api_key": "K"}).json()["controller"]["id"]
     img = "https://cloud-images.ubuntu.com/noble/current/noble.img"
     pid = client.post("/infra", json={"name": "editme", "provider": "libvirt",
@@ -1704,3 +1704,29 @@ def test_infra_regenerate_edits_and_preserves_wiring(client, monkeypatch):
     # Without the regenerate flag, a second build into an infra project is refused.
     assert client.post("/infra", json={"name": "editme", "provider": "libvirt", "project_id": pid,
         "options": {"name_prefix": "e"}}).status_code == 400
+
+
+def test_connect_controller_pins_self_signed_cert(client, monkeypatch):
+    """Trust-on-first-use: connecting a self-signed Controller fetches + pins its cert,
+    verifies against it, and stores it — no manual cert copying, no insecure mode."""
+    import backend.controller_import as ci
+    import backend.db as db
+    calls = {"n": 0}
+
+    def flaky_test(url, key, cert_pem=""):
+        # First attempt (no pinned cert) fails verification; retry WITH the cert works.
+        if not cert_pem:
+            calls["n"] += 1
+            raise ci.ControllerImportError("HTTPSConnectionPool: certificate verify failed: self-signed certificate")
+        return {"agents": 0, "ssh": 0, "total": 0}
+
+    monkeypatch.setattr(ci, "test_connection", flaky_test)
+    monkeypatch.setattr(ci, "fetch_server_cert", lambda url: "-----BEGIN CERTIFICATE-----\nPINNED\n-----END CERTIFICATE-----\n")
+
+    r = client.post("/controllers", json={"name": "SelfSigned", "base_url": "https://192.168.8.249:9000", "api_key": "K"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "connected" and body.get("pinned_cert") is True
+    assert calls["n"] == 1                                   # failed once, then pinned + retried
+    cid = body["controller"]["id"]
+    assert "PINNED" in (db.get_controller(cid, include_key=True).get("tls_cert") or "")

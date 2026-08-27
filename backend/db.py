@@ -350,6 +350,12 @@ def init_db() -> None:
             cols = [r["name"] for r in c.execute(f"PRAGMA table_info({tbl})")]
             if "org_id" not in cols:
                 c.execute(f"ALTER TABLE {tbl} ADD COLUMN org_id INTEGER")
+        # A pinned TLS certificate (PEM) for a self-signed / on-prem Controller, captured
+        # trust-on-first-use when connecting, so SLEP verifies against it instead of the
+        # public CA store — no manual cert copying, no blanket insecure mode.
+        ctrl_cols = [r["name"] for r in c.execute("PRAGMA table_info(controllers)")]
+        if "tls_cert" not in ctrl_cols:
+            c.execute("ALTER TABLE controllers ADD COLUMN tls_cert TEXT DEFAULT ''")
         _seed_default_org(c)
         # Project hierarchy: a project may nest under a parent project (folders /
         # sub-projects). NULL parent_id = a top-level project.
@@ -1193,15 +1199,21 @@ def get_controller(cid: int, include_key=False):
     return d
 
 
-def create_controller(name, base_url, api_key, org_id=None):
+def create_controller(name, base_url, api_key, org_id=None, tls_cert=""):
     if org_id is None:
         org_id = default_org_id()
     with _connect() as c:
         cur = c.execute(
-            "INSERT INTO controllers(name,base_url,api_key,org_id,created) VALUES(?,?,?,?,?)",
-            (name, base_url, _enc(api_key), org_id, _now()),   # api_key encrypted at rest
+            "INSERT INTO controllers(name,base_url,api_key,org_id,created,tls_cert) VALUES(?,?,?,?,?,?)",
+            (name, base_url, _enc(api_key), org_id, _now(), tls_cert or ""),   # api_key encrypted at rest
         )
         return cur.lastrowid
+
+
+def set_controller_tls_cert(cid: int, tls_cert: str):
+    """Pin (or clear) the Controller's TLS certificate PEM, without touching other fields."""
+    with _connect() as c:
+        c.execute("UPDATE controllers SET tls_cert=? WHERE id=?", (tls_cert or "", cid))
 
 
 def delete_controller(cid: int):
