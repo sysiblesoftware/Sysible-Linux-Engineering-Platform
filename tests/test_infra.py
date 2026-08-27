@@ -1671,3 +1671,36 @@ def test_infra_group_base_image_ssrf_rejected(client):
         ],
     }}
     assert client.post("/infra", json=body).status_code == 400
+
+
+def test_infra_regenerate_edits_and_preserves_wiring(client, monkeypatch):
+    """Edit-after-destroy: regenerate:true rewrites an existing infra project's .tf
+    (e.g. single image → two VM types) while PRESERVING its controller/inventory
+    wiring, and stores the options so the Edit wizard can pre-fill."""
+    import backend.controller_import as ci
+    import backend.db as db
+    monkeypatch.setattr(ci.requests, "get", lambda url, **k: Resp(200, {"agents": []}))
+    monkeypatch.setattr(ci, "get_controller_key", lambda url, key: "ssh-ed25519 CTRL")
+    cid = client.post("/controllers", json={"name": "P", "base_url": "http://c:9000", "api_key": "K"}).json()["controller"]["id"]
+    img = "https://cloud-images.ubuntu.com/noble/current/noble.img"
+    pid = client.post("/infra", json={"name": "editme", "provider": "libvirt",
+        "options": {"name_prefix": "e", "base_image": img, "ssh_user": "ubuntu", "count": 1},
+        "controller_id": cid}).json()["project_id"]
+    assert db.get_infra(pid)["controller_id"] == cid
+
+    # Edit → regenerate as two VM types.
+    r = client.post("/infra", json={"name": "editme", "provider": "libvirt", "project_id": pid, "regenerate": True,
+        "options": {"name_prefix": "e", "ssh_user": "ubuntu", "groups": [
+            {"name": "ubuntu", "count": 1, "base_image": img},
+            {"name": "arch", "count": 1, "base_volume": "arch.qcow2"}]}})
+    assert r.status_code == 200 and r.json()["regenerated"] is True
+    main = (db.project_dir(pid) / "main.tf").read_text()
+    assert "vm_ubuntu" in main and "vm_arch" in main
+    assert db.get_infra(pid)["controller_id"] == cid          # wiring preserved
+
+    opts = client.get(f"/infra/{pid}/options").json()["options"]
+    assert isinstance(opts.get("groups"), list) and len(opts["groups"]) == 2
+
+    # Without the regenerate flag, a second build into an infra project is refused.
+    assert client.post("/infra", json={"name": "editme", "provider": "libvirt", "project_id": pid,
+        "options": {"name_prefix": "e"}}).status_code == 400

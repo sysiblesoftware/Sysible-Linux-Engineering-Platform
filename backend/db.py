@@ -319,6 +319,11 @@ def init_db() -> None:
         # the vault, encrypted.
         if "ssh_password_ref" not in infra_cols:
             c.execute("ALTER TABLE infra ADD COLUMN ssh_password_ref TEXT DEFAULT ''")
+        # The wizard OPTIONS the project was generated from (JSON), so an "Edit infra"
+        # can re-open the wizard pre-filled and regenerate — e.g. after a destroy, add a
+        # VM type. Secrets are NOT kept here (ssh_password is stored encrypted separately).
+        if "options_json" not in infra_cols:
+            c.execute("ALTER TABLE infra ADD COLUMN options_json TEXT DEFAULT ''")
         # The SSH credential whose PUBLIC key is baked into the VMs (so that
         # credential can log in) — settable after create from the ⚙ Access editor,
         # not only at wizard time.
@@ -696,6 +701,19 @@ def set_infra_ssh_user(project_id, ssh_user):
     """Set the infra project's login user without disturbing its other fields."""
     with _connect() as c:
         c.execute("UPDATE infra SET ssh_user=? WHERE project_id=?", (ssh_user or "", project_id))
+
+
+def set_infra_environment(project_id, environment):
+    """Set the infra project's environment tag without disturbing its other fields."""
+    with _connect() as c:
+        c.execute("UPDATE infra SET environment=? WHERE project_id=?", (environment or "", project_id))
+
+
+def set_infra_options(project_id, options_json):
+    """Persist the wizard options JSON (no secrets) so an Edit can pre-fill + regenerate.
+    A targeted UPDATE — never the lossy INSERT-OR-REPLACE set_infra."""
+    with _connect() as c:
+        c.execute("UPDATE infra SET options_json=? WHERE project_id=?", (options_json or "", project_id))
 
 
 def set_infra_bastion(project_id, bastion):

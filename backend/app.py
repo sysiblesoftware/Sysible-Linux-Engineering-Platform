@@ -2821,6 +2821,7 @@ def _mask_infra(row: dict) -> dict:
     row = dict(row)
     has = bool((row.pop("ssh_password_enc", "") or "").strip() or (row.get("ssh_password_ref") or "").strip())
     row["has_password"] = has
+    row["has_options"] = bool((row.pop("options_json", "") or "").strip())   # editable? (don't dump the blob in the list)
     return row
 
 
@@ -2837,6 +2838,21 @@ def infra_list(request: Request, user: str = Depends(current_user)):
                 if (db.get_project(r["project_id"]) or {}).get("org_id") in allowed
                 or (db.get_project(r["project_id"]) or {}).get("org_id") is None]
     return {"infra": [_mask_infra(r) for r in rows]}
+
+
+@app.get("/infra/{project_id}/options")
+def infra_options(project_id: int, request: Request, user: str = Depends(current_user)):
+    """The stored wizard options for an infra project (no secrets), so an Edit can
+    pre-fill the wizard and regenerate. Org-guarded like the rest of the project."""
+    _guard_project(request, project_id, "operator")
+    meta = db.get_infra(project_id)
+    if not meta:
+        raise HTTPException(status_code=404, detail="Not an infrastructure project.")
+    try:
+        opts = json.loads(meta.get("options_json") or "{}")
+    except (TypeError, ValueError):
+        opts = {}
+    return {"provider": meta.get("provider"), "options": opts}
 
 
 def _resolve_secret_ref(value: str) -> str:
@@ -3029,12 +3045,19 @@ def infra_create(body: dict = Body(...), user: str = Depends(require_operator)):
     # project is refused if it already carries infra (so a wizard can't silently
     # overwrite a live one) — the caller should destroy/clear it first.
     target_pid = body.get("project_id")
+    regenerate = bool(body.get("regenerate"))
+    is_regen = False
     if target_pid:
         proj = db.get_project(int(target_pid))
         if not proj:
             raise HTTPException(status_code=404, detail="Target project not found.")
         if db.get_infra(int(target_pid)):
-            raise HTTPException(status_code=400, detail="That project is already an infrastructure project.")
+            # Editing an existing infra project (e.g. after a destroy, add a VM type):
+            # allowed only with an explicit regenerate flag, so a wizard can't silently
+            # overwrite a LIVE one. Destroy the VMs first — regenerate rewrites the .tf.
+            if not regenerate:
+                raise HTTPException(status_code=400, detail="That project is already an infrastructure project.")
+            is_regen = True
         pid, slug = int(target_pid), proj["slug"]
     else:
         # New project (unique slug), then write the generated files to its workdir.
@@ -3064,9 +3087,20 @@ def infra_create(body: dict = Body(...), user: str = Depends(require_operator)):
     # the hypervisor can, and SLEP already logs into it. Record it as the infra's
     # bastion so the built inventory reaches the VMs through it automatically.
     hv_bastion = _bastion_from_libvirt_uri(options.get("uri")) if provider == "libvirt" else ""
-    db.set_infra(pid, provider, int(controller_id) if controller_id else None,
-                 str(options.get("ssh_user", "")), str(options.get("environment", "")),
-                 inventory_id=inv_target, bastion=hv_bastion)
+    if is_regen:
+        # Regenerate = the operator edited the VM definitions. Update only what the
+        # regenerated files imply (login user, environment) via targeted setters, and
+        # PRESERVE the rest of the infra wiring (controller, inventory, jump host,
+        # stored password) — the lossy set_infra would wipe those extra columns.
+        db.set_infra_ssh_user(pid, str(options.get("ssh_user", "")))
+        db.set_infra_environment(pid, str(options.get("environment", "")))
+    else:
+        db.set_infra(pid, provider, int(controller_id) if controller_id else None,
+                     str(options.get("ssh_user", "")), str(options.get("environment", "")),
+                     inventory_id=inv_target, bastion=hv_bastion)
+    # Persist the wizard options (minus the secret) so an Edit can pre-fill + regenerate.
+    _opts_store = {k: v for k, v in (options or {}).items() if k != "ssh_password"}
+    db.set_infra_options(pid, json.dumps(_opts_store))
     if pw_ref:
         db.set_infra_ssh_password_ref(pid, pw_ref)
     # Keep the resolved login password (encrypted) so "Fix SSH" / reachability can
@@ -3080,8 +3114,9 @@ def infra_create(body: dict = Body(...), user: str = Depends(require_operator)):
         inv = db.get_inventory(inv_target)
         if inv and not (inv.get("bastion") or "").strip():
             db.set_inventory_bastion(inv_target, hv_bastion)
-    db.log_audit("infra_created", user, f"{provider} project '{name}'")
-    return {"project_id": pid, "slug": slug, "files": list(files), "provider": provider, "inventory_id": inv_target}
+    db.log_audit("infra_regenerated" if is_regen else "infra_created", user, f"{provider} project '{name}'")
+    return {"project_id": pid, "slug": slug, "files": list(files), "provider": provider,
+            "inventory_id": inv_target, "regenerated": is_regen}
 
 
 def _infra_applied_hosts(project_id: int):

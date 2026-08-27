@@ -445,7 +445,7 @@ export function CadenceBar() {
 
 // When `project` is passed, the wizard generates the Terraform INTO that existing
 // project (the "build infra here" flow from the IDE) instead of creating a new one.
-export function CreateWizard({ onClose, onDone, project }) {
+export function CreateWizard({ onClose, onDone, project, editInfra }) {
   const [schema, setSchema] = useState(null)
   const [controllers, setControllers] = useState([])
   const [name, setName] = useState(project?.name || '')
@@ -463,6 +463,18 @@ export function CreateWizard({ onClose, onDone, project }) {
   useEffect(() => { api('infra/providers').then((d) => {
     setSchema(d.providers)
     setCloudImages(d.cloud_images || [])
+    // Edit mode: pre-fill provider + options from what the project was generated from,
+    // so the operator can tweak (e.g. add a VM type) and regenerate. Falls back to the
+    // first provider's defaults for a fresh create.
+    if (editInfra?.project_id) {
+      api(`infra/${editInfra.project_id}/options`).then((o) => {
+        const p = o.provider || Object.keys(d.providers)[0]
+        setProvider(p)
+        const base = {}; for (const opt of (d.providers[p]?.options || [])) base[opt.key] = opt.default
+        setValues({ ...base, ...(o.options || {}) })
+      }).catch(() => { const f = Object.keys(d.providers)[0]; setProvider(f); seed(d.providers, f) })
+      return
+    }
     const first = Object.keys(d.providers)[0]
     setProvider(first); seed(d.providers, first)
   }) }, [])
@@ -488,10 +500,13 @@ export function CreateWizard({ onClose, onDone, project }) {
   const perVmKeys = ['count', 'memory', 'vcpu', 'disk_size']
 
   return (
-    <Modal title={project ? `Build infrastructure in “${project.name}”` : 'Create infrastructure'} onClose={onClose} wide>
-      {project
-        ? <div className="faint" style={{ fontSize: 12, marginBottom: 8 }}>Generates the Terraform (and cloud-init) into this project, then it gets the infra lifecycle actions.</div>
-        : <Field label="Name"><input value={name} onChange={(e) => setName(e.target.value)} placeholder="prod-web" autoFocus /></Field>}
+    <Modal title={editInfra ? `Edit infrastructure — “${project?.name || ''}”`
+      : project ? `Build infrastructure in “${project.name}”` : 'Create infrastructure'} onClose={onClose} wide>
+      {editInfra
+        ? <div className="faint" style={{ fontSize: 12, marginBottom: 8 }}>Regenerates this project’s Terraform from the settings below (e.g. add a VM type). <b>Destroy the VMs first</b> — this rewrites the .tf; then Apply to rebuild.</div>
+        : project
+          ? <div className="faint" style={{ fontSize: 12, marginBottom: 8 }}>Generates the Terraform (and cloud-init) into this project, then it gets the infra lifecycle actions.</div>
+          : <Field label="Name"><input value={name} onChange={(e) => setName(e.target.value)} placeholder="prod-web" autoFocus /></Field>}
       <Field label="Provider">
         <select value={provider} onChange={(e) => pickProvider(e.target.value)}>
           {Object.entries(schema).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
@@ -575,16 +590,18 @@ export function CreateWizard({ onClose, onDone, project }) {
           options = { ...values }
           for (const k of ['base_image', 'base_volume', ...perVmKeys]) delete options[k]
         }
+        const editPid = editInfra?.project_id
         const d = await api('infra', { method: 'POST', json: {
           name: name || project?.name, provider, options,
-          project_id: project ? project.id : undefined,
+          project_id: editPid || (project ? project.id : undefined),
+          regenerate: editPid ? true : undefined,
           controller_id: controllerId ? Number(controllerId) : null,
           deploy_credential_id: deployCredId ? Number(deployCredId) : null,
           inventory_id: (invTarget && invTarget !== '__new') ? Number(invTarget) : null,
           inventory_name: invTarget === '__new' ? invName.trim() : '',
         } })
         onDone(d.project_id, name || project?.name, d.slug)
-      })}>{project ? 'Build in this project' : 'Generate Terraform'}</button>
+      })}>{editInfra ? 'Regenerate Terraform' : project ? 'Build in this project' : 'Generate Terraform'}</button>
     </Modal>
   )
 }
