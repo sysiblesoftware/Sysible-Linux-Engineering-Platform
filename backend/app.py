@@ -2581,13 +2581,24 @@ def _virsh_list_domains(uri: str):
 
 
 def _libvirt_uri_for_project(project_id: int) -> str:
-    """Pull the libvirt connection URI baked into a project's variables.tf."""
+    """Pull the libvirt connection URI baked into a project's variables.tf.
+
+    Re-validate on READ, not just at POST /infra: an operator can later write_file a
+    variables.tf with a hostile `qemu+ssh://…?command=…` URI, and a destroy/list sweep
+    would otherwise hand it to `virsh -c`. Fail closed (return '') if the on-disk value
+    doesn't pass the same allow-list, so the sweep never runs an unvetted URI."""
     import re
     vf = db.project_dir(project_id) / "variables.tf"
     if not vf.exists():
         return ""
     m = re.search(r'variable\s+"uri"\s*\{[^}]*?default\s*=\s*"([^"]*)"', vf.read_text(), re.S)
-    return m.group(1) if m else ""
+    uri = m.group(1) if m else ""
+    if uri:
+        try:
+            _validate_libvirt_uri(uri)
+        except Exception:  # noqa: BLE001 — tampered/unsafe on-disk uri
+            return ""
+    return uri
 
 
 @app.post("/infra/list-vms")
