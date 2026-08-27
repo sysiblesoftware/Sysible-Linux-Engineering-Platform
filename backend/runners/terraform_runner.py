@@ -266,6 +266,24 @@ def _resolve_tool(choice: str) -> str:
     return "terraform" if have("terraform") else ("tofu" if have("tofu") else "terraform")
 
 
+def _auto_destroy_after_cancel(run: dict, tool: str, emit) -> None:
+    """A canceled APPLY may have created partial infrastructure. Launch a Destroy run so
+    the operator isn't left with orphaned/half-built VMs. It's a normal, visible run
+    (its own log + status), reusing the apply's credential and engine (terraform/tofu).
+    NOTE: destroy removes EVERYTHING in the project's state — including VMs from a prior
+    apply — so this is cleanup-after-abandon, not a partial rollback."""
+    import threading
+    did = db.create_run(run["project_id"], "terraform", "destroy",
+                        credential_id=run.get("credential_id"),
+                        created_by=(run.get("created_by") or "auto"),
+                        group_id=run.get("group_id") or "")
+    if tool:
+        stash_tool(did, tool)
+    emit(f"\n-- SLEP: apply canceled — automatically running Destroy (run #{did}) to remove "
+         f"any partially-created infrastructure.")
+    threading.Thread(target=launch, args=(did,), daemon=True).start()
+
+
 def launch(run_id: int) -> None:
     run = db.get_run(run_id)
     if not run:
@@ -484,6 +502,11 @@ def launch(run_id: int) -> None:
             _common.clear_stop(run_id)
             emit("\n== canceled by operator ==")
             db.set_run_status(run_id, "canceled", exit_code=rc or 130, finished=int(time.time()))
+            if action == "apply":
+                try:
+                    _auto_destroy_after_cancel(run, tool, emit)
+                except Exception:  # noqa: BLE001
+                    pass
             return
 
         if action == "apply" and rc == 0:
