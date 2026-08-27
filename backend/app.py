@@ -1508,14 +1508,20 @@ def _dispatch_run(project, kind, target, inventory_id, credential_id, extra_vars
 # Pipeline steps are the real engines, plus the "inventory" pseudo-step: it has no
 # runner of its own — the worker reads the just-applied VMs into the project's
 # inventory and points the following Ansible/Salt steps at it.
+# The pseudo-steps have no engine runner: "inventory" reads applied VMs into the
+# project inventory; "enroll" registers them into the project's Controller. Neither
+# needs a target.
+_PSEUDO_STEPS = ("inventory", "enroll")
+
+
 def _validate_steps(steps):
     if not steps:
         raise HTTPException(status_code=400, detail="A pipeline needs at least one step.")
     for i, s in enumerate(steps, 1):
         kind = s.get("kind")
-        if kind not in RUNNERS and kind != "inventory":
+        if kind not in RUNNERS and kind not in _PSEUDO_STEPS:
             raise HTTPException(status_code=400, detail=f"Step {i}: unknown engine '{kind}'.")
-        if kind != "inventory" and not str(s.get("target") or "").strip():
+        if kind not in _PSEUDO_STEPS and not str(s.get("target") or "").strip():
             raise HTTPException(status_code=400, detail=f"Step {i}: a target is required.")
 
 
@@ -1540,7 +1546,8 @@ def _dispatch_pipeline(project, steps, actor, stop_on_failure=True):
     prepared = []
     for s in steps:
         kind = s.get("kind")
-        target = str(s.get("target") or "").strip() or ("from VMs" if kind == "inventory" else "")
+        target = str(s.get("target") or "").strip() or (
+            "from VMs" if kind == "inventory" else "→ Controller" if kind == "enroll" else "")
         rid = db.create_run(
             project["id"], kind, target,
             inventory_id=s.get("inventory_id"), credential_id=s.get("credential_id"),
@@ -1568,6 +1575,8 @@ def _dispatch_pipeline(project, steps, actor, stop_on_failure=True):
                         r2 = db.get_run(rid2)
                         if kind2 in ("ansible", "salt") and r2 and not r2.get("inventory_id"):
                             db.set_run_inventory(rid2, iid)
+            elif kind == "enroll":
+                _run_enroll_step(rid, project, actor)
             else:
                 RUNNERS[kind](rid)        # blocking — runs to completion
             r = db.get_run(rid)
@@ -1609,6 +1618,40 @@ def _run_inventory_step(run_id: int, project) -> int | None:
         emit("\n== finished: exit code 0 ==")
         db.set_run_status(run_id, "success", exit_code=0, finished=int(time.time()))
         return iid
+
+
+def _run_enroll_step(run_id: int, project, actor: str) -> bool:
+    """The 'enroll' pseudo-step: register the project's applied VMs into its
+    configured Controller, writing a normal run log + status so it shows in the
+    sequence visualizer. Uses the project's stored Controller (set via Access /
+    the infra settings). Returns True on success."""
+    log_path = db.run_log_path(run_id)
+    db.set_run_status(run_id, "running", started=int(time.time()))
+    with log_path.open("w", buffering=1) as log:
+        def emit(m):
+            log.write(m if m.endswith("\n") else m + "\n")
+
+        emit(f"== SLEP run #{run_id} · project '{project['name']}' · enroll VMs into Controller ==")
+        try:
+            out = _enroll_infra_hosts(project["id"])
+        except HTTPException as e:
+            emit(f"!! {e.detail}")
+            if "No Controller" in str(e.detail):
+                emit("   Set a Controller for this project first (Access), then re-run the sequence.")
+            db.set_run_status(run_id, "failed", exit_code=2, finished=int(time.time()))
+            return False
+        for h in out["results"]:
+            emit(f"{'✓' if h['ok'] else '✗'} {h['name']} {h['ip']} — {h['detail']}")
+        emit(f"\nEnrolled {out['enrolled']}/{out['total']} into {out['controller']}.")
+        ok = out["total"] > 0 and out["enrolled"] == out["total"]
+        if out["total"] == 0:
+            emit("!! No applied hosts to enroll — run Terraform apply earlier in the sequence.")
+        db.log_audit("infra_enrolled", actor,
+                     f"{out['enrolled']}/{out['total']} into {out['controller']} (pipeline)")
+        emit(f"\n== finished: exit code {0 if ok else 1} ==")
+        db.set_run_status(run_id, "success" if ok else "failed",
+                          exit_code=0 if ok else 1, finished=int(time.time()))
+        return ok
 
 
 @app.post("/pipelines/run")

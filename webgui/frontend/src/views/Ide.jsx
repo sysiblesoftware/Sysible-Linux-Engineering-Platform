@@ -1081,10 +1081,11 @@ export function PipelineModal({ project, currentFile, initialSteps, initialName,
     if (st.kind === 'salt' && st.saltTest) out.test = 'True'
     return out
   }
+  const isPseudo = (k) => k === 'inventory' || k === 'enroll'
   const payloadOf = () => steps.map((st) => ({
     kind: st.kind, target: st.target,
-    inventory_id: (st.kind === 'terraform' || st.kind === 'inventory') ? null : (st.inventory_id ? Number(st.inventory_id) : null),
-    credential_id: st.kind === 'inventory' ? null : (st.credential_id ? Number(st.credential_id) : null),
+    inventory_id: (st.kind === 'terraform' || isPseudo(st.kind)) ? null : (st.inventory_id ? Number(st.inventory_id) : null),
+    credential_id: isPseudo(st.kind) ? null : (st.credential_id ? Number(st.credential_id) : null),
     tool: st.kind === 'terraform' ? st.tool : '',
     extra_vars: stepVars(st),
     become_password: st.kind === 'ansible' ? (st.becomePw || '') : '',
@@ -1134,7 +1135,7 @@ export function PipelineModal({ project, currentFile, initialSteps, initialName,
   const add = () => setSteps((s) => [...s, blank({ inventory_id: invs[0] ? String(invs[0].id) : '' })])
   const del = (i) => setSteps((s) => (s.length > 1 ? s.filter((_, j) => j !== i) : s))
   const move = (i, d) => setSteps((s) => { const a = [...s]; const j = i + d; if (j < 0 || j >= a.length) return a;[a[i], a[j]] = [a[j], a[i]]; return a })
-  const defTarget = (k) => (k === 'terraform' ? 'apply' : k === 'salt' ? 'highstate' : k === 'inventory' ? 'from VMs' : 'site.yml')
+  const defTarget = (k) => (k === 'terraform' ? 'apply' : k === 'salt' ? 'highstate' : k === 'inventory' ? 'from VMs' : k === 'enroll' ? '→ Controller' : 'site.yml')
 
   return (
     <Modal title="Run sequence" onClose={onClose} wide>
@@ -1156,9 +1157,12 @@ export function PipelineModal({ project, currentFile, initialSteps, initialName,
             <option value="terraform">Terraform</option>
             <option value="salt">Salt</option>
             <option value="inventory">Inventory (from VMs)</option>
+            <option value="enroll">Enroll → Controller</option>
           </select>
           {st.kind === 'inventory'
             ? <span className="muted" style={{ flex: 1, fontSize: 12.5 }}>Reads the applied VMs into this project’s inventory, then points the Ansible/Salt steps below at it.</span>
+            : st.kind === 'enroll'
+            ? <span className="muted" style={{ flex: 1, fontSize: 12.5 }}>Registers the applied VMs into this project’s Controller as SSH hosts. Set the Controller via Access; place this after Apply.</span>
             : (<>
                 {st.kind === 'terraform'
                   ? <select value={st.target} onChange={(e) => upd(i, { target: e.target.value })} title="Action" style={{ flex: '1 1 auto', minWidth: 0 }}><option>plan</option><option>apply</option><option>destroy</option></select>
@@ -1177,13 +1181,13 @@ export function PipelineModal({ project, currentFile, initialSteps, initialName,
                 </select>
               </>)}
           <div className="row" style={{ gap: 2 }}>
-            {st.kind !== 'inventory' && <button className={'ghost sm' + (openSteps.has(i) ? ' active' : '')} title="Variables & options" onClick={() => toggleOpts(i)}>Options</button>}
+            {!isPseudo(st.kind) && <button className={'ghost sm' + (openSteps.has(i) ? ' active' : '')} title="Variables & options" onClick={() => toggleOpts(i)}>Options</button>}
             <button className="ghost sm" title="Move up" onClick={() => move(i, -1)} disabled={i === 0}>↑</button>
             <button className="ghost sm" title="Move down" onClick={() => move(i, 1)} disabled={i === steps.length - 1}>↓</button>
             <button className="danger ghost sm" title="Remove step" onClick={() => del(i)} disabled={steps.length === 1}>✕</button>
           </div>
         </div>
-        {openSteps.has(i) && st.kind !== 'inventory' && (
+        {openSteps.has(i) && !isPseudo(st.kind) && (
           <div className="pipe-step-opts">
             <Field label={st.kind === 'terraform' ? 'Variables — KEY=value per line (→ -var)'
               : st.kind === 'salt' ? 'Pillar / kwargs — key=value per line' : 'Extra vars — KEY=value per line (→ -e)'}>
