@@ -285,6 +285,14 @@ label.fld{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--
 .pipe-dot{width:9px;height:9px;border-radius:50%;flex:0 0 auto}
 .pipe-arrow{display:inline-flex;align-items:center;color:var(--faint)}
 
+/* Stacked per-stage visualizations under the pipeline flow — every stage shown at
+   once, no clicking required. The header doubles as a jump-to-that-stage's-log. */
+.stage-block{border:1px solid var(--line);border-radius:10px;margin:10px 0;overflow:hidden}
+.stage-block.current{outline:2px solid var(--accent);outline-offset:1px}
+.stage-block-h{display:flex;align-items:center;gap:8px;padding:6px 10px;background:var(--panel);
+  cursor:pointer;font-size:12.5px;text-transform:capitalize}
+.stage-block-h .pill{margin-left:auto}
+
 /* Organizations / Teams — role pills, team member chips, selected row. */
 .pill.role-admin{background:rgba(109,219,115,.16);color:var(--green,#63c869)}
 .pill.role-operator{background:rgba(122,162,255,.16);color:var(--accent,#7aa2ff)}

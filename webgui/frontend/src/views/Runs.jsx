@@ -95,6 +95,7 @@ export function RunLog({ runId, onBack, onOpenRun }) {
   const toggleLog = () => setShowLog((v) => { const n = !v; try { localStorage.setItem('slep_run_showlog', n ? '1' : '0') } catch { /* ignore */ } return n })
   const [groupId, setGroupId] = useState('')   // pipeline group this run belongs to
   const [seq, setSeq] = useState([])           // the sibling runs of that pipeline
+  const [stages, setStages] = useState({})     // runId -> {engine, text} for every stage (stacked viz)
   const [projectId, setProjectId] = useState(null)  // this run's project (for enroll)
   const [controllers, setControllers] = useState([])
   const [enrollBusy, setEnrollBusy] = useState(false)
@@ -182,6 +183,26 @@ export function RunLog({ runId, onBack, onOpenRun }) {
     }, 1500)
     return () => { alive = false; clearInterval(iv) }
   }, [groupId])
+
+  // Fetch every stage's log so the visualizer can show ALL stages at once (stacked),
+  // not just the selected one — finished stages once, running/queued ones polled.
+  useEffect(() => {
+    if (seq.length < 2) { setStages({}); return }
+    let alive = true
+    const timers = []
+    seq.forEach((s) => {
+      const load = async () => {
+        try {
+          const r = await tail(`runs/${s.id}/log?offset=0`)
+          if (!alive) return
+          setStages((m) => ({ ...m, [s.id]: { engine: s.kind, text: r.text || '' } }))
+          if (!['success', 'failed', 'canceled'].includes(r.status)) timers.push(setTimeout(load, 1500))
+        } catch { /* stage log optional */ }
+      }
+      load()
+    })
+    return () => { alive = false; timers.forEach(clearTimeout) }
+  }, [seq.map((s) => s.id + ':' + s.status).join(',')])   // eslint-disable-line
 
   // Auto-advance a sequence: when this step finishes successfully, follow the
   // pipeline to the next step's run (e.g. Terraform apply → the Ansible configure
@@ -290,11 +311,29 @@ export function RunLog({ runId, onBack, onOpenRun }) {
         <div className="run-pane">
           <div className="pane-title">Visualize</div>
           <div className="run-scroll">
-            {/* The whole pipeline as a stage flow; clicking a stage switches this
-                pane AND the log to that step. Nothing for a lone (non-sequence) run. */}
+            {/* The whole pipeline as a stage flow at the top (a nav + summary), then
+                EVERY stage's visualization stacked below — no need to click a card to
+                see a stage. A lone (non-sequence) run just shows its one viz. */}
             <PipelineFlow seq={seq} runId={runId} onOpenRun={onOpenRun} />
-            {text ? <RunViz engine={engine} model={model} seedHosts={seedHosts} />
-              : <div className="muted" style={{ padding: 8 }}>connecting…</div>}
+            {seq.length > 1 ? (
+              seq.map((s) => {
+                const st = stages[s.id]
+                const m = st ? parseRun(st.engine, st.text) : null
+                return (
+                  <div key={s.id} className={'stage-block' + (s.id === runId ? ' current' : '')}>
+                    <div className="stage-block-h" onClick={() => s.id !== runId && onOpenRun && onOpenRun(s.id)}>
+                      <b>{s.kind}</b><span className="muted"> · {s.target}</span>
+                      <span className={'pill ' + s.status}>{s.status}</span>
+                    </div>
+                    {m ? <RunViz engine={st.engine} model={m} seedHosts={s.id === runId ? seedHosts : []} />
+                      : <div className="muted" style={{ padding: 8 }}>waiting…</div>}
+                  </div>
+                )
+              })
+            ) : (
+              text ? <RunViz engine={engine} model={model} seedHosts={seedHosts} />
+                : <div className="muted" style={{ padding: 8 }}>connecting…</div>
+            )}
           </div>
         </div>
         {showLog && <div className="run-gutter" onMouseDown={startDrag} title="Drag to resize" />}

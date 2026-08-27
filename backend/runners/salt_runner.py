@@ -166,7 +166,13 @@ def launch(run_id: int) -> None:
             # roster keys and finds nothing ("No matching targets found in roster").
             cmd = ["salt-ssh", "-c", str(conf_dir), "-i", "--no-color", "*", func]
             if func == "state.apply":
-                cmd.append(state)
+                # Salt state names are DOTTED and extension-less: the file maintain.sls
+                # is the state `maintain`, states/web.sls is `states.web`. Passing the raw
+                # filename (maintain.sls) makes Salt look for maintain/sls.sls → "No
+                # matching sls found for 'maintain.sls'". Normalise: drop a trailing .sls
+                # and turn path separators into dots.
+                sls = re.sub(r"\.sls$", "", state).strip("/").replace("/", ".")
+                cmd.append(sls)
             # extra_vars become salt kwargs (e.g. test=True for a dry run, or
             # pillar overrides key=value). Salt parses `k=v` trailing args itself.
             # Constrain the KEY to a plain identifier: a key beginning with '-' (or
