@@ -1,3 +1,4 @@
+
 # Sysible Linux Engineering Platform (SLEP)
 
 **Author, orchestrate, and run your automation — Ansible, Terraform, and Salt —
@@ -9,6 +10,9 @@ same core model (projects, inventories, credentials, job templates, runs) withou
 the Kubernetes execution-environments, service mesh, and operator sprawl that make
 AAP a project to stand up. One container, SQLite by default, SSH-native, and an
 IDE built in.
+
+<img width="2177" height="833" alt="Screenshot 2026-08-27 at 2 23 17 PM" src="https://github.com/user-attachments/assets/a2391447-4c66-4865-a57d-84ac8f69f53b" />
+
 
 <img width="765" height="441" alt="Screenshot 2026-08-27 at 2 30 57 PM" src="https://github.com/user-attachments/assets/747efd2c-3668-47b5-b4f7-cf7aa1841c74" />
 
