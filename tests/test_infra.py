@@ -1730,3 +1730,36 @@ def test_connect_controller_pins_self_signed_cert(client, monkeypatch):
     assert calls["n"] == 1                                   # failed once, then pinned + retried
     cid = body["controller"]["id"]
     assert "PINNED" in (db.get_controller(cid, include_key=True).get("tls_cert") or "")
+
+
+def test_enroll_with_removed_controller_clears_and_reprompts(client, monkeypatch):
+    """When the saved Controller was deleted, enroll clears the dangling reference and
+    asks the operator to pick one; picking a current Controller enrolls and re-points
+    the project (so later enrolls reuse it)."""
+    import backend.controller_import as ci
+    import backend.db as db
+    monkeypatch.setattr(ci.requests, "get", lambda url, **k: Resp(200, {"agents": []}))
+    monkeypatch.setattr(ci, "get_controller_key", lambda url, key, **kw: "ssh-ed25519 CTRL")
+    cid = client.post("/controllers", json={"name": "Old", "base_url": "http://c:9000", "api_key": "K"}).json()["controller"]["id"]
+    pid = client.post("/infra", json={"name": "rc", "provider": "aws",
+                                     "options": {"count": 1, "name_prefix": "web", "ssh_user": "ubuntu"},
+                                     "controller_id": cid}).json()["project_id"]
+    # The Controller is disconnected out from under the project.
+    client.delete(f"/controllers/{cid}")
+    assert db.get_infra(pid)["controller_id"] == cid          # still dangling
+
+    # Enroll with no override → clear message + the dangling ref is cleared.
+    r = client.post(f"/infra/{pid}/enroll", json={"method": "ssh"})
+    assert r.status_code == 400 and "pick a controller" in r.json()["detail"].lower()
+    assert db.get_infra(pid)["controller_id"] in (None, 0)     # cleared
+
+    # Connect a NEW Controller and enroll into it explicitly (the picker's action).
+    new = client.post("/controllers", json={"name": "New", "base_url": "http://c2:9000", "api_key": "K2"}).json()["controller"]["id"]
+    monkeypatch.setattr(appmod_regfix := __import__("backend.app", fromlist=["_infra_applied_hosts"]),
+                        "_infra_applied_hosts",
+                        lambda p: [{"name": "web-1", "ip": "10.0.0.11", "user": "ubuntu"}])
+    monkeypatch.setattr(ci, "register_ssh_host",
+                        lambda url, key, name, ip, user="root", environment="", **kw: (True, "enrolled"))
+    d = client.post(f"/infra/{pid}/enroll", json={"method": "ssh", "controller_id": new}).json()
+    assert d["enrolled"] == 1
+    assert db.get_infra(pid)["controller_id"] == new           # re-pointed + persisted

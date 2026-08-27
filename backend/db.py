@@ -715,6 +715,13 @@ def set_infra_environment(project_id, environment):
         c.execute("UPDATE infra SET environment=? WHERE project_id=?", (environment or "", project_id))
 
 
+def set_infra_controller(project_id, controller_id):
+    """Point the infra project at a Controller (or None to clear a dangling reference)
+    without disturbing its other fields."""
+    with _connect() as c:
+        c.execute("UPDATE infra SET controller_id=? WHERE project_id=?", (controller_id, project_id))
+
+
 def set_infra_options(project_id, options_json):
     """Persist the wizard options JSON (no secrets) so an Edit can pre-fill + regenerate.
     A targeted UPDATE — never the lossy INSERT-OR-REPLACE set_infra."""

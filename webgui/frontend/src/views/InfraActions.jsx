@@ -32,9 +32,14 @@ function buildActions(r, { controllers, setPipe, setVms, setEnrollFor, setJumpFo
       const body = controllerId ? { controller_id: Number(controllerId) } : {}
       const d = await api(`infra/${r.project_id}/enroll`, { method: 'POST', json: body })
       setEnrollFor(null); refresh && refresh()
-      const lines = d.results.map((h) => `${h.ok ? '✓' : '✗'} ${h.name} ${h.ip} — ${h.detail}`).join('\n')
+      const lines = (d.results || []).map((h) => `${h.ok ? '✓' : '✗'} ${h.name} ${h.ip} — ${h.detail}`).join('\n')
       alert(`Enrolled ${d.enrolled}/${d.total} into ${d.controller}:\n\n${lines || '(no hosts yet — apply the VMs first)'}`)
-    } catch (e) { alert(e.message) }
+    } catch (e) {
+      // Saved Controller removed / none chosen → open the picker so the operator can
+      // re-point at a current Controller (which then sticks), instead of a dead-end alert.
+      if (!controllerId && controllers.length && /controller/i.test(e.message)) { refresh && refresh(); setEnrollFor(r); return }
+      alert(e.message)
+    }
   }
   const toInventory = async () => {
     try { const d = await api(`infra/${r.project_id}/inventory`, { method: 'POST' }); alert(`Built inventory “${d.name}” with ${d.hosts} host(s).`) }

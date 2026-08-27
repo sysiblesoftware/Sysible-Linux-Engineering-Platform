@@ -3762,21 +3762,7 @@ def _enroll_infra_hosts(project_id: int, controller_id=None):
     infra had none stored, it's persisted so key-baking and later enrolls reuse
     it. Raises HTTPException when the project isn't infra, no Controller is chosen
     or found, or apply produced no hosts yet."""
-    meta = db.get_infra(project_id)
-    if not meta:
-        raise HTTPException(status_code=404, detail="Not an infrastructure project.")
-    cid = controller_id or meta.get("controller_id")
-    if not cid:
-        raise HTTPException(status_code=400, detail="No Controller was chosen for this infrastructure.")
-    ctrl = db.get_controller(cid, include_key=True)
-    if not ctrl:
-        raise HTTPException(status_code=400, detail="The chosen Controller no longer exists.")
-    # Persist an operator-picked Controller when the infra didn't have one, so the
-    # choice sticks for future enrolls (and the SSH-key bake on the next apply).
-    if controller_id and not meta.get("controller_id"):
-        db.set_infra(project_id, meta["provider"], controller_id=cid,
-                     ssh_user=meta.get("ssh_user", ""), environment=meta.get("environment", ""),
-                     inventory_id=meta.get("inventory_id"), bastion=meta.get("bastion", ""))
+    meta, ctrl = _resolve_enroll_controller(project_id, controller_id)   # picks/persists/clears stale
     hosts = _infra_applied_hosts(project_id)
 
     results, ok_n = [], 0
@@ -3805,11 +3791,18 @@ def _resolve_enroll_controller(project_id, controller_id=None):
         raise HTTPException(status_code=400, detail="No Controller was chosen for this infrastructure.")
     ctrl = db.get_controller(cid, include_key=True)
     if not ctrl:
-        raise HTTPException(status_code=400, detail="The chosen Controller no longer exists.")
-    if controller_id and not meta.get("controller_id"):
-        db.set_infra(project_id, meta["provider"], controller_id=cid,
-                     ssh_user=meta.get("ssh_user", ""), environment=meta.get("environment", ""),
-                     inventory_id=meta.get("inventory_id"), bastion=meta.get("bastion", ""))
+        # The saved Controller was removed (e.g. disconnected + reconnected as a new one).
+        # Clear the dangling reference so the UI stops re-sending it and offers the picker,
+        # and tell the operator to choose a current Controller.
+        if not controller_id and meta.get("controller_id"):
+            db.set_infra_controller(project_id, None)
+        raise HTTPException(status_code=400,
+                            detail="The saved Controller was removed — pick a Controller to enroll into.")
+    # Persist an operator-picked Controller (new, or replacing a stale/absent one), so
+    # later enrolls and the key-bake on the next apply reuse it. Targeted update — the
+    # full set_infra would wipe the infra's other columns.
+    if controller_id and meta.get("controller_id") != int(controller_id):
+        db.set_infra_controller(project_id, int(controller_id))
     return meta, ctrl
 
 
