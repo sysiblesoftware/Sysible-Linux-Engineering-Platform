@@ -1616,3 +1616,58 @@ def test_ensure_disk_size_var_appends_once():
     assert changed and 'variable "disk_size"' in out and "default = 20" in out
     out2, changed2 = infra.ensure_disk_size_var(out)
     assert changed2 is False and out2 == out
+
+
+def test_libvirt_multi_group_generation():
+    """Multiple VM groups (e.g. Ubuntu + Arch) generate distinct per-group resources
+    with their own image/count/memory/vcpu/disk and a concatenated sysible_hosts."""
+    spec = {
+        "name_prefix": "web", "ssh_user": "admin", "pool": "default", "network": "default",
+        "groups": [
+            {"name": "Ubuntu 24", "count": 2, "memory": 2048, "vcpu": 2, "disk_size": 30,
+             "base_image": "https://cloud-images.ubuntu.com/noble/current/noble.img"},
+            {"name": "Arch", "count": 1, "memory": 4096, "vcpu": 4, "disk_size": 50,
+             "base_volume": "arch.qcow2"},
+        ],
+    }
+    files = infra._render_libvirt(spec, ["ssh-ed25519 AAAA"])
+    main, out = files["main.tf"], files["outputs.tf"]
+    assert "vm_ubuntu_24" in main and "vm_arch" in main            # unique per-group resources
+    assert "memory    = 2048" in main and "memory    = 4096" in main
+    assert "vcpu      = 2" in main and "vcpu      = 4" in main
+    assert "30 * 1073741824" in main and "50 * 1073741824" in main
+    assert 'source = "https://cloud-images.ubuntu.com/noble/current/noble.img"' in main
+    assert 'base_volume_name = "arch.qcow2"' in main               # existing-pool clone
+    assert "concat(" in out and "vm_ubuntu_24" in out and "vm_arch" in out
+    assert "name: admin" in files["cloudinit.cfg"]                 # one shared login
+
+
+def test_infra_create_with_groups(client):
+    """The API accepts a libvirt project defined as multiple VM groups and writes a
+    main.tf containing both groups."""
+    import backend.db as db
+    body = {"name": "mixed", "provider": "libvirt", "options": {
+        "name_prefix": "app", "ssh_user": "admin",
+        "groups": [
+            {"name": "ubuntu", "count": 1, "memory": 2048, "vcpu": 2, "disk_size": 20,
+             "base_image": "https://cloud-images.ubuntu.com/noble/current/noble.img"},
+            {"name": "rocky", "count": 2, "memory": 4096, "vcpu": 2, "disk_size": 40,
+             "base_image": "https://download.rockylinux.org/pub/rocky/9/images/x86_64/Rocky-9.qcow2"},
+        ],
+    }}
+    r = client.post("/infra", json=body)
+    assert r.status_code == 200, r.text
+    pid = r.json()["project_id"]
+    main = (db.project_dir(pid) / "main.tf").read_text()
+    assert "vm_ubuntu" in main and "vm_rocky" in main
+
+
+def test_infra_group_base_image_ssrf_rejected(client):
+    """A group whose base_image is file:// (or an internal host) is rejected, same as
+    the single base_image — closes the multi-group SSRF/file-disclosure gap."""
+    body = {"name": "evil", "provider": "libvirt", "options": {
+        "name_prefix": "app", "groups": [
+            {"name": "g1", "count": 1, "base_image": "file:///data/vault.key"},
+        ],
+    }}
+    assert client.post("/infra", json=body).status_code == 400

@@ -307,24 +307,30 @@ function TerraformViz({ model }) {
     ? (model.applied ? 'Destroyed' : model.errored ? 'Error' : model.plan ? (anyBusy ? 'Destroying…' : 'Planned') : 'Working…')
     : (model.applied ? 'Applied' : model.errored ? 'Error' : model.plan ? (anyBusy ? 'Applying…' : 'Planned') : 'Working…')
 
-  // Group resources by their trailing [N] index → one machine each; the rest is
-  // shared infrastructure.
+  // Group resources into machines. A resource address is <type>.<role>[_<group>][N];
+  // key by the optional GROUP slug + index so multiple VM groups (vm_ubuntu[0] and
+  // vm_arch[0]) stay separate machines instead of collapsing on the shared index [0].
+  // The rest (base volumes, networks) is shared infrastructure.
   const machines = {}, loose = []
   for (const [addr, r] of Object.entries(model.resources)) {
-    const idx = addr.match(/\[(\d+)\]\s*$/)
-    if (idx) { const k = idx[1]; (machines[k] || (machines[k] = { key: k, comps: [] })).comps.push({ addr, kind: compKind(addr), ...r }) }
-    else loose.push({ addr, kind: compKind(addr), ...r })
+    const m = addr.match(/\.[a-z0-9]+(?:_([a-z0-9_-]+))?\[(\d+)\]\s*$/i)
+    if (m) {
+      const group = m[1] || '', idx = Number(m[2])
+      const k = group ? `${group}#${idx}` : String(idx)
+      ;(machines[k] || (machines[k] = { key: k, group, idx, comps: [] })).comps.push({ addr, kind: compKind(addr), ...r })
+    } else loose.push({ addr, kind: compKind(addr), ...r })
   }
-  const mlist = Object.values(machines).sort((a, b) => Number(a.key) - Number(b.key))
+  const mlist = Object.values(machines)
+    .sort((a, b) => (a.group || '').localeCompare(b.group || '') || a.idx - b.idx)
     // Prefer the real VM name (the domain resource's `name = "…"`, e.g. prod-web-1)
-    // over a generic "Machine N"; fall back to any named component, then the index.
+    // over a generic label; fall back to any named component, then group + index.
     .map((m) => ({
       ...m,
       status: aggStatus(m.comps),
       name: (m.comps.find((c) => c.kind === 'machine') || {}).name
         || (m.comps.find((c) => c.name) || {}).name || '',
     }))
-  const mlabel = (m) => m.name || `Machine ${Number(m.key) + 1}`
+  const mlabel = (m) => m.name || (m.group ? `${m.group} #${m.idx + 1}` : `Machine ${m.idx + 1}`)
   const compOrder = { disk: 0, 'cloud-init': 1, NIC: 2, machine: 3 }
   const sortComps = (cs) => [...cs].sort((a, b) => (compOrder[a.kind] ?? 5) - (compOrder[b.kind] ?? 5))
 
@@ -416,7 +422,7 @@ function TerraformViz({ model }) {
 // status (green created · amber building · dim planned · red error), with a live
 // elapsed on whatever's still building — the Terraform analogue of the Ansible
 // host-reach flow.
-function MachineFlow({ machines, isDestroy = false, mlabel = (m) => `Machine ${Number(m.key) + 1}` }) {
+function MachineFlow({ machines, isDestroy = false, mlabel = (m) => (m.group ? `${m.group} #${m.idx + 1}` : `Machine ${(m.idx || 0) + 1}`) }) {
   const n = machines.length
   const rowH = n > 12 ? 22 : 30
   const H = Math.max(90, n * rowH + 16)

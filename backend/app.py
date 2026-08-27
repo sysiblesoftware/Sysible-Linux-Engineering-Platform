@@ -2967,6 +2967,13 @@ def infra_create(body: dict = Body(...), user: str = Depends(require_operator)):
     # internal/metadata hosts (SSRF), allowing only http(s) to a non-internal address.
     if str(options.get("base_image") or "").strip():
         _validate_base_image_url(str(options.get("base_image")).strip())
+    # Multi-group libvirt: every group's base_image is fetched at apply time too, so
+    # each must pass the same SSRF/file:// allow-list as the single base_image above.
+    if provider == "libvirt" and isinstance(options.get("groups"), list):
+        for g in options["groups"]:
+            bi = str((g or {}).get("base_image") or "").strip()
+            if bi:
+                _validate_base_image_url(bi)
 
     controller_key = ""
     if controller_id:

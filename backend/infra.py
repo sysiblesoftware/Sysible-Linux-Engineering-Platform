@@ -435,7 +435,20 @@ resource "digitalocean_droplet" "vm" {{
             "cloudinit.cfg": _cloudinit(ssh_user, keys, _opt(spec, "ssh_password", ""))}
 
 
+def _slug(name: str, fallback: str = "g") -> str:
+    """A libvirt/Terraform-safe resource-name suffix from a group name: lowercase, only
+    [a-z0-9_], never empty. Used to name each VM group's resources uniquely."""
+    s = re.sub(r"[^a-z0-9_]", "_", _one_line(str(name or "")).strip().lower()).strip("_")
+    s = re.sub(r"_+", "_", s)
+    return s or fallback
+
+
 def _render_libvirt(spec, keys):
+    # Heterogeneous VM groups (e.g. Ubuntu + Arch in one apply): when `groups` is given,
+    # generate a resource set per group. Opt-in — the single-image path below is untouched.
+    groups = spec.get("groups")
+    if isinstance(groups, list) and groups:
+        return _render_libvirt_groups(spec, keys, groups)
     ssh_user = _opt(spec, "ssh_user", "ubuntu")
     base_volume = _one_line(_opt(spec, "base_volume", "")).strip()
     # Storage: either clone each VM disk from an image ALREADY in the pool (no
@@ -561,6 +574,96 @@ resource "libvirt_domain" "vm" {{
   }} ]
 }}
 '''
+    return {"main.tf": main, "variables.tf": variables, "outputs.tf": outputs,
+            "cloudinit.cfg": _cloudinit(ssh_user, keys, _opt(spec, "ssh_password", ""))}
+
+
+def _render_libvirt_groups(spec, keys, groups):
+    """Generate libvirt HCL for MULTIPLE VM groups in one project (e.g. an Ubuntu group
+    and an Arch group), so a single apply builds heterogeneous machines. Each group has
+    its own image, count, memory, vCPUs and disk size; per-group values are emitted as
+    HCL literals (the shared uri/pool/network/name_prefix/hostname stay variables). All
+    groups share ONE cloud-init (same login account/keys). `sysible_hosts` concatenates
+    every group so enrollment/inventory see all VMs. Resource names are suffixed by a
+    slug of the group name so they never collide."""
+    ssh_user = _opt(spec, "ssh_user", "ubuntu")
+    prefix = _opt(spec, "name_prefix", "app")
+    blocks, host_lists, seen = [], [], set()
+    for i, g in enumerate(groups):
+        slug = _slug(g.get("name"), f"g{i + 1}")
+        while slug in seen:                        # keep slugs unique even if names clash
+            slug += f"_{i + 1}"
+        seen.add(slug)
+        n = max(1, int(g.get("count", 1) or 1))
+        mem = int(g.get("memory", 2048) or 2048)
+        vcpu = int(g.get("vcpu", 2) or 2)
+        disk_gb = int(g.get("disk_size", 20) or 20)
+        base_volume = _one_line(g.get("base_volume", "")).strip()
+        base_image = _one_line(g.get("base_image", "")).strip()
+        # Per-VM disk: clone an existing pool volume, or a base volume pulled from a URL.
+        if base_volume:
+            disk_res = (f'resource "libvirt_volume" "disk_{slug}" {{\n'
+                        f'  count            = {n}\n'
+                        f'  name             = "${{var.name_prefix}}-{slug}-${{count.index + 1}}.qcow2"\n'
+                        f'  pool             = var.pool\n'
+                        f'  base_volume_name = {_hcl(base_volume)}\n'
+                        f'  base_volume_pool = var.pool\n'
+                        f'  format           = "qcow2"\n'
+                        f'  size             = {disk_gb} * 1073741824\n}}')
+        else:
+            disk_res = (f'resource "libvirt_volume" "base_{slug}" {{\n'
+                        f'  name   = "${{var.name_prefix}}-{slug}-base.qcow2"\n'
+                        f'  pool   = var.pool\n'
+                        f'  source = {_hcl(base_image)}\n'
+                        f'  format = "qcow2"\n}}\n\n'
+                        f'resource "libvirt_volume" "disk_{slug}" {{\n'
+                        f'  count          = {n}\n'
+                        f'  name           = "${{var.name_prefix}}-{slug}-${{count.index + 1}}.qcow2"\n'
+                        f'  pool           = var.pool\n'
+                        f'  base_volume_id = libvirt_volume.base_{slug}.id\n'
+                        f'  format         = "qcow2"\n'
+                        f'  size           = {disk_gb} * 1073741824\n}}')
+        blocks.append(
+            f'# ---- group: {slug} ({n} VM(s), {mem}MB, {vcpu} vCPU, {disk_gb}GB) ----\n'
+            f'{disk_res}\n\n'
+            f'resource "libvirt_cloudinit_disk" "ci_{slug}" {{\n'
+            f'  count     = {n}\n'
+            f'  name      = "${{var.name_prefix}}-{slug}-${{count.index + 1}}-ci.iso"\n'
+            f'  pool      = var.pool\n'
+            f'  user_data = file("${{path.module}}/cloudinit.cfg")\n'
+            f'  meta_data = "instance-id: ${{var.name_prefix}}-{slug}-${{count.index + 1}}'
+            f'-${{substr(filemd5("${{path.module}}/cloudinit.cfg"), 0, 10)}}\\n'
+            f'local-hostname: ${{var.name_prefix}}-{slug}-${{count.index + 1}}\\n"\n}}\n\n'
+            f'resource "libvirt_domain" "vm_{slug}" {{\n'
+            f'  count     = {n}\n'
+            f'  name      = "${{var.name_prefix}}-{slug}-${{count.index + 1}}"\n'
+            f'  memory    = {mem}\n'
+            f'  vcpu      = {vcpu}\n'
+            f'  cloudinit = libvirt_cloudinit_disk.ci_{slug}[count.index].id\n'
+            f'  disk {{ volume_id = libvirt_volume.disk_{slug}[count.index].id }}\n'
+            f'  network_interface {{\n    network_name   = var.network\n    wait_for_lease = true\n  }}\n'
+            f'  console {{\n    type        = "pty"\n    target_type = "serial"\n    target_port = "0"\n  }}\n'
+            f'  lifecycle {{\n    replace_triggered_by = [libvirt_cloudinit_disk.ci_{slug}[count.index].id]\n  }}\n}}')
+        host_lists.append(
+            f'[ for i, d in libvirt_domain.vm_{slug} : {{\n'
+            f'    name = "${{var.name_prefix}}-{slug}-${{i + 1}}"\n'
+            f'    ip   = try(d.network_interface[0].addresses[0], "")\n'
+            f'    user = {_hcl(ssh_user)}\n  }} ]')
+
+    main = ('terraform {\n  required_providers {\n'
+            '    libvirt = { source = "dmacvicar/libvirt", version = "~> 0.7.0" }\n  }\n}\n\n'
+            'provider "libvirt" {\n  uri = var.uri\n}\n\n'
+            + "\n\n".join(blocks) + "\n")
+    variables = _vars({
+        "uri": ("string", spec.get("uri", "qemu:///system")),
+        "pool": ("string", spec.get("pool", "default")),
+        "network": ("string", spec.get("network", "default")),
+        "name_prefix": ("string", prefix),
+        "hostname": ("string", spec.get("hostname", "sysible")),
+        "environment": ("string", spec.get("environment", "production")),
+    })
+    outputs = ('output "sysible_hosts" {\n  value = concat(\n    '
+               + ",\n    ".join(host_lists) + "\n  )\n}\n")
     return {"main.tf": main, "variables.tf": variables, "outputs.tf": outputs,
             "cloudinit.cfg": _cloudinit(ssh_user, keys, _opt(spec, "ssh_password", ""))}
 
