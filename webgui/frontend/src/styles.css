@@ -175,7 +175,7 @@ th{color:var(--muted);font-weight:600;font-size:12px}
 .jl-reason{color:var(--muted)}
 .modal-bg{position:fixed;inset:0;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;z-index:50}
 .modal{width:min(520px,92vw);max-height:88vh;overflow:auto}
-.modal.wide{width:min(760px,94vw)}
+.modal.wide{width:min(900px,96vw)}
 .task-palette{display:grid;grid-template-columns:200px 1fr;gap:12px}
 .tp-cats{display:flex;flex-direction:column;gap:2px;max-height:56vh;overflow:auto;border-right:1px solid var(--line);padding-right:8px}
 .tp-cat{display:flex;justify-content:space-between;align-items:center;text-align:left;padding:6px 8px;border:0;border-radius:6px;background:transparent;color:var(--muted);cursor:pointer;font-size:13px}
@@ -249,11 +249,19 @@ label.fld{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--
 .pipe-head{display:flex;align-items:center;gap:6px;margin:2px 0 5px;padding:0 2px;
   font-size:10px;text-transform:uppercase;letter-spacing:.07em;color:var(--muted)}
 .pipe-head .pipe-n-spacer{flex:0 0 20px;width:20px}
-.pipe-head .pipe-actions-spacer{flex:0 0 118px}
+.pipe-head .pipe-actions-spacer{flex:0 0 152px}
 .pipe-head > span{overflow:hidden;white-space:nowrap}
+/* Horizontal-scroll wrapper so every step control stays reachable on any width
+   instead of the row clipping off the right edge; the inner min-width keeps the
+   header labels aligned with the columns and lets head + steps scroll together. */
+.pipe-scroll{overflow-x:auto;overflow-y:hidden;margin:0 -2px;padding:0 2px}
+.pipe-inner{min-width:672px}
 .pipe-step{display:flex;align-items:center;gap:6px;margin-bottom:6px}
 .pipe-step > select,.pipe-step > input{width:auto;flex:0 0 auto}
 .pipe-step > input{flex:1 1 auto;min-width:120px}
+/* the action buttons (Options / ↑ / ↓ / ✕) are a fixed column, pinned right and
+   never shrunk, matching the header's actions spacer so nothing is cut off */
+.pipe-step > .row:last-child{flex:0 0 152px;justify-content:flex-end}
 .pipe-step-opts{margin:-2px 0 10px 28px;padding:8px 10px;border-left:2px solid var(--line);
   background:var(--panel);border-radius:0 8px 8px 0;display:flex;flex-direction:column;gap:6px}
 .pipe-step-opts textarea{width:100%}

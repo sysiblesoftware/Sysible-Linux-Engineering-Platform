@@ -1140,6 +1140,8 @@ export function PipelineModal({ project, currentFile, initialSteps, initialName,
   return (
     <Modal title="Run pipeline" onClose={onClose} wide>
       <div className="faint" style={{ fontSize: 12, marginBottom: 8 }}>Steps run one after another — a common pipeline is build (Terraform/OpenTofu) → configure (Ansible) → maintain (Salt).</div>
+      <div className="pipe-scroll">
+      <div className="pipe-inner">
       <div className="pipe-head">
         <span className="pipe-n-spacer" />
         <span style={{ width: 130 }}>Engine</span>
@@ -1212,6 +1214,8 @@ export function PipelineModal({ project, currentFile, initialSteps, initialName,
         )}
         </React.Fragment>
       ))}
+      </div>
+      </div>
       {newInvStep != null && <NameModal title="New inventory" label="Inventory name" placeholder="prod-web"
         onClose={() => setNewInvStep(null)} onSubmit={createInv} />}
       <div className="row" style={{ margin: '8px 0' }}>
