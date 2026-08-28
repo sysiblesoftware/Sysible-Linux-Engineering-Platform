@@ -12,25 +12,27 @@ docker compose -f deploy/docker-compose.yml up -d --build
 
 ### Managing / updating
 
-A small management CLI (`deploy/slep`) wraps the docker commands so you
-don't have to remember them. Put it on your PATH once:
+All Sysible products share one management CLI, **`sysible_ctl`** (it ships in the
+Sysible Controller checkout, at `deploy/sysible_ctl`). Put it on your PATH once:
 
 ```sh
-sudo ./deploy/slep install     # symlinks `slep` into /usr/local/bin
+sudo ./deploy/sysible_ctl install     # symlinks `sysible_ctl` onto PATH
 ```
 
-(Without sudo it installs into `~/.local/bin` for your user only.) After that,
-run it from anywhere. To pull the latest code and rebuild + restart the container
-in place (the `slep-data` volume is always preserved):
+Then manage SLEP from anywhere. To pull the latest code and rebuild + restart the
+container in place (the `slep-data` volume is always preserved):
 
 ```sh
-slep update
+sysible_ctl slep update
 ```
 
 Other commands: `status` (container state + console health probe), `logs`,
-`restart`, `start`, `stop`, `backup` (timestamped tarball of the data volume in
-the current dir), `version`, and `uninstall`. Run `slep help` for the
-full list. (Before installing, invoke it as `./deploy/slep <command>`.)
+`restart`, `start`, `stop`, `backup` (timestamped tarball of the data volume),
+and `destroy`. `sysible_ctl update all` updates every installed product at once.
+Run `sysible_ctl help` for the full list.
+
+> If SLEP's container isn't running yet, point the CLI at this checkout:
+> `SYSIBLE_SLEP_DIR=$PWD sysible_ctl slep up`.
 
 ### HTTPS / TLS
 

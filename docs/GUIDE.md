@@ -383,13 +383,13 @@ cleanup-after-abandon, not a surgical rollback.
 | `SLEP_CONTROLLER_CA` | Trust a specific Controller CA/cert (alternative to TOFU) |
 | `SLEP_CONTROLLER_INSECURE=1` | Skip Controller TLS verification (LAN last resort only) |
 
-**Management CLI:** `slep update | status | logs | restart | backup | …` — wraps
-the Docker lifecycle so you don't memorize compose commands (see RUNNING.md).
+**Management CLI:** `sysible_ctl slep update | status | logs | restart | backup | …`
+— the shared Sysible CLI wraps the Docker lifecycle so you don't memorize compose
+commands (see RUNNING.md).
 
 **Where things live:** `backend/` (FastAPI API + runners + `controller_import`),
-`webgui/` (BFF + React/Monaco console), `deploy/` (Dockerfile + compose + `slep`
-CLI). The CE↔EE seam is `backend/db.py` — all persistence goes through its
-function API.
+`webgui/` (BFF + React/Monaco console), `deploy/` (Dockerfile + compose). The
+CE↔EE seam is `backend/db.py` — all persistence goes through its function API.
 
 ---
 
