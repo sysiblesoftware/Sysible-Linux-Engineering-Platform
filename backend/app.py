@@ -1063,10 +1063,11 @@ def vault_set(request: Request, body: dict = Body(...), user: str = Depends(requ
                             detail="Name must be a valid variable: letters/digits/underscore, no leading digit.")
     org_id = _coerce_org_id(body.get("org_id"))
     _require_org(request, org_id, "operator")
-    # If the name already exists in ANOTHER org, don't let this write hijack it.
-    existing = db.get_secret_org(next((s["id"] for s in db.list_secrets() if s["name"] == name), 0))
-    if existing and existing != org_id and _effective_org_role(request, existing) is None:
-        raise HTTPException(status_code=409, detail="A secret with that name exists in another organization.")
+    # Secret identity is ORG-SCOPED (UNIQUE(org_id, name)): the upsert matches on
+    # (org_id, name) and only ever writes a row in `org_id`, where the caller was just
+    # verified operator. A same-named secret in ANOTHER org is a separate row and is
+    # never touched — so a viewer/outsider can't poison another tenant's value by name
+    # (the earlier upsert-by-name + viewer-role bypass). No cross-org name enumeration.
     sid = db.upsert_secret(name, vault.encrypt(str(value)), org_id=org_id)
     return {"status": "ok", "id": sid, "name": name}
 
@@ -1316,6 +1317,18 @@ def _validate_bastion(bastion: str) -> str:
             raise HTTPException(status_code=400,
                                 detail=f"“{host}” is not a valid IP address — each part must be 0–255. Check the jump host.")
     return b
+
+
+def _safe_bastion(bastion: str) -> str:
+    """Validate a bastion DERIVED from an untrusted source (a libvirt URI, a scraped
+    .tf file) the way _validate_bastion validates operator input, but DROP it (return
+    '') on failure instead of raising — these are best-effort/background paths where a
+    bad value must never be stored or woven into an ssh ProxyCommand, but shouldn't
+    500 the request either. Belt-and-suspenders with the ProxyCommand quoting."""
+    try:
+        return _validate_bastion(bastion)
+    except HTTPException:
+        return ""
 
 
 @app.post("/inventories")
@@ -2253,11 +2266,27 @@ def _validate_libvirt_uri(uri: str) -> str:
     if scheme not in _LIBVIRT_URI_SCHEMES:
         raise HTTPException(status_code=400,
                             detail=f"Unsupported hypervisor URI scheme '{scheme}'. Use qemu:///system or qemu+ssh:// / qemu+tls:// / qemu+tcp://.")
-    params = {k.lower() for k, _ in urllib.parse.parse_qsl(urllib.parse.urlsplit(u).query)}
+    parts = urllib.parse.urlsplit(u)
+    params = {k.lower() for k, _ in urllib.parse.parse_qsl(parts.query)}
     bad = sorted(params & _LIBVIRT_URI_DENY_PARAMS)
     if bad:
         raise HTTPException(status_code=400,
                             detail=f"Hypervisor URI parameter(s) not allowed (they can run arbitrary commands): {', '.join(bad)}.")
+    # The userinfo/host are later woven into an SSH ProxyCommand (the auto-derived
+    # bastion) that ssh runs via /bin/sh — charset-validate them with the SAME safe
+    # sets as a jump host so a metacharacter (';', '$', '|', space, leading '-') can't
+    # survive urlsplit and break out. urlsplit raises on a malformed IPv6/port; treat
+    # that as invalid too rather than letting it through.
+    try:
+        uinfo, host = parts.username, parts.hostname
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Malformed hypervisor URI.")
+    if uinfo and not _valid_user(uinfo):
+        raise HTTPException(status_code=400,
+                            detail="Invalid user in the hypervisor URI — use letters, digits, . _ - (no shell metacharacters).")
+    if host and not _valid_host(host):
+        raise HTTPException(status_code=400,
+                            detail="Invalid host in the hypervisor URI — use a hostname, IPv4, or [IPv6] (no shell metacharacters).")
     return u
 
 
@@ -2280,7 +2309,11 @@ def _bastion_from_libvirt_uri(uri: str) -> str:
     hostpart = f"{parts.username}@{host}" if parts.username else host
     if parts.port:
         hostpart += f":{parts.port}"
-    return hostpart
+    # Never return a raw URI-derived value: it lands on an inventory as the SSH jump
+    # host and is woven into a ProxyCommand ssh runs via /bin/sh. Validate-and-drop so
+    # a metacharacter-laden netloc can't become a command-injection sink even if it
+    # somehow slipped past _validate_libvirt_uri (e.g. a URI scraped from a .tf file).
+    return _safe_bastion(hostpart)
 
 
 def _project_hypervisor_bastion(project_id: int) -> str:
@@ -2782,7 +2815,7 @@ def infra_managed_key_delete(user: str = Depends(require_operator)):
 
 
 @app.post("/infra/install-hypervisor-key")
-def infra_install_hypervisor_key(body: dict = Body(...), user: str = Depends(require_operator)):
+def infra_install_hypervisor_key(request: Request, body: dict = Body(...), user: str = Depends(require_operator)):
     """Install SLEP's managed hypervisor public key onto a remote KVM host using a
     one-time SSH password — the missing half of the two-step flow. Key auth to a
     brand-new hypervisor can't work until the key is on it, and installing the key
@@ -2807,7 +2840,18 @@ def infra_install_hypervisor_key(body: dict = Body(...), user: str = Depends(req
     if not port.isdigit():
         raise HTTPException(status_code=400, detail="Port must be a number.")
     raw = str(body.get("password") or "").strip()
-    pw = _resolve_secret_ref(raw) if raw else ""
+    # Defense in depth: a Vault plaintext resolved here is offered as the SSH password
+    # to an operator-CHOSEN external host — a cross-org decryption oracle in the wrong
+    # hands. Restrict Vault refs to a system admin and audit-log the secret name; a
+    # literal password is unchanged (any operator). Resolution is org-scoped besides.
+    ref_name = _secret_ref_name(raw)
+    if ref_name:
+        if not _is_system_admin(_session_or_401(request)["role"]):
+            raise HTTPException(status_code=403,
+                                detail="Only a system administrator may use a Vault variable as the install "
+                                       "password here — enter the host password directly instead.")
+        db.log_audit("hypervisor_key_vault_pw", user, f"{ref_name} → {ssh_user}@{host}:{port}")
+    pw = _resolve_secret_ref(raw, org_ids=_visible_org_ids(request)) if raw else ""
     if raw and not pw:
         raise HTTPException(status_code=400,
                             detail=f"Vault variable '{raw}' not found — add it under Secrets first, "
@@ -2937,12 +2981,17 @@ def infra_options(project_id: int, request: Request, user: str = Depends(current
     return {"provider": meta.get("provider"), "options": opts}
 
 
-def _resolve_secret_ref(value: str) -> str:
+def _resolve_secret_ref(value: str, org_ids=None) -> str:
     """Resolve a Vault-variable reference to its plaintext, so an operator can set a
     login password without pasting it in the clear. Accepts the same spellings a
     playbook uses — `vault.NAME`, `{{ vault.NAME }}`, `$vault.NAME` — as well as a
     bare secret name; anything that isn't a known secret is returned unchanged and
-    treated as a literal password. Returns '' for an empty/blank input."""
+    treated as a literal password. Returns '' for an empty/blank input.
+
+    `org_ids` scopes which secrets are visible: a request-driven caller MUST pass the
+    caller's authorized orgs (`_visible_org_ids(request)`) so resolution can never
+    reach across the tenant boundary — decrypting another org's secret here would be
+    a cross-org decryption oracle. None means all orgs (system-internal callers only)."""
     import re
     s = (value or "").strip()
     if not s:
@@ -2950,7 +2999,7 @@ def _resolve_secret_ref(value: str) -> str:
     m = re.fullmatch(r"\{\{\s*vault\.([A-Za-z0-9_.-]+)\s*\}\}", s) \
         or re.fullmatch(r"\$?vault\.([A-Za-z0-9_.-]+)", s)
     name = m.group(1) if m else s
-    for n, ct in db.all_secret_ciphertexts():
+    for n, ct in db.all_secret_ciphertexts(org_ids=org_ids):
         if n == name:
             try:
                 return vault.decrypt(ct)
@@ -2990,10 +3039,19 @@ def _set_infra_login_user(project_id: int, su: str):
                            groups=h.get("groups", ""), variables=v, source=h.get("source", "infra"))
 
 
-def _infra_login_password(meta: dict) -> str:
+def _infra_secret_org_ids(project_id: int):
+    """Scope a project's Vault-ref resolution to the project's OWN org (or None =
+    legacy null-org project → all). Binds a stored ssh_password_ref to the tenant that
+    owns the project so it can never re-resolve another org's secret of that name."""
+    oid = (db.get_project(project_id) or {}).get("org_id")
+    return [oid] if oid else None
+
+
+def _infra_login_password(meta: dict, org_ids=None) -> str:
     """The VMs' login plaintext password for SLEP's own use (Fix SSH / reachability),
     from whatever was stored: the encrypted copy first (covers a literal too), else
-    re-resolved from the Vault reference. '' when none was set."""
+    re-resolved from the Vault reference. '' when none was set. `org_ids` scopes the
+    Vault-ref resolution to the project's org (see _infra_secret_org_ids)."""
     if not meta:
         return ""
     enc = (meta.get("ssh_password_enc") or "").strip()
@@ -3003,7 +3061,7 @@ def _infra_login_password(meta: dict) -> str:
         except Exception:  # noqa: BLE001
             pass
     ref = (meta.get("ssh_password_ref") or "").strip()
-    return _resolve_secret_ref(f"vault.{ref}") if ref else ""
+    return _resolve_secret_ref(f"vault.{ref}", org_ids=org_ids) if ref else ""
 
 
 def _secret_ref_name(value: str) -> str:
@@ -3043,7 +3101,7 @@ def _derive_public_key(private_key: str) -> str:
 
 
 @app.post("/infra")
-def infra_create(body: dict = Body(...), user: str = Depends(require_operator)):
+def infra_create(request: Request, body: dict = Body(...), user: str = Depends(require_operator)):
     """Generate a Terraform VM project from the wizard selections. A chosen deploy
     SSH credential's public key is baked into the VMs' cloud-init (so SLEP's own
     Ansible/Salt can log in), as is a chosen Controller's key (so it can reach them
@@ -3115,7 +3173,8 @@ def infra_create(body: dict = Body(...), user: str = Depends(require_operator)):
     if str(options.get("ssh_password") or "").strip():
         pw_ref = _secret_ref_name(options["ssh_password"])
         options = dict(options)
-        options["ssh_password"] = _resolve_secret_ref(options["ssh_password"])
+        options["ssh_password"] = _resolve_secret_ref(options["ssh_password"],
+                                                      org_ids=_visible_org_ids(request))
     try:
         files = infra.generate(provider, options, controller_key,
                                deploy_key=deploy_key, managed_key=managed_key)
@@ -3350,7 +3409,7 @@ def _verify_infra_key_access(project_id: int, inventory_id: int, emit) -> None:
         # The stored login password (encrypted, or re-resolved from a Vault ref) lets
         # us install the key over the password login if key auth hasn't taken.
         meta = db.get_infra(project_id) or {}
-        password = _infra_login_password(meta)
+        password = _infra_login_password(meta, org_ids=_infra_secret_org_ids(project_id))
 
         def _target(h):
             user = (h.get("variables") or {}).get("ansible_user") or ""
@@ -3431,7 +3490,7 @@ def _distribute_managed_key(project_id: int, emit=None):
     pub = keydist.public_key()
     if not pub:
         return [], "SLEP has no managed key. Reset it under Credentials, then re-apply."
-    password = _infra_login_password(meta)
+    password = _infra_login_password(meta, org_ids=_infra_secret_org_ids(project_id))
     if not password:
         return [], ("No login password is stored for this project, so SLEP can't log in to install the "
                     "key. Set one (a Vault variable) under ⚙ Access, or re-apply to rebuild the VMs with "
@@ -3518,7 +3577,7 @@ def infra_test_auth(project_id: int, request: Request, body: dict = Body(default
             elif cred:
                 password = (cred.get("secret") or "")
             else:
-                password = _infra_login_password(meta)
+                password = _infra_login_password(meta, org_ids=_infra_secret_org_ids(project_id))
             if not password:
                 return {"results": [], "note": "No password to test — type one, pick a password credential, or set one under ⚙ Access."}
             sshpass = shutil.which("sshpass") or ""
@@ -3743,7 +3802,7 @@ def infra_update(project_id: int, request: Request, body: dict = Body(...), user
         # variable (`vault.NAME`) so the plaintext never rides in the request or
         # the audit log; it's hashed into the cloud-init, never stored in the clear.
         raw = str(body.get("ssh_password") or "").strip()
-        pw = _resolve_secret_ref(raw) if raw else ""
+        pw = _resolve_secret_ref(raw, org_ids=_visible_org_ids(request)) if raw else ""
         if raw and not pw:
             raise HTTPException(status_code=400,
                                 detail=f"Vault variable '{raw}' not found — add it under Secrets first, "

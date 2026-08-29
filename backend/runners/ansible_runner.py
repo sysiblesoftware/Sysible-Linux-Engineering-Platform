@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import shutil
 import socket
 import subprocess
@@ -148,11 +149,15 @@ def _render_inventory(hosts, credential, dest: Path, bastion: str = "", bastion_
         # (which 'Prepare jump host' / 'Distribute SSH key' installed there).
         if bastion:
             f.write("\n[all:vars]\n")
+            # ssh runs the ProxyCommand via /bin/sh, so shell-quote the bastion (and the
+            # key path) — the API already charset-validates a bastion, this is the last
+            # line of defence so a value that ever slipped the checks can't break out of
+            # the ssh option. A validated bastion has no special chars → quote is a no-op.
             if bastion_key:
-                proxy = f"ssh {common} -o BatchMode=yes -i {bastion_key} -W %h:%p {bastion}"
+                proxy = f"ssh {common} -o BatchMode=yes -i {shlex.quote(str(bastion_key))} -W %h:%p {shlex.quote(bastion)}"
                 f.write(f'ansible_ssh_common_args=-o ProxyCommand="{proxy}" {common}\n')
             else:
-                f.write(f"ansible_ssh_common_args=-o ProxyJump={bastion} {common}\n")
+                f.write(f"ansible_ssh_common_args=-o ProxyJump={shlex.quote(bastion)} {common}\n")
             # A target that IS the jump host connects directly: a dedicated group
             # whose vars override [all:vars] (more specific than the 'all' group).
             if direct_names:

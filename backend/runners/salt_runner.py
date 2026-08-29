@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import shutil
 import tempfile
 import time
@@ -48,9 +49,12 @@ def _render_roster(hosts, credential, key_path, dest: Path, bastion: str = "",
     def _proxy_for(target_addr: str) -> str:
         if not (bastion and bastion_key):
             return ""
+        # ssh runs this ProxyCommand via /bin/sh — shell-quote the untrusted bastion
+        # (and the key path). The API charset-validates a bastion, so a real value is
+        # unchanged; this is the last-line defence against a value that slipped through.
         return (f"ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
-                f"-o BatchMode=yes -o ConnectTimeout=15 -i '{bastion_key}' "
-                f"-W {target_addr}:22 {bastion}")
+                f"-o BatchMode=yes -o ConnectTimeout=15 -i {shlex.quote(str(bastion_key))} "
+                f"-W {target_addr}:22 {shlex.quote(bastion)}")
     # Build the roster as a dict and serialise with yaml.safe_dump: it quotes/escapes
     # every value, so a host address, username, ProxyCommand, or password can never
     # inject a sibling roster key (the salt-ssh equivalent of the INI-injection RCE).
@@ -82,7 +86,7 @@ def _render_roster(hosts, credential, key_path, dest: Path, bastion: str = "",
             # word "ssh", runs it with no destination, and dies with an ssh usage error
             # ("Connection closed by UNKNOWN port 65535"). Quoting keeps the whole nested
             # ssh together as one option value (this is the form salt's own docs show).
-            entry["ssh_options"] = ([f'ProxyCommand="{proxy}"'] if proxy else [f"ProxyJump={bastion}"]) \
+            entry["ssh_options"] = ([f'ProxyCommand="{proxy}"'] if proxy else [f"ProxyJump={shlex.quote(bastion)}"]) \
                 + ["StrictHostKeyChecking=no"]
         roster[h["name"]] = entry
     dest.write_text(yaml.safe_dump(roster, default_flow_style=False))

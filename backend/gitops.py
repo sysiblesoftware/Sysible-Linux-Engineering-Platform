@@ -13,6 +13,7 @@ so the token never lands in argv, the process list, or the repo's config.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import tempfile
 from urllib.parse import urlsplit, urlunsplit
@@ -20,10 +21,43 @@ from urllib.parse import urlsplit, urlunsplit
 from . import db, vault
 
 _IDENTITY = ["-c", "user.name=Sysible SLEP", "-c", "user.email=slep@sysible.local"]
+# Disable git's `ext::`/other remote-helper transports on every invocation that can
+# talk to an operator-supplied remote: `ext::sh -c …` runs arbitrary commands as the
+# SLEP service user. Belt-and-suspenders with _validate_remote_url's scheme allowlist.
+_SAFE_PROTO = ["-c", "protocol.ext.allow=never"]
+
+# Real network transports we accept for an operator-supplied remote URL. `ext::`/`fd::`
+# (and any other `<name>::` remote helper) execute arbitrary commands; `file://` clones
+# a local path. Allow only these.
+_ALLOWED_GIT_SCHEMES = ("https://", "http://", "ssh://", "git://")
 
 
 class GitError(Exception):
     pass
+
+
+def _validate_remote_url(url: str) -> str:
+    """Gate an operator-supplied git remote URL to safe transports. Rejects the
+    `<transport>::<addr>` remote-helper form (ext::/fd::/… = arbitrary command
+    execution on the SLEP host), a leading '-' (option injection), and any scheme
+    outside the https/http/ssh/git allowlist (e.g. file://). Accepts scp-like ssh
+    (`user@host:path`). Returns the URL unchanged when valid; '' passes through."""
+    u = (url or "").strip()
+    if not u:
+        return u
+    if u.startswith("-"):
+        raise GitError("Invalid repository URL.")
+    # `ext::…`, `fd::…`, any `<name>::…` remote helper — arbitrary command execution.
+    if re.match(r"^[A-Za-z0-9][A-Za-z0-9+.-]*::", u):
+        raise GitError("That repository transport isn't allowed — use an https, ssh, or git URL.")
+    if "://" in u:
+        if not u.lower().startswith(_ALLOWED_GIT_SCHEMES):
+            raise GitError("That repository URL scheme isn't allowed — use an https, ssh, or git URL.")
+        return u
+    # No scheme: allow only scp-like ssh (`user@host:path`); reject bare local paths.
+    if "@" in u and ":" in u.split("@", 1)[1]:
+        return u
+    raise GitError("That repository URL isn't allowed — use an https, ssh, or git URL.")
 
 
 def _run(pid: int, args, extra_cfg=None, env=None, timeout=180):
@@ -124,7 +158,7 @@ def checkout(pid: int, branch: str, create: bool = False):
 
 
 def set_remote(pid: int, url: str):
-    url = (url or "").strip()
+    url = _validate_remote_url((url or "").strip())
     if _run(pid, ["remote"]).stdout.strip():
         _run(pid, ["remote", "set-url", "origin", url] if url else ["remote", "remove", "origin"])
     elif url:
@@ -170,7 +204,7 @@ def _remote_op(pid: int, op: str):
             args = ["push", "--set-upstream", "origin", f"HEAD:{st['branch']}"]
         else:
             args = ["pull", "--no-edit", "origin", st["branch"]]
-        r = _run(pid, args, extra_cfg=cfg)
+        r = _run(pid, args, extra_cfg=_SAFE_PROTO + cfg)
     finally:
         cleanup()
     ok = r.returncode == 0
@@ -187,7 +221,7 @@ def _remote_op(pid: int, op: str):
 def clone(pid: int, url: str, token: str = ""):
     """Clone `url` into the project's (empty) working dir. Stores the remote and,
     if given, the encrypted token for later push/pull."""
-    url = (url or "").strip()
+    url = _validate_remote_url((url or "").strip())
     if not url:
         raise GitError("A repository URL is required.")
     dest = db.project_dir(pid)
@@ -195,7 +229,8 @@ def clone(pid: int, url: str, token: str = ""):
         raise GitError("The project directory is not empty — clone needs a fresh project.")
     cfg, cleanup = _token_cfg(url, token)
     try:
-        r = _run(pid, ["clone", url, "."], extra_cfg=cfg, timeout=300)
+        # `--` so a URL can never be read as an option; ext-transport disabled.
+        r = _run(pid, ["clone", "--", url, "."], extra_cfg=_SAFE_PROTO + cfg, timeout=300)
     finally:
         cleanup()
     if r.returncode != 0:

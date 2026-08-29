@@ -82,7 +82,7 @@ def init_db() -> None:
 
             CREATE TABLE IF NOT EXISTS secrets (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT UNIQUE NOT NULL,
+                name TEXT NOT NULL,             -- unique PER org, not globally (see the UNIQUE(org_id,name) index below)
                 value TEXT NOT NULL,            -- ciphertext (see backend/vault.py); never plaintext
                 created INTEGER NOT NULL
             );
@@ -350,6 +350,31 @@ def init_db() -> None:
             cols = [r["name"] for r in c.execute(f"PRAGMA table_info({tbl})")]
             if "org_id" not in cols:
                 c.execute(f"ALTER TABLE {tbl} ADD COLUMN org_id INTEGER")
+        # Secret identity is ORG-SCOPED: a name is unique WITHIN an org, never globally.
+        # Older DBs created the table with a column-level `name TEXT UNIQUE` (an implicit
+        # autoindex) that both blocked a second org reusing a name AND let an upsert-by-
+        # name overwrite another tenant's secret of the same name (cross-org poisoning).
+        # Rebuild the table without that global constraint, then enforce UNIQUE(org_id,
+        # name) via an explicit index. Names are globally unique on legacy rows, so the
+        # (org_id,name) pairs can never collide during this migration.
+        sec_idx = [r["name"] for r in c.execute("PRAGMA index_list(secrets)")]
+        if any(ix.startswith("sqlite_autoindex_secrets") for ix in sec_idx):
+            c.executescript(
+                """
+                CREATE TABLE secrets_new (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    value TEXT NOT NULL,
+                    created INTEGER NOT NULL,
+                    org_id INTEGER
+                );
+                INSERT INTO secrets_new(id,name,value,created,org_id)
+                    SELECT id,name,value,created,org_id FROM secrets;
+                DROP TABLE secrets;
+                ALTER TABLE secrets_new RENAME TO secrets;
+                """
+            )
+        c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_secrets_org_name ON secrets(org_id, name)")
         # A pinned TLS certificate (PEM) for a self-signed / on-prem Controller, captured
         # trust-on-first-use when connecting, so SLEP verifies against it instead of the
         # public CA store — no manual cert copying, no blanket insecure mode.
@@ -1088,12 +1113,15 @@ def list_secrets(org_ids=None):
 
 
 def upsert_secret(name, ciphertext, org_id=None):
-    """Store (or replace) a secret's ciphertext by name within an org."""
+    """Store (or replace) a secret's ciphertext by (org_id, name). Secret identity is
+    ORG-SCOPED (UNIQUE(org_id, name)): the match is on BOTH name and org, so an upsert
+    only ever touches a row in the SAME org and can never overwrite another tenant's
+    secret of the same name. `org_id IS ?` matches a legacy NULL-org row correctly."""
     with _connect() as c:
-        row = c.execute("SELECT id FROM secrets WHERE name=?", (name,)).fetchone()
+        row = c.execute("SELECT id FROM secrets WHERE name=? AND org_id IS ?",
+                        (name, org_id)).fetchone()
         if row:
-            c.execute("UPDATE secrets SET value=?, org_id=COALESCE(org_id,?) WHERE id=?",
-                      (ciphertext, org_id, row["id"]))
+            c.execute("UPDATE secrets SET value=? WHERE id=?", (ciphertext, row["id"]))
             return row["id"]
         cur = c.execute("INSERT INTO secrets(name,value,created,org_id) VALUES(?,?,?,?)",
                         (name, ciphertext, _now(), org_id))

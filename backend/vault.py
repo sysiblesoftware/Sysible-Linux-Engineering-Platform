@@ -25,6 +25,24 @@ _DATA = Path(os.environ.get("SLEP_DATA_DIR", "./data")).resolve()
 KEY_FILE = Path(os.environ.get("SLEP_VAULT_KEY", str(_DATA / "vault.key")))
 
 
+def _read_key_nofollow() -> bytes:
+    """Read the key file WITHOUT following a symlink. os.open raises ELOOP and fails
+    CLOSED if the path is a symlink a local attacker pre-planted to redirect the read
+    onto a file they control (or to disclose our key through one they can read) — the
+    same guard the Controller's secret_vault/sudo_store use for this file class."""
+    fd = os.open(str(KEY_FILE), os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        buf = b""
+        while True:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            buf += chunk
+        return buf
+    finally:
+        os.close(fd)
+
+
 def _key() -> bytes:
     from cryptography.fernet import Fernet
     # 1) Key supplied by value out-of-band — never touches the disk.
@@ -32,10 +50,17 @@ def _key() -> bytes:
     if val:
         return val.encode()
     if KEY_FILE.exists():
-        return KEY_FILE.read_bytes()
+        return _read_key_nofollow()
     KEY_FILE.parent.mkdir(parents=True, exist_ok=True)
     k = Fernet.generate_key()
-    fd = os.open(str(KEY_FILE), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    # Create EXCLUSIVELY and never through a symlink (O_EXCL|O_NOFOLLOW, no O_TRUNC):
+    # an attacker who pre-planted data/vault.key — as a file OR a symlink — can't get
+    # us to write the freshly-generated key through their path (ELOOP/EEXIST fails
+    # closed). If we merely lose the create race, re-read the winner's key no-follow.
+    try:
+        fd = os.open(str(KEY_FILE), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    except FileExistsError:
+        return _read_key_nofollow()
     try:
         os.write(fd, k)
     finally:
