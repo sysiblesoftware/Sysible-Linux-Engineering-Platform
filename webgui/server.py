@@ -12,6 +12,7 @@ toolchain — the "less of a hassle" promise extends to the console too).
 from __future__ import annotations
 
 import os
+import secrets
 from pathlib import Path
 
 import requests
@@ -28,6 +29,18 @@ app = FastAPI(title="SLEP Console")
 
 _HOP = {"content-length", "transfer-encoding", "connection", "host"}
 _MAX_REQUEST_BYTES = int(os.environ.get("SLEP_MAX_REQUEST_BYTES", str(16 * 1024 * 1024)))
+
+# SLOP SSO trust boundary (see backend/app.py). The backend trusts X-Sysible-User /
+# X-Sysible-Role only when they arrive with a valid X-Sysible-Auth shared secret. A
+# direct browser hitting this console must NEVER be able to forge those identity
+# headers, so the BFF strips ALL inbound X-Sysible-* before forwarding. They are re-
+# added only when trust mode is on AND the request already carries the correct shared
+# secret — i.e. it genuinely came in on Caddy's hop into the console (Caddy sets these
+# headers itself). The BFF can't tell "from Caddy" from "from browser" except by that
+# secret, so the secret IS the gate. Trust mode off → all three are always dropped.
+_TRUST_GATEWAY_AUTH = os.environ.get("SLEP_TRUST_GATEWAY_AUTH", "0") == "1"
+_SSO_SHARED_SECRET = os.environ.get("SYSIBLE_SSO_SHARED_SECRET", "")
+_SSO_HEADERS = ("x-sysible-user", "x-sysible-role", "x-sysible-auth")
 
 # CSP for the SPA: self-hosted only (airgap-friendly). Monaco runs its language
 # services in blob workers and uses eval in its tokenizer, so worker-src blob:
@@ -72,7 +85,17 @@ async def proxy(path: str, request: Request):
     import anyio
 
     url = f"{BACKEND}/{path}"
-    headers = {k: v for k, v in request.headers.items() if k.lower() not in _HOP}
+    # Drop any client-supplied X-Sysible-* so a browser can't spoof a gateway identity;
+    # re-add them below only for a request that already proves it came through the gateway.
+    headers = {k: v for k, v in request.headers.items()
+               if k.lower() not in _HOP and k.lower() not in _SSO_HEADERS}
+    if _TRUST_GATEWAY_AUTH and _SSO_SHARED_SECRET and \
+            secrets.compare_digest(request.headers.get("x-sysible-auth", ""), _SSO_SHARED_SECRET):
+        # Legitimate gateway hop (valid shared secret) — forward the identity headers.
+        for h in _SSO_HEADERS:
+            v = request.headers.get(h)
+            if v is not None:
+                headers[h] = v
     body = await request.body()
     params = dict(request.query_params)
 

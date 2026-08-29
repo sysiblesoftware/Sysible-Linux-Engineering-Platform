@@ -19,6 +19,7 @@ import os
 import re
 import secrets
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -166,11 +167,68 @@ def _bearer(request: Request) -> str:
     return auth[7:].strip() if auth.lower().startswith("bearer ") else ""
 
 
-def _session_or_401(request: Request) -> dict:
+# ------------------------------------------------------ SLOP SSO gateway trust
+# "Trust the gateway's asserted identity" mode. When SLEP runs behind the SLOP
+# single-sign-on gateway, an upstream Caddy reverse proxy authenticates the browser
+# and injects identity headers (X-Sysible-User / X-Sysible-Role) plus a shared-secret
+# header (X-Sysible-Auth) that proves the request actually transited the gateway.
+#
+# The trust boundary is the shared SECRET, not the source IP: identity headers are
+# honored only when trust mode is on AND X-Sysible-Auth equals the configured secret.
+# That holds regardless of container network topology (IPs the app can't vouch for).
+# OFF by default → standalone SLEP never looks at these headers and is unchanged.
+_TRUST_GATEWAY_AUTH = os.environ.get("SLEP_TRUST_GATEWAY_AUTH", "0") == "1"
+_SSO_SHARED_SECRET = os.environ.get("SYSIBLE_SSO_SHARED_SECRET", "")
+
+# Map the shared SSO role vocabulary {superuser, operator, auditor} onto SLEP's own
+# tiers (viewer < operator < superuser). An auditor is read-only → viewer; an unknown
+# or empty role degrades safely to viewer (least privilege).
+_GATEWAY_ROLE_MAP = {"superuser": "superuser", "operator": "operator", "auditor": "viewer"}
+
+# Fail closed: trust mode with no configured secret would mean honoring UNVERIFIED
+# identity headers — any client could then assert any user/role. Refuse to trust them
+# and say so loudly, once, at import/startup.
+if _TRUST_GATEWAY_AUTH and not _SSO_SHARED_SECRET:
+    print("WARNING: SLEP_TRUST_GATEWAY_AUTH=1 but SYSIBLE_SSO_SHARED_SECRET is empty — "
+          "gateway identity headers will NOT be trusted (fail-closed).", file=sys.stderr)
+
+
+def _gateway_identity(request: Request) -> dict | None:
+    """The identity asserted by the SLOP gateway, or None when it must not be trusted.
+
+    Returns {"user", "role"} ONLY when trust mode is on, a shared secret is configured,
+    X-Sysible-Auth matches it (constant-time compare), and X-Sysible-User is present.
+    A missing or wrong X-Sysible-Auth returns None so the caller falls through to the
+    normal bearer path — a spoofed identity header is simply ignored, never an error."""
+    if not _TRUST_GATEWAY_AUTH or not _SSO_SHARED_SECRET:
+        return None
+    if not secrets.compare_digest(request.headers.get("x-sysible-auth", ""), _SSO_SHARED_SECRET):
+        return None
+    user = (request.headers.get("x-sysible-user") or "").strip()
+    if not user:
+        return None
+    role = _GATEWAY_ROLE_MAP.get((request.headers.get("x-sysible-role") or "").strip().lower(), "viewer")
+    return {"user": user, "role": role}
+
+
+def _resolve_identity(request: Request) -> dict | None:
+    """The caller's identity from either source, or None if unauthenticated. A
+    gateway-asserted identity (trusted only via the shared secret) takes precedence
+    over a SLEP bearer token. Never raises — callers decide how to react."""
+    ident = _gateway_identity(request)
+    if ident:
+        return ident
     sess = db.resolve_admin_token(_bearer(request))
-    if not sess:
+    if sess:
+        return {"user": sess["username"], "role": sess["role"]}
+    return None
+
+
+def _session_or_401(request: Request) -> dict:
+    ident = _resolve_identity(request)
+    if not ident:
         raise HTTPException(status_code=401, detail="Not authenticated.")
-    return {"user": sess["username"], "role": sess["role"]}
+    return ident
 
 
 def current_user(request: Request) -> str:
@@ -311,7 +369,10 @@ _AUTH_PATHS = {"/login", "/logout", "/setup"}
 @app.middleware("http")
 async def viewer_read_only(request: Request, call_next):
     if request.method in _WRITE_METHODS and request.url.path not in _AUTH_PATHS:
-        s = db.resolve_admin_token(_bearer(request))
+        # Resolve via the SAME helper as _session_or_401 so a gateway-asserted role is
+        # enforced identically to a bearer role: a gateway 'viewer' (auditor) stays
+        # read-only, while a gateway 'operator'/'superuser' is allowed through to write.
+        s = _resolve_identity(request)
         if s and ROLE_RANK.get(s.get("role", "viewer"), 1) < ROLE_RANK["operator"]:
             from fastapi.responses import JSONResponse
             return JSONResponse({"detail": "Your role is read-only (viewer)."}, status_code=403)

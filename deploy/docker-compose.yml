@@ -27,6 +27,12 @@ services:
       SLEP_DATA_DIR: /data
       SLEP_TLS: "1"                        # "0" to serve plain HTTP (behind a proxy)
       SLEP_TLS_HOSTS: ${SLEP_TLS_HOSTS:-}  # e.g. 192.168.1.50,slep.lan — names/IPs to put in the cert
+      # Single sign-on behind the SLOP gateway. Both default OFF/empty, so a
+      # standalone SLEP keeps its own login. The SLOP installer sets these so SLEP
+      # trusts the gateway-asserted identity ONLY when the request carries the
+      # matching shared secret (see SLOP docs/SSO.md).
+      SLEP_TRUST_GATEWAY_AUTH: "${SLEP_TRUST_GATEWAY_AUTH:-0}"
+      SYSIBLE_SSO_SHARED_SECRET: "${SYSIBLE_SSO_SHARED_SECRET:-}"
     restart: unless-stopped
 
 volumes:
