@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react'
-import { api, getToken } from '../api.js'
+import { api, getToken, apiUrl } from '../api.js'
 import { Modal } from '../ui.jsx'
 
 // Install the Ansible Galaxy collections the task snippets reach for
@@ -22,7 +22,7 @@ export default function CollectionsInstall({ onClose }) {
     catch (e) { setText('Could not start: ' + e.message); setPhase('failed'); return }
     let offset = 0, acc = '', alive = true
     while (alive) {
-      const r = await fetch(`/api/engines/collections/install-log?offset=${offset}`,
+      const r = await fetch(apiUrl(`/api/engines/collections/install-log?offset=${offset}`),
         { headers: getToken() ? { Authorization: 'Bearer ' + getToken() } : {} })
       const chunk = await r.text()
       if (chunk) { acc += chunk; setText(acc); const b = boxRef.current; if (b) b.scrollTop = b.scrollHeight }

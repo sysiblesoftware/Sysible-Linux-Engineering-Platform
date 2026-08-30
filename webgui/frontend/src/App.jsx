@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react'
-import { api, setToken, getToken, setRole, isSuperuser, getTheme, applyTheme } from './api.js'
+import { api, setToken, getToken, setRole, isSuperuser, getTheme, applyTheme, apiUrl } from './api.js'
 import { Field, useErr } from './ui.jsx'
 import Logo from './Logo.jsx'
 import Organizations from './views/Organizations.jsx'
@@ -79,7 +79,7 @@ export default function App() {
     window.addEventListener('slep-logout', onLogout)
     ;(async () => {
       try {
-        const h = await fetch('/api/health').then((r) => r.json())
+        const h = await fetch(apiUrl('/api/health')).then((r) => r.json())
         if (h.admins === 0) { setNeedSetup(true); setReady(true); return }
       } catch { setReady(true); return }
       if (getToken()) { try { const me = await api('me'); setUsername(me.username); setRole(me.role); setRoleName(me.role); setAuthed(true) } catch { /* stale token */ } }

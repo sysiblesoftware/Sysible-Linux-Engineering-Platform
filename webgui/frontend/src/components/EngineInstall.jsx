@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react'
-import { api, getToken } from '../api.js'
+import { api, getToken, apiUrl } from '../api.js'
 import { Modal } from '../ui.jsx'
 
 // One-click engine install: POST the install, then tail its streaming log until
@@ -16,7 +16,7 @@ export default function EngineInstall({ engine, label, onClose, onDone }) {
       catch (e) { if (alive) { setText('Could not start install: ' + e.message); setStatus('failed') } return }
       setStatus('running')
       while (alive) {
-        const r = await fetch(`/api/engines/${engine}/install-log?offset=${offset}`,
+        const r = await fetch(apiUrl(`/api/engines/${engine}/install-log?offset=${offset}`),
           { headers: getToken() ? { Authorization: 'Bearer ' + getToken() } : {} })
         const chunk = await r.text()
         if (chunk) { acc += chunk; setText(acc); const b = boxRef.current; if (b) b.scrollTop = b.scrollHeight }

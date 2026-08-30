@@ -17,6 +17,11 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile
+      args:
+        # URL prefix the console is served under. "/" standalone; the SLOP
+        # installer sets "/slep/" so the SPA's assets + API base live under the
+        # gateway's /slep/* path on the one shared origin.
+        SYSIBLE_BASE_PATH: "${SYSIBLE_BASE_PATH:-/}"
     image: sysible-slep:latest
     container_name: sysible-slep
     ports:
