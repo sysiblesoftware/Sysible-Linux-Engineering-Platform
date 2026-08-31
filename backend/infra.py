@@ -24,6 +24,20 @@ _HOSTNAME = {"key": "hostname", "label": "Hostname (base name set on the VMs)", 
              "default": "sysible",
              "help": "The OS hostname the VMs boot with. A single VM gets exactly this; several get "
                      "it suffixed (sysible-1, sysible-2, …). Set per-VM via the cloud-init meta-data."}
+# libvirt only: how the provider learns each VM's IP after boot. On a libvirt-managed
+# NAT network the IP is read from libvirt's own DHCP lease (the reliable default). On a
+# network BRIDGED to the host LAN, the VMs get their IPs from the LAN's DHCP server,
+# which libvirt cannot see — so the QEMU guest agent (installed on first boot) reports
+# the IP instead. Picking the wrong one is the classic "couldn't retrieve IP address of
+# domain" apply failure.
+_NET_MODE = {"key": "net_mode", "label": "How the VMs get their IP address", "type": "select",
+             "default": "nat", "choices": ["nat", "bridge"],
+             "help": "nat — the network is a libvirt-managed NAT network with its own DHCP (the provider "
+                     "reads the IP from libvirt's lease; the reliable default, e.g. the 'default' network). "
+                     "bridge — the network is bridged onto your host LAN and VMs get IPs from the LAN's "
+                     "DHCP, which libvirt can't read; the QEMU guest agent reports the IP instead. The VMs "
+                     "install the agent on first boot, so a bridged first apply can take a couple minutes "
+                     "longer while it comes up."}
 _SSH_USER = {"key": "ssh_user", "label": "Login user", "type": "text", "default": "ubuntu"}
 _SSH_KEY = {"key": "ssh_public_key", "label": "Deploy SSH public key (for SLEP access)",
             "type": "textarea", "default": "", "help": "Paste an ssh-ed25519/ssh-rsa public key. Optional."}
@@ -109,6 +123,7 @@ PROVIDERS = {
                      "clone. A bare local path is read from the SLEP host (a container), not the "
                      "hypervisor — to use an image on the hypervisor, name it under “Existing pool volume”."},
             {"key": "network", "label": "Network name", "type": "text", "default": "default"},
+            _NET_MODE,
             _HOSTNAME, _SSH_USER, _SSH_KEY, _SSH_PASSWORD, _ENV,
         ],
     },
@@ -461,6 +476,23 @@ def _hostslug(name: str, fallback: str = "vm") -> str:
     return s or fallback
 
 
+def _libvirt_agent_block(spec) -> str:
+    """The domain's qemu_agent line — ONLY when the operator chose a bridged network.
+
+    On a libvirt NAT network the provider reads each VM's IP from libvirt's DHCP lease
+    (wait_for_lease); it must NOT set qemu_agent there, because with that flag the
+    provider reads the address from the guest agent ALONE and times out at first boot
+    before the agent is up (that's the regression that broke the lease path). On a
+    BRIDGED network libvirt has no lease to read, so the guest agent (installed by
+    cloud-init) is the only way to learn the IP — there we set qemu_agent = true. The
+    trailing marker lets migrate_libvirt_main_tf tell an intentional bridge agent line
+    from the accidental one an earlier release baked in on every network."""
+    if _opt(spec, "net_mode", "nat") == "bridge":
+        return ("  qemu_agent = true  # sysible:net_mode=bridge — read the VM IP from the "
+                "QEMU guest agent (a bridged network has no libvirt DHCP lease)\n")
+    return ""
+
+
 def _render_libvirt(spec, keys):
     # Heterogeneous VM groups (e.g. Ubuntu + Arch in one apply): when `groups` is given,
     # generate a resource set per group. Opt-in — the single-image path below is untouched.
@@ -468,6 +500,7 @@ def _render_libvirt(spec, keys):
     if isinstance(groups, list) and groups:
         return _render_libvirt_groups(spec, keys, groups)
     ssh_user = _opt(spec, "ssh_user", "ubuntu")
+    agent_block = _libvirt_agent_block(spec)
     base_volume = _one_line(_opt(spec, "base_volume", "")).strip()
     # Storage: either clone each VM disk from an image ALREADY in the pool (no
     # download/upload — the fast path when the image is on the hypervisor), or pull
@@ -545,8 +578,7 @@ resource "libvirt_domain" "vm" {{
   memory    = var.memory
   vcpu      = var.vcpu
   cloudinit = libvirt_cloudinit_disk.ci[count.index].id
-
-  disk {{ volume_id = libvirt_volume.disk[count.index].id }}
+{agent_block}  disk {{ volume_id = libvirt_volume.disk[count.index].id }}
   network_interface {{
     network_name   = var.network
     wait_for_lease = true
@@ -606,6 +638,7 @@ def _render_libvirt_groups(spec, keys, groups):
     every group so enrollment/inventory see all VMs. Resource names are suffixed by a
     slug of the group name so they never collide."""
     ssh_user = _opt(spec, "ssh_user", "ubuntu")
+    agent_block = _libvirt_agent_block(spec)
     blocks, host_lists, seen = [], [], set()
     for i, g in enumerate(groups):
         slug = _slug(g.get("name"), f"g{i + 1}")
@@ -662,6 +695,7 @@ def _render_libvirt_groups(spec, keys, groups):
             f'  memory    = {mem}\n'
             f'  vcpu      = {vcpu}\n'
             f'  cloudinit = libvirt_cloudinit_disk.ci_{slug}[count.index].id\n'
+            f'{agent_block}'
             f'  disk {{ volume_id = libvirt_volume.disk_{slug}[count.index].id }}\n'
             f'  network_interface {{\n    network_name   = var.network\n    wait_for_lease = true\n  }}\n'
             f'  console {{\n    type        = "pty"\n    target_type = "serial"\n    target_port = "0"\n  }}\n'
@@ -734,19 +768,21 @@ def migrate_libvirt_main_tf(text: str) -> tuple[str, list[str]]:
                 text = text.replace(anchor, anchor + '\n  size             = var.disk_size * 1073741824', 1)
                 notes.append("VM disk sized from var.disk_size (default 20GB — edit variables.tf to change)")
                 break
-    # 4) REMOVE `qemu_agent = true` if an earlier SLEP release added it. With that flag
-    #    the dmacvicar provider reads the VM address ONLY from the QEMU guest agent and
-    #    NOT from the DHCP lease — so at first boot, before the agent is installed and
-    #    running, every VM times out with "couldn't retrieve IP address of domain". It
-    #    regressed VMs that were resolving fine via the lease. Strip it so address
-    #    detection falls back to the DHCP lease (wait_for_lease) — the reliable path on
-    #    a NAT/DHCP libvirt network. Idempotent (no-op when absent).
+    # 4) REMOVE an ACCIDENTAL `qemu_agent = true` an earlier SLEP release baked into
+    #    every domain. With that flag the dmacvicar provider reads the VM address ONLY
+    #    from the QEMU guest agent, not the DHCP lease — so at first boot, before the
+    #    agent is up, every VM times out with "couldn't retrieve IP address of domain",
+    #    regressing VMs that resolved fine via the lease. Strip only the BARE line
+    #    (nothing after `true`); an INTENTIONAL bridge-network agent line carries a
+    #    trailing `# sysible:net_mode=bridge` marker and is left alone, so a project the
+    #    operator set to bridge mode keeps its agent. Idempotent (no-op when absent).
     if 'qemu_agent' in text:
-        new = re.sub(r'\n[ \t]*qemu_agent[ \t]*=[ \t]*true[ \t]*', '', text)
+        new = re.sub(r'\n[ \t]*qemu_agent[ \t]*=[ \t]*true[ \t]*(?=\n)', '', text)
         if new != text:
             text = new
-            notes.append('removed qemu_agent from the VM(s) — it forced address detection '
-                         'through the guest agent and timed out at first boot; back to the DHCP lease')
+            notes.append('removed a leftover qemu_agent from the VM(s) — it forced address '
+                         'detection through the guest agent and timed out at first boot; back to '
+                         'the DHCP lease (bridge-mode projects keep their agent)')
     return text, notes
 
 
