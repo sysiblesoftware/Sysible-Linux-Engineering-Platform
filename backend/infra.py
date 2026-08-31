@@ -592,21 +592,21 @@ def _render_libvirt_groups(spec, keys, groups):
     """Generate libvirt HCL for MULTIPLE VM groups in one project (e.g. an Ubuntu group
     and an Arch group), so a single apply builds heterogeneous machines. Each group has
     its own image, count, memory, vCPUs and disk size; per-group values are emitted as
-    HCL literals (the shared uri/pool/network/name_prefix/hostname stay variables). All
+    HCL literals (the shared uri/pool/network stay variables). The group name is the VM's
+    hostname — there is no separate name-prefix/hostname in groups mode. All
     groups share ONE cloud-init (same login account/keys). `sysible_hosts` concatenates
     every group so enrollment/inventory see all VMs. Resource names are suffixed by a
     slug of the group name so they never collide."""
     ssh_user = _opt(spec, "ssh_user", "ubuntu")
-    prefix = _opt(spec, "name_prefix", "app")
     blocks, host_lists, seen = [], [], set()
     for i, g in enumerate(groups):
         slug = _slug(g.get("name"), f"g{i + 1}")
         while slug in seen:                        # keep slugs unique even if names clash
             slug += f"_{i + 1}"
         seen.add(slug)
-        # The user-visible VM/host name is the GROUP NAME (hostname-safe), NOT prefixed
-        # with name_prefix — that produced the doubled "prefix-group-N" names. name_prefix
-        # still uniquifies the internal disk/ISO files below.
+        # The VM name, hostname, disk and ISO files are ALL derived from the GROUP NAME
+        # (hostname-safe slug), so the group name IS the hostname — there is no separate
+        # global "name prefix" / "hostname" in groups mode.
         hostslug = _hostslug(g.get("name"), f"vm{i + 1}")
         n = max(1, int(g.get("count", 1) or 1))
         mem = int(g.get("memory", 2048) or 2048)
@@ -618,7 +618,7 @@ def _render_libvirt_groups(spec, keys, groups):
         if base_volume:
             disk_res = (f'resource "libvirt_volume" "disk_{slug}" {{\n'
                         f'  count            = {n}\n'
-                        f'  name             = "${{var.name_prefix}}-{slug}-${{count.index + 1}}.qcow2"\n'
+                        f'  name             = "{hostslug}-${{count.index + 1}}.qcow2"\n'
                         f'  pool             = var.pool\n'
                         f'  base_volume_name = {_hcl(base_volume)}\n'
                         f'  base_volume_pool = var.pool\n'
@@ -626,13 +626,13 @@ def _render_libvirt_groups(spec, keys, groups):
                         f'  size             = {disk_gb} * 1073741824\n}}')
         else:
             disk_res = (f'resource "libvirt_volume" "base_{slug}" {{\n'
-                        f'  name   = "${{var.name_prefix}}-{slug}-base.qcow2"\n'
+                        f'  name   = "{hostslug}-base.qcow2"\n'
                         f'  pool   = var.pool\n'
                         f'  source = {_hcl(base_image)}\n'
                         f'  format = "qcow2"\n}}\n\n'
                         f'resource "libvirt_volume" "disk_{slug}" {{\n'
                         f'  count          = {n}\n'
-                        f'  name           = "${{var.name_prefix}}-{slug}-${{count.index + 1}}.qcow2"\n'
+                        f'  name           = "{hostslug}-${{count.index + 1}}.qcow2"\n'
                         f'  pool           = var.pool\n'
                         f'  base_volume_id = libvirt_volume.base_{slug}.id\n'
                         f'  format         = "qcow2"\n'
@@ -642,10 +642,10 @@ def _render_libvirt_groups(spec, keys, groups):
             f'{disk_res}\n\n'
             f'resource "libvirt_cloudinit_disk" "ci_{slug}" {{\n'
             f'  count     = {n}\n'
-            f'  name      = "${{var.name_prefix}}-{slug}-${{count.index + 1}}-ci.iso"\n'
+            f'  name      = "{hostslug}-${{count.index + 1}}-ci.iso"\n'
             f'  pool      = var.pool\n'
             f'  user_data = file("${{path.module}}/cloudinit.cfg")\n'
-            f'  meta_data = "instance-id: ${{var.name_prefix}}-{slug}-${{count.index + 1}}'
+            f'  meta_data = "instance-id: {hostslug}-${{count.index + 1}}'
             f'-${{substr(filemd5("${{path.module}}/cloudinit.cfg"), 0, 10)}}\\n'
             f'local-hostname: {hostslug}-${{count.index + 1}}\\n"\n}}\n\n'
             f'resource "libvirt_domain" "vm_{slug}" {{\n'
@@ -672,8 +672,6 @@ def _render_libvirt_groups(spec, keys, groups):
         "uri": ("string", spec.get("uri", "qemu:///system")),
         "pool": ("string", spec.get("pool", "default")),
         "network": ("string", spec.get("network", "default")),
-        "name_prefix": ("string", prefix),
-        "hostname": ("string", spec.get("hostname", "sysible")),
         "environment": ("string", spec.get("environment", "production")),
     })
     outputs = ('output "sysible_hosts" {\n  value = concat(\n    '

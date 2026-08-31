@@ -496,8 +496,11 @@ export function CreateWizard({ onClose, onDone, project, editInfra }) {
   const opts = schema[provider]?.options || []
   // libvirt "multiple VM types" mode: values.groups holds a list of per-group specs.
   const groupsOn = provider === 'libvirt' && Array.isArray(values.groups)
-  // Per-VM fields that a group owns individually (hidden from the flat grid in groups mode).
+  // Fields hidden from the flat grid in libvirt groups mode: the per-VM sizing each group
+  // owns individually, plus name_prefix/hostname — in groups mode the GROUP NAME is the VM's
+  // name and hostname, so a separate global prefix/hostname is redundant and confusing.
   const perVmKeys = ['count', 'memory', 'vcpu', 'disk_size']
+  const hiddenInGroups = [...perVmKeys, 'name_prefix', 'hostname']
 
   return (
     <Modal title={editInfra ? `Edit infrastructure — “${project?.name || ''}”`
@@ -530,7 +533,7 @@ export function CreateWizard({ onClose, onDone, project, editInfra }) {
 
       <div className="task-palette" style={{ gridTemplateColumns: '1fr 1fr', gap: 12 }}>
         {opts.filter((o) => !(provider === 'libvirt' && (o.key === 'uri' || o.key === 'base_volume' || o.key === 'base_image'
-          || (groupsOn && perVmKeys.includes(o.key))))).map((o) => (
+          || (groupsOn && hiddenInGroups.includes(o.key))))).map((o) => (
           <Field key={o.key} label={o.label}>
             {o.type === 'select'
               ? <select value={values[o.key] ?? ''} onChange={(e) => set(o.key, e.target.value)}>
