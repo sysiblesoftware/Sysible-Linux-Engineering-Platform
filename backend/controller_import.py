@@ -213,9 +213,21 @@ def exchange_credentials_for_key(controller_url: str, username: str, password: s
     payload = {"username": username, "password": password}
     if totp_code:
         payload["totp_code"] = totp_code
+    # The Controller's /auth/api-key hands out the root backend key, so it refuses
+    # off-gateway LAN callers — it accepts a request only from loopback OR one that
+    # carries the SLOP shared secret. SLEP and the Controller run behind the same
+    # SLOP gateway and share that secret, so present it as X-Sysible-Auth to prove
+    # we're a trusted sibling (the same credential the gateway itself stamps).
+    # Without this, a direct https://<host>:9000 connect is (correctly) rejected as
+    # "reachable only through the local gateway/BFF."
+    headers = {}
+    _sso = os.environ.get("SYSIBLE_SSO_SHARED_SECRET", "").strip()
+    if _sso:
+        headers["X-Sysible-Auth"] = _sso
     try:
         _guard_url(url)
-        resp = requests.post(url, json=payload, verify=_verify(), timeout=20)
+        resp = requests.post(url, json=payload, headers=headers or None,
+                             verify=_verify(), timeout=20)
     except requests.exceptions.RequestException as e:
         raise ControllerImportError(f"Could not reach the Controller at {url}: {e}")
     if resp.status_code == 404:
