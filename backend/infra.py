@@ -744,6 +744,22 @@ def migrate_libvirt_main_tf(text: str) -> tuple[str, list[str]]:
                 text = text.replace(anchor, anchor + '\n  size             = var.disk_size * 1073741824', 1)
                 notes.append("VM disk sized from var.disk_size (default 20GB — edit variables.tf to change)")
                 break
+    # 4) Read the VM IP via the QEMU guest agent, not only the DHCP lease. Projects
+    #    generated before this had just `wait_for_lease`, so on a bridged/routed network
+    #    (no libvirt DHCP lease to read) the apply failed with "couldn't retrieve IP
+    #    address of domain ... context deadline exceeded". Add `qemu_agent = true` to
+    #    every libvirt_domain (matches the single-VM and per-group cloudinit anchors);
+    #    the companion cloud-init refresh installs qemu-guest-agent in the guest. The
+    #    provider auto-adds the agent channel. Idempotent via the guard.
+    if 'qemu_agent' not in text:
+        new = re.sub(
+            r'(cloudinit = libvirt_cloudinit_disk\.\w+\[count\.index\]\.id)',
+            r'\1\n  qemu_agent = true',
+            text)
+        if new != text:
+            text = new
+            notes.append('VMs report their IP via the QEMU guest agent '
+                         '(fixes "couldn\'t retrieve IP address of domain" on bridged/routed networks)')
     return text, notes
 
 
