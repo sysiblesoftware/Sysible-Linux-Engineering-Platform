@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react'
-import { api, setToken, getToken, setRole, isSuperuser, getTheme, applyTheme, apiUrl } from './api.js'
+import { api, setToken, setRole, isSuperuser, getTheme, applyTheme, apiUrl } from './api.js'
 import { Field, useErr } from './ui.jsx'
 import Logo from './Logo.jsx'
 import Organizations from './views/Organizations.jsx'
@@ -78,11 +78,18 @@ export default function App() {
     const onLogout = () => setAuthed(false)
     window.addEventListener('slep-logout', onLogout)
     ;(async () => {
+      // Are we already signed in? Probe /me UNCONDITIONALLY — this must run even
+      // with no local token, so a gateway-asserted SSO identity (SLOP front door,
+      // no SLEP bearer) signs us in. A stored bearer token, if any, is attached by
+      // api(). On success we're in; a 401 just falls through to setup/login.
+      try {
+        const me = await api('me')
+        setUsername(me.username); setRole(me.role); setRoleName(me.role); setAuthed(true); setReady(true); return
+      } catch { /* not signed in yet — decide between first-run setup and login */ }
       try {
         const h = await fetch(apiUrl('/api/health')).then((r) => r.json())
-        if (h.admins === 0) { setNeedSetup(true); setReady(true); return }
-      } catch { setReady(true); return }
-      if (getToken()) { try { const me = await api('me'); setUsername(me.username); setRole(me.role); setRoleName(me.role); setAuthed(true) } catch { /* stale token */ } }
+        if (h.admins === 0) setNeedSetup(true)
+      } catch { /* ignore — fall through to the login screen */ }
       setReady(true)
     })()
     return () => window.removeEventListener('slep-logout', onLogout)
