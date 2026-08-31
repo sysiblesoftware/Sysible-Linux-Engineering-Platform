@@ -1717,13 +1717,13 @@ def _dispatch_pipeline(project, steps, actor, stop_on_failure=True):
                 RUNNERS[kind](rid)        # blocking — runs to completion
             r = db.get_run(rid)
             if stop_on_failure and (not r or r.get("status") != "success"):
-                for rid2, _ in prepared[i + 1:]:
+                for rid2, _, _ in prepared[i + 1:]:
                     db.set_run_status(rid2, "canceled", finished=int(time.time()))
                 break
 
     db.log_audit("pipeline_launched", actor, f"{len(prepared)} steps on {project['name']}")
     threading.Thread(target=worker, daemon=True).start()
-    return [rid for rid, _ in prepared], group_id
+    return [rid for rid, _, _ in prepared], group_id
 
 
 def _run_inventory_step(run_id: int, project) -> int | None:
