@@ -256,6 +256,53 @@ def exchange_credentials_for_key(controller_url: str, username: str, password: s
 
 
 @_accepts_cert
+def exchange_sso_for_key(controller_url: str, sso_user: str, sso_role: str):
+    """SSO variant of exchange_credentials_for_key: when SLEP runs behind the SLOP
+    gateway the operator is already signed in there, so there is NO separate
+    Controller password to collect. Relay the gateway-asserted identity
+    (X-Sysible-User / X-Sysible-Role) and prove we're a trusted sibling with the
+    shared secret (X-Sysible-Auth); the Controller returns its API key without a
+    password. Requires a superuser identity. Raises ControllerImportError otherwise
+    (e.g. the target Controller isn't part of this SLOP / doesn't share the secret),
+    so the caller can fall back to explicit credentials."""
+    _sso = os.environ.get("SYSIBLE_SSO_SHARED_SECRET", "").strip()
+    if not _sso:
+        raise ControllerImportError("SSO connect needs the SLOP gateway (SYSIBLE_SSO_SHARED_SECRET is unset).")
+    if not sso_user:
+        raise ControllerImportError("No SLOP identity on this session — sign in through the SLOP gateway.")
+    base = _normalize_base(controller_url)
+    url = base + "/auth/api-key"
+    headers = {"X-Sysible-Auth": _sso, "X-Sysible-User": sso_user, "X-Sysible-Role": sso_role or ""}
+    # The model requires username/password fields; send them empty — the Controller
+    # authenticates this request by the SSO headers, not the (nonexistent) password.
+    payload = {"username": sso_user, "password": ""}
+    try:
+        _guard_url(url)
+        resp = requests.post(url, json=payload, headers=headers, verify=_verify(), timeout=20)
+    except requests.exceptions.RequestException as e:
+        raise ControllerImportError(f"Could not reach the Controller at {url}: {e}")
+    if resp.status_code == 404:
+        raise ControllerImportError(
+            "This Controller doesn't support SSO connect (update it), or connect with its backend API key.")
+    if resp.status_code in (401, 403, 429):
+        detail = "The Controller rejected the SLOP SSO identity."
+        try:
+            detail = resp.json().get("detail") or detail
+        except ValueError:
+            pass
+        raise ControllerImportError(detail)
+    if resp.status_code != 200:
+        raise ControllerImportError(f"The Controller returned HTTP {resp.status_code}.")
+    try:
+        key = resp.json().get("api_key")
+    except ValueError:
+        raise ControllerImportError("The Controller's response was not JSON.")
+    if not key:
+        raise ControllerImportError("The Controller did not return an API key.")
+    return key
+
+
+@_accepts_cert
 def get_controller_key(controller_url: str, api_key: str) -> str:
     """Fetch a Controller's standing SSH public key (GET /remote/controller-key).
     Baked into a new VM's cloud-init so the Controller can SSH in after boot."""

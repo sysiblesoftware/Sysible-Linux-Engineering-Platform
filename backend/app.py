@@ -1490,7 +1490,7 @@ def controllers(request: Request, user: str = Depends(current_user)):
 
 
 @app.post("/controllers")
-def connect_controller(body: dict = Body(...), user: str = Depends(require_superuser)):
+def connect_controller(request: Request, body: dict = Body(...), user: str = Depends(require_superuser)):
     """Connect to a Sysible Controller and save it. Two ways to authenticate:
 
       * username + password — a Controller *superuser* signs in with the same
@@ -1526,7 +1526,24 @@ def connect_controller(body: dict = Body(...), user: str = Depends(require_super
             cert_pem = controller_import.fetch_server_cert(url)   # pin once, then retry
             return run(cert_pem)
 
-    # Username/password path: exchange console creds for the API key first.
+    # SSO path FIRST: if this SLEP session is signed in through the SLOP gateway,
+    # carry that login through — relay the gateway-asserted identity + shared secret
+    # so the Controller issues its key with NO separate password (SSO users have
+    # none). This is what makes "connect" work without re-entering credentials. It
+    # falls back to the explicit username/password path below when this session
+    # isn't SSO, or the target Controller isn't part of this SLOP (doesn't share the
+    # secret), so foreign Controllers still work with real creds.
+    if not key:
+        sso = _gateway_identity(request)
+        if sso:
+            slop_role = (request.headers.get("x-sysible-role") or "").strip()
+            try:
+                key = _tofu(lambda c: controller_import.exchange_sso_for_key(
+                    url, sso["user"], slop_role, cert_pem=c))
+            except controller_import.ControllerImportError:
+                key = ""   # not this SLOP / no SSO support → try entered creds below
+
+    # Username/password path: exchange console creds for the API key.
     if not key and (username or password):
         try:
             key = _tofu(lambda c: controller_import.exchange_credentials_for_key(
