@@ -325,6 +325,15 @@ def _cloudinit(ssh_user: str, keys: list[str], password: str = "", hashed_passwo
         # install + start an SSH server (apt → dnf → yum), cross-distro, best-effort
         "command -v sshd >/dev/null 2>&1 || { command -v apt-get >/dev/null 2>&1 && apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y openssh-server; } || { command -v dnf >/dev/null 2>&1 && dnf install -y openssh-server; } || { command -v yum >/dev/null 2>&1 && yum install -y openssh-server; } || true",
         "systemctl enable --now ssh 2>/dev/null || systemctl enable --now sshd 2>/dev/null || true",
+        # QEMU guest agent (package qemu-guest-agent, binary qemu-ga), cross-distro,
+        # best-effort. With `qemu_agent = true` on the domain, this is what lets the
+        # libvirt provider read the VM's IP address to satisfy wait_for_lease / the
+        # sysible_hosts output on networks where libvirt has NO DHCP lease to read
+        # (a bridged or routed network) — the exact "couldn't retrieve IP address of
+        # domain ... context deadline exceeded" apply failure. On a NAT network the
+        # lease already works, and the agent is harmless there.
+        "command -v qemu-ga >/dev/null 2>&1 || { command -v apt-get >/dev/null 2>&1 && DEBIAN_FRONTEND=noninteractive apt-get install -y qemu-guest-agent; } || { command -v dnf >/dev/null 2>&1 && dnf install -y qemu-guest-agent; } || { command -v yum >/dev/null 2>&1 && yum install -y qemu-guest-agent; } || true",
+        "systemctl enable --now qemu-guest-agent 2>/dev/null || systemctl enable --now qemu-ga 2>/dev/null || true",
         # Map 127.0.1.1 to whatever hostname the VM actually booted with (set per-VM
         # via the cloud-init meta-data local-hostname, e.g. 'sysible') so sudo and
         # name resolution don't warn about an unresolvable host. Uses the runtime
@@ -537,6 +546,11 @@ resource "libvirt_domain" "vm" {{
   memory    = var.memory
   vcpu      = var.vcpu
   cloudinit = libvirt_cloudinit_disk.ci[count.index].id
+  # Also read the guest's IP from the QEMU guest agent (cloud-init installs it), not
+  # only the libvirt DHCP lease. On a bridged/routed network libvirt has no lease to
+  # read, so without this the apply fails with "couldn't retrieve IP address of
+  # domain ... context deadline exceeded"; the provider auto-adds the agent channel.
+  qemu_agent = true
 
   disk {{ volume_id = libvirt_volume.disk[count.index].id }}
   network_interface {{
@@ -654,6 +668,10 @@ def _render_libvirt_groups(spec, keys, groups):
             f'  memory    = {mem}\n'
             f'  vcpu      = {vcpu}\n'
             f'  cloudinit = libvirt_cloudinit_disk.ci_{slug}[count.index].id\n'
+            f'  # Read the IP via the QEMU guest agent (cloud-init installs it) as well as\n'
+            f'  # the DHCP lease, so wait_for_lease still resolves on bridged/routed networks\n'
+            f'  # (no libvirt lease to read) — avoids "couldn\'t retrieve IP address of domain".\n'
+            f'  qemu_agent = true\n'
             f'  disk {{ volume_id = libvirt_volume.disk_{slug}[count.index].id }}\n'
             f'  network_interface {{\n    network_name   = var.network\n    wait_for_lease = true\n  }}\n'
             f'  console {{\n    type        = "pty"\n    target_type = "serial"\n    target_port = "0"\n  }}\n'
