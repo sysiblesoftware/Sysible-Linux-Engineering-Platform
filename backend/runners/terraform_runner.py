@@ -53,6 +53,15 @@ _SCHEMA_MISMATCH = (
     "Failed to query available provider packages",
 )
 
+# A libvirt_domain whose STATE was written with qemu_agent=true (an earlier SLEP
+# release) can't be REFRESHED when the guest agent isn't connected — plan/refresh
+# dies here before it can apply the change that removes qemu_agent. Detected so the
+# apply/destroy can be retried with -refresh=false (see self-heal tier 4).
+_AGENT_REFRESH_ERR = (
+    "Guest agent is not responding",
+    "error retrieving interface addresses",
+)
+
 
 def _orphan_cloudinit_isos(log_path) -> list[str]:
     """Volume names from any 'storage volume '<name>' exists already' errors in the
@@ -406,7 +415,7 @@ def launch(run_id: int) -> None:
         # Secret values must not be echoed into the (viewer-readable) run log.
         redact = [str(v) for v in extra_vars.values() if str(v)]
 
-        def run_action(upgrade: bool) -> int:
+        def run_action(upgrade: bool, refresh: bool = True) -> int:
             init = [tool, "init", "-input=false", "-no-color"]
             if upgrade:
                 init.append("-upgrade")
@@ -414,13 +423,23 @@ def launch(run_id: int) -> None:
             if rc != 0:
                 emit(f"\n== {tool} init failed: exit {rc} ==")
                 return rc
+            # -refresh=false skips reading current state from the hypervisor (used by
+            # the tier-4 self-heal to get past a guest-agent refresh error).
+            ref = [] if refresh else ["-refresh=false"]
             if action == "plan":
-                cmd = [tool, "plan", "-input=false", "-no-color", *var_args]
+                cmd = [tool, "plan", "-input=false", "-no-color", *ref, *var_args]
             elif action == "apply":
-                cmd = [tool, "apply", "-input=false", "-auto-approve", "-no-color", *var_args]
+                cmd = [tool, "apply", "-input=false", "-auto-approve", "-no-color", *ref, *var_args]
             else:  # destroy
-                cmd = [tool, "destroy", "-input=false", "-auto-approve", "-no-color", *var_args]
+                cmd = [tool, "destroy", "-input=false", "-auto-approve", "-no-color", *ref, *var_args]
             return _common.stream(cmd, workdir, env, log, redact=redact, run_id=run_id)
+
+        def _log_has(sigs) -> bool:
+            try:
+                tail = log_path.read_text()[-8000:]
+            except OSError:
+                tail = ""
+            return any(s in tail for s in sigs)
 
         def _mismatch() -> bool:
             try:
@@ -491,6 +510,20 @@ def launch(run_id: int) -> None:
                 rc = run_action(upgrade=False)
                 if rc == 0:
                     break
+
+        # Self-heal tier 4 — a domain whose STATE carries qemu_agent=true (baked in by
+        # an earlier SLEP release that briefly set it) cannot be REFRESHED when the
+        # guest agent isn't connected: plan/refresh dies with "Guest agent is not
+        # responding" before it can even apply the change that removes qemu_agent.
+        # Retry once with -refresh=false so terraform skips the agent query, diffs the
+        # current config (which no longer sets qemu_agent — migrate_libvirt_main_tf
+        # stripped it) against state, and applies the removal. After that, future
+        # refreshes read the VM address from the DHCP lease instead of the agent.
+        if rc != 0 and action in ("apply", "destroy") and _log_has(_AGENT_REFRESH_ERR):
+            emit("\n-- a VM's saved state still expects the QEMU guest agent (left by an")
+            emit("-- earlier release) and the agent isn't connected, so the refresh can't run.")
+            emit(f"-- retrying {action} with -refresh=false to drop that expectation --\n")
+            rc = run_action(upgrade=False, refresh=False)
 
         # After a successful apply of a Create-Infrastructure project, read the new
         # VMs into the project's own inventory automatically — so they're immediately
