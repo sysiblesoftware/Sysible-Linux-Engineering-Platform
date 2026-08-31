@@ -1063,10 +1063,11 @@ export function RunModal({ project, currentFile, onClose, onLaunched, initial })
 // failure by default. Steps run one after another on the server.
 export function PipelineModal({ project, currentFile, initialSteps, initialName, saveId, stopDefault, onClose, onLaunched, onSaved }) {
   const [invs, setInvs] = useState([]); const [creds, setCreds] = useState([])
+  const [controllers, setControllers] = useState([])   // connected Controllers, for the Enroll step picker
   const [stopOnFail, setStopOnFail] = useState(stopDefault !== undefined ? stopDefault : true)
   const [name, setName] = useState(initialName || '')
   const blank = (over) => ({ kind: 'ansible', target: currentFile || 'site.yml', inventory_id: '', credential_id: '', tool: 'terraform',
-    vars: '', becomePw: '', limit: '', startAt: '', saltTest: false, ...over })
+    vars: '', becomePw: '', limit: '', startAt: '', saltTest: false, controller_id: '', ...over })
   const [steps, setSteps] = useState(initialSteps && initialSteps.length ? initialSteps.map((s) => blank(s)) : [blank()])
   const [openSteps, setOpenSteps] = useState(new Set())   // steps whose ⚙ options panel is expanded
   const toggleOpts = (i) => setOpenSteps((s) => { const n = new Set(s); n.has(i) ? n.delete(i) : n.add(i); return n })
@@ -1086,6 +1087,7 @@ export function PipelineModal({ project, currentFile, initialSteps, initialName,
     kind: st.kind, target: st.target,
     inventory_id: (st.kind === 'terraform' || isPseudo(st.kind)) ? null : (st.inventory_id ? Number(st.inventory_id) : null),
     credential_id: isPseudo(st.kind) ? null : (st.credential_id ? Number(st.credential_id) : null),
+    controller_id: st.kind === 'enroll' ? (st.controller_id ? Number(st.controller_id) : null) : null,
     tool: st.kind === 'terraform' ? st.tool : '',
     extra_vars: stepVars(st),
     become_password: st.kind === 'ansible' ? (st.becomePw || '') : '',
@@ -1100,6 +1102,13 @@ export function PipelineModal({ project, currentFile, initialSteps, initialName,
   const loadInvs = () => api('inventories').then((d) => { setInvs(d.inventories)
     setSteps((s) => s.map((st) => ({ ...st, inventory_id: st.inventory_id || (d.inventories[0] ? String(d.inventories[0].id) : '') }))) })
   useEffect(() => { loadInvs() }, [])
+  // Connected Controllers → the Enroll step's Controller picker. Default the first
+  // enroll step to the only/first Controller so a single-Controller setup needs no pick.
+  useEffect(() => { api('controllers').then((d) => {
+    const cs = d.controllers || []; setControllers(cs)
+    if (cs[0]) setSteps((s) => s.map((st) => st.kind === 'enroll'
+      ? { ...st, controller_id: st.controller_id || String(cs[0].id) } : st))
+  }).catch(() => {}) }, [])   // eslint-disable-line
   // Default each Ansible/Salt step's credential to the account this project's VMs
   // were built with (⚙ Access deploy credential, or SLEP's managed key), so the
   // whole cadence authenticates as one account with no per-step re-picking.
@@ -1164,7 +1173,16 @@ export function PipelineModal({ project, currentFile, initialSteps, initialName,
           {st.kind === 'inventory'
             ? <span className="muted" style={{ flex: 1, fontSize: 12.5 }}>Reads the applied VMs into this project’s inventory, then points the Ansible/Salt steps below at it.</span>
             : st.kind === 'enroll'
-            ? <span className="muted" style={{ flex: 1, fontSize: 12.5 }}>Enrolls the applied VMs into this project’s Controller as agents — each VM installs the Controller’s agent and self-enrolls. Place this after Apply; pick the Controller on the Enroll action if none is set.</span>
+            ? (<>
+                <select value={st.controller_id || ''} onChange={(e) => upd(i, { controller_id: e.target.value })}
+                        title="Controller to enroll the applied VMs into" style={{ flex: '1 1 auto', minWidth: 0 }}>
+                  {controllers.length === 0 && <option value="">(no connected Controller — connect one first)</option>}
+                  {controllers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                </select>
+                <span className="muted" style={{ width: 288, fontSize: 11.5 }}>
+                  Installs each applied VM as an agent that self-enrolls into this Controller. Place after Apply.
+                </span>
+              </>)
             : (<>
                 {st.kind === 'terraform'
                   ? <select value={st.target} onChange={(e) => upd(i, { target: e.target.value })} title="Action" style={{ flex: '1 1 auto', minWidth: 0 }}><option>plan</option><option>apply</option><option>destroy</option></select>

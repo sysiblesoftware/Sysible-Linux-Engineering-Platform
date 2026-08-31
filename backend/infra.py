@@ -443,6 +443,16 @@ def _slug(name: str, fallback: str = "g") -> str:
     return s or fallback
 
 
+def _hostslug(name: str, fallback: str = "vm") -> str:
+    """A DNS/hostname-safe label from a group name: lowercase, only [a-z0-9-], no
+    leading/trailing/duplicate hyphens, never empty. Used for the VM's libvirt DOMAIN
+    name and OS hostname — the user-visible name — unlike _slug (underscores, for HCL
+    resource identifiers). Hostnames may not contain underscores, so keep these hyphenated."""
+    s = re.sub(r"[^a-z0-9-]", "-", _one_line(str(name or "")).strip().lower()).strip("-")
+    s = re.sub(r"-+", "-", s)
+    return s or fallback
+
+
 def _render_libvirt(spec, keys):
     # Heterogeneous VM groups (e.g. Ubuntu + Arch in one apply): when `groups` is given,
     # generate a resource set per group. Opt-in — the single-image path below is untouched.
@@ -594,6 +604,10 @@ def _render_libvirt_groups(spec, keys, groups):
         while slug in seen:                        # keep slugs unique even if names clash
             slug += f"_{i + 1}"
         seen.add(slug)
+        # The user-visible VM/host name is the GROUP NAME (hostname-safe), NOT prefixed
+        # with name_prefix — that produced the doubled "prefix-group-N" names. name_prefix
+        # still uniquifies the internal disk/ISO files below.
+        hostslug = _hostslug(g.get("name"), f"vm{i + 1}")
         n = max(1, int(g.get("count", 1) or 1))
         mem = int(g.get("memory", 2048) or 2048)
         vcpu = int(g.get("vcpu", 2) or 2)
@@ -633,10 +647,10 @@ def _render_libvirt_groups(spec, keys, groups):
             f'  user_data = file("${{path.module}}/cloudinit.cfg")\n'
             f'  meta_data = "instance-id: ${{var.name_prefix}}-{slug}-${{count.index + 1}}'
             f'-${{substr(filemd5("${{path.module}}/cloudinit.cfg"), 0, 10)}}\\n'
-            f'local-hostname: ${{var.name_prefix}}-{slug}-${{count.index + 1}}\\n"\n}}\n\n'
+            f'local-hostname: {hostslug}-${{count.index + 1}}\\n"\n}}\n\n'
             f'resource "libvirt_domain" "vm_{slug}" {{\n'
             f'  count     = {n}\n'
-            f'  name      = "${{var.name_prefix}}-{slug}-${{count.index + 1}}"\n'
+            f'  name      = "{hostslug}-${{count.index + 1}}"\n'
             f'  memory    = {mem}\n'
             f'  vcpu      = {vcpu}\n'
             f'  cloudinit = libvirt_cloudinit_disk.ci_{slug}[count.index].id\n'
@@ -646,7 +660,7 @@ def _render_libvirt_groups(spec, keys, groups):
             f'  lifecycle {{\n    replace_triggered_by = [libvirt_cloudinit_disk.ci_{slug}[count.index].id]\n  }}\n}}')
         host_lists.append(
             f'[ for i, d in libvirt_domain.vm_{slug} : {{\n'
-            f'    name = "${{var.name_prefix}}-{slug}-${{i + 1}}"\n'
+            f'    name = "{hostslug}-${{i + 1}}"\n'
             f'    ip   = try(d.network_interface[0].addresses[0], "")\n'
             f'    user = {_hcl(ssh_user)}\n  }} ]')
 
