@@ -476,6 +476,25 @@ def _hostslug(name: str, fallback: str = "vm") -> str:
     return s or fallback
 
 
+# NoCloud network-config: force DHCP on the VM's primary NIC for EVERY image. Debian/
+# Ubuntu cloud images bring the NIC up via cloud-init's IMPLICIT fallback, but RHEL-
+# family images (Rocky / Alma / CentOS Stream GenericCloud) often DON'T — so their NIC
+# stays down, no DHCP request goes out, the provider never sees a lease, and the apply
+# fails with "couldn't retrieve IP address of domain" while Ubuntu/Debian on the SAME
+# network + cloud-init succeed. Supplying an explicit network-config removes the
+# guesswork. Version-2 with a glob match covers any ethernet name (eth0 / ens3 /
+# enp1s0 …), so it's image- and naming-independent; modern cloud-init (Rocky/Alma 9,
+# Debian 12, Ubuntu 22.04+) renders it to the distro's own network stack.
+_NETWORK_CONFIG = (
+    "version: 2\n"
+    "ethernets:\n"
+    "  sysible0:\n"
+    "    match:\n"
+    '      name: "e*"\n'
+    "    dhcp4: true\n"
+)
+
+
 def _libvirt_agent_block(spec) -> str:
     """The domain's qemu_agent line — ONLY when the operator chose a bridged network.
 
@@ -560,6 +579,10 @@ resource "libvirt_cloudinit_disk" "ci" {{
   name      = "${{var.name_prefix}}-${{count.index + 1}}-ci.iso"
   pool      = var.pool
   user_data = file("${{path.module}}/cloudinit.cfg")
+  # Explicit DHCP network-config so RHEL-family images (Rocky/Alma) bring the NIC
+  # up — Debian/Ubuntu do it implicitly, RHEL-family often don't (no lease -> apply
+  # fails with "couldn't retrieve IP address of domain").
+  network_config = file("${{path.module}}/network-config.cfg")
   # Per-VM hostname via NoCloud meta-data (the shared user_data can't differ per
   # VM). One VM gets the bare base name; several get it suffixed so they stay
   # unique. The instance-id is per-VM AND carries a hash of the cloud-init: cloud-init
@@ -625,6 +648,7 @@ resource "libvirt_domain" "vm" {{
 }}
 '''
     return {"main.tf": main, "variables.tf": variables, "outputs.tf": outputs,
+            "network-config.cfg": _NETWORK_CONFIG,
             "cloudinit.cfg": _cloudinit(ssh_user, keys, _opt(spec, "ssh_password", ""))}
 
 
@@ -686,6 +710,7 @@ def _render_libvirt_groups(spec, keys, groups):
             f'  name      = "{hostslug}-${{count.index + 1}}-ci.iso"\n'
             f'  pool      = var.pool\n'
             f'  user_data = file("${{path.module}}/cloudinit.cfg")\n'
+            f'  network_config = file("${{path.module}}/network-config.cfg")\n'
             f'  meta_data = "instance-id: {hostslug}-${{count.index + 1}}'
             f'-${{substr(filemd5("${{path.module}}/cloudinit.cfg"), 0, 10)}}\\n'
             f'local-hostname: {hostslug}-${{count.index + 1}}\\n"\n}}\n\n'
@@ -719,6 +744,7 @@ def _render_libvirt_groups(spec, keys, groups):
     outputs = ('output "sysible_hosts" {\n  value = concat(\n    '
                + ",\n    ".join(host_lists) + "\n  )\n}\n")
     return {"main.tf": main, "variables.tf": variables, "outputs.tf": outputs,
+            "network-config.cfg": _NETWORK_CONFIG,
             "cloudinit.cfg": _cloudinit(ssh_user, keys, _opt(spec, "ssh_password", ""))}
 
 
@@ -783,6 +809,22 @@ def migrate_libvirt_main_tf(text: str) -> tuple[str, list[str]]:
             notes.append('removed a leftover qemu_agent from the VM(s) — it forced address '
                          'detection through the guest agent and timed out at first boot; back to '
                          'the DHCP lease (bridge-mode projects keep their agent)')
+    # 5) Add an explicit DHCP network-config to the cloud-init ISO(s). RHEL-family
+    #    images (Rocky/Alma/CentOS GenericCloud) don't bring the NIC up from cloud-
+    #    init's IMPLICIT fallback the way Debian/Ubuntu do, so they never DHCP and the
+    #    apply fails with "couldn't retrieve IP address of domain" while the Debian-
+    #    family VMs on the same network succeed. Point every libvirt_cloudinit_disk at
+    #    a network-config.cfg (the runner writes the file alongside main.tf). Anchor on
+    #    each `user_data = file(.../cloudinit.cfg)` line; idempotent.
+    if 'network_config' not in text and 'cloudinit.cfg")' in text:
+        new = re.sub(
+            r'(user_data = file\("\$\{path\.module\}/cloudinit\.cfg"\))',
+            r'\1\n  network_config = file("${path.module}/network-config.cfg")',
+            text)
+        if new != text:
+            text = new
+            notes.append('added an explicit DHCP network-config so RHEL-family VMs '
+                         '(Rocky/Alma) bring their NIC up and get a lease')
     return text, notes
 
 

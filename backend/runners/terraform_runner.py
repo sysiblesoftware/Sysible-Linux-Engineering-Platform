@@ -391,6 +391,15 @@ def launch(run_id: int) -> None:
                             vars_tf.write_text(new_vars)
                             emit("-- updated infrastructure: added disk_size variable "
                                  "(default 20GB — edit variables.tf for any size)")
+                    # If main.tf references the explicit DHCP network-config (added by
+                    # patch #5 above, or by a fresh render), the file must exist or
+                    # terraform errors on the missing file. Write it for older projects.
+                    if 'network-config.cfg' in patched:
+                        ncfg = db.project_dir(run["project_id"]) / "network-config.cfg"
+                        if not ncfg.exists():
+                            ncfg.write_text(_infra._NETWORK_CONFIG)
+                            emit("-- updated infrastructure: wrote network-config.cfg "
+                                 "(explicit DHCP so RHEL-family VMs get a lease)")
             except Exception:  # noqa: BLE001 — never block the apply over this
                 pass
 
