@@ -600,6 +600,14 @@ resource "libvirt_domain" "vm" {{
   name      = "${{var.name_prefix}}-${{count.index + 1}}"
   memory    = var.memory
   vcpu      = var.vcpu
+  # Pass the host CPU through. RHEL-family guests (Rocky/Alma 9+) REQUIRE an
+  # x86-64-v2 CPU — on the default emulated QEMU CPU (x86-64-v1) their glibc aborts
+  # ("Fatal glibc error: CPU does not support x86-64-v2") and init panics instantly,
+  # while Debian/Ubuntu still run on v1. host-passthrough exposes the host's real
+  # CPU (v2+), so every distro boots; it also gives near-native performance.
+  cpu {{
+    mode = "host-passthrough"
+  }}
   cloudinit = libvirt_cloudinit_disk.ci[count.index].id
 {agent_block}  disk {{ volume_id = libvirt_volume.disk[count.index].id }}
   network_interface {{
@@ -719,6 +727,7 @@ def _render_libvirt_groups(spec, keys, groups):
             f'  name      = "{hostslug}-${{count.index + 1}}"\n'
             f'  memory    = {mem}\n'
             f'  vcpu      = {vcpu}\n'
+            f'  cpu {{ mode = "host-passthrough" }}  # RHEL-family (Rocky/Alma 9+) need x86-64-v2; the default emulated CPU is v1 and panics their glibc\n'
             f'  cloudinit = libvirt_cloudinit_disk.ci_{slug}[count.index].id\n'
             f'{agent_block}'
             f'  disk {{ volume_id = libvirt_volume.disk_{slug}[count.index].id }}\n'
@@ -825,6 +834,22 @@ def migrate_libvirt_main_tf(text: str) -> tuple[str, list[str]]:
             text = new
             notes.append('added an explicit DHCP network-config so RHEL-family VMs '
                          '(Rocky/Alma) bring their NIC up and get a lease')
+    # 6) Pass the host CPU through to the domain. RHEL-family guests (Rocky/Alma 9+)
+    #    REQUIRE an x86-64-v2 CPU; on the default emulated QEMU CPU (v1) their glibc
+    #    aborts ("CPU does not support x86-64-v2") and init panics at boot — the exact
+    #    "stuck, no lease, no console" symptom — while Debian/Ubuntu still boot on v1.
+    #    Add `cpu { mode = "host-passthrough" }` to every libvirt_domain that lacks a
+    #    cpu mode. Anchor on each domain's cloudinit line; idempotent.
+    if 'host-passthrough' not in text and 'cloudinit = libvirt_cloudinit_disk.' in text:
+        new = re.sub(
+            r'(cloudinit = libvirt_cloudinit_disk\.\w+\[count\.index\]\.id)',
+            r'cpu { mode = "host-passthrough" }\n  \1',
+            text)
+        if new != text:
+            text = new
+            notes.append('set the VM CPU to host-passthrough so RHEL-family guests '
+                         '(Rocky/Alma 9+) get the x86-64-v2 CPU they require and stop '
+                         'panicking at boot')
     return text, notes
 
 
