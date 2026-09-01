@@ -22,9 +22,10 @@ class _Resp:
 def test_fetch_agent_bundle_ok(monkeypatch):
     calls = {}
 
-    def fake_get(url, headers=None, verify=None, timeout=None):
+    def fake_get(url, headers=None, params=None, verify=None, timeout=None):
         calls["url"] = url
         calls["key"] = (headers or {}).get("X-API-Key")
+        calls["params"] = params
         return _Resp(200, content=b"PK\x03\x04zipbytes")
 
     monkeypatch.setattr(ci.requests, "get", fake_get)
@@ -32,6 +33,11 @@ def test_fetch_agent_bundle_ok(monkeypatch):
     assert out == b"PK\x03\x04zipbytes"
     assert calls["url"].endswith("/remote/agent-bundle")
     assert calls["key"] == "SECRET-KEY"          # authenticates with the machine API key
+    assert calls["params"] is None               # no environment → no ?environment= param
+
+    # With an environment, it's passed through as a query param for the bundle to stamp.
+    ci.fetch_agent_bundle("https://ctrl.example:9000", "SECRET-KEY", environment="Web-Test")
+    assert calls["params"] == {"environment": "Web-Test"}
 
 
 def test_fetch_agent_bundle_error_raises(monkeypatch):
@@ -83,7 +89,7 @@ def test_bundle_fetch_tofu_pins_and_persists(monkeypatch):
     import backend.db as db
     seen = {"persist": None, "certs": []}
 
-    def fake_bundle(base, key, cert_pem=""):
+    def fake_bundle(base, key, environment="", cert_pem=""):
         seen["certs"].append(cert_pem)
         if not cert_pem:
             raise ci.ControllerImportError(_SSL_ERR)

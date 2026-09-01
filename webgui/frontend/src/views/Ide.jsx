@@ -1064,10 +1064,18 @@ export function RunModal({ project, currentFile, onClose, onLaunched, initial })
 export function PipelineModal({ project, currentFile, initialSteps, initialName, saveId, stopDefault, onClose, onLaunched, onSaved }) {
   const [invs, setInvs] = useState([]); const [creds, setCreds] = useState([])
   const [controllers, setControllers] = useState([])   // connected Controllers, for the Enroll step picker
+  const [envsByCtrl, setEnvsByCtrl] = useState({})     // controller_id -> [environment names], for the Enroll step
   const [stopOnFail, setStopOnFail] = useState(stopDefault !== undefined ? stopDefault : true)
   const [name, setName] = useState(initialName || '')
   const blank = (over) => ({ kind: 'ansible', target: currentFile || 'site.yml', inventory_id: '', credential_id: '', tool: 'terraform',
-    vars: '', becomePw: '', limit: '', startAt: '', saltTest: false, controller_id: '', ...over })
+    vars: '', becomePw: '', limit: '', startAt: '', saltTest: false, controller_id: '', environment: '', ...over })
+  // Load a Controller's environments (for the Enroll step's Environment picker), cached
+  // per controller so switching back doesn't refetch. Empty list on an older Controller.
+  const loadEnvs = (cid) => {
+    if (!cid || envsByCtrl[cid] !== undefined) return
+    api(`controllers/${cid}/environments`).then((d) => setEnvsByCtrl((m) => ({ ...m, [cid]: d.environments || [] })))
+      .catch(() => setEnvsByCtrl((m) => ({ ...m, [cid]: [] })))
+  }
   const [steps, setSteps] = useState(initialSteps && initialSteps.length ? initialSteps.map((s) => blank(s)) : [blank()])
   const [openSteps, setOpenSteps] = useState(new Set())   // steps whose ⚙ options panel is expanded
   const toggleOpts = (i) => setOpenSteps((s) => { const n = new Set(s); n.has(i) ? n.delete(i) : n.add(i); return n })
@@ -1088,6 +1096,7 @@ export function PipelineModal({ project, currentFile, initialSteps, initialName,
     inventory_id: (st.kind === 'terraform' || isPseudo(st.kind)) ? null : (st.inventory_id ? Number(st.inventory_id) : null),
     credential_id: isPseudo(st.kind) ? null : (st.credential_id ? Number(st.credential_id) : null),
     controller_id: st.kind === 'enroll' ? (st.controller_id ? Number(st.controller_id) : null) : null,
+    environment: st.kind === 'enroll' ? (st.environment || '') : '',
     tool: st.kind === 'terraform' ? st.tool : '',
     extra_vars: stepVars(st),
     become_password: st.kind === 'ansible' ? (st.becomePw || '') : '',
@@ -1108,6 +1117,8 @@ export function PipelineModal({ project, currentFile, initialSteps, initialName,
     const cs = d.controllers || []; setControllers(cs)
     if (cs[0]) setSteps((s) => s.map((st) => st.kind === 'enroll'
       ? { ...st, controller_id: st.controller_id || String(cs[0].id) } : st))
+    // Prefetch environments for any enroll step's controller so its picker is ready.
+    for (const st of steps) if (st.kind === 'enroll') loadEnvs(st.controller_id || (cs[0] && String(cs[0].id)))
   }).catch(() => {}) }, [])   // eslint-disable-line
   // Default each Ansible/Salt step's credential to the account this project's VMs
   // were built with (⚙ Access deploy credential, or SLEP's managed key), so the
@@ -1174,13 +1185,22 @@ export function PipelineModal({ project, currentFile, initialSteps, initialName,
             ? <span className="muted" style={{ flex: 1, fontSize: 12.5 }}>Reads the applied VMs into this project’s inventory, then points the Ansible/Salt steps below at it.</span>
             : st.kind === 'enroll'
             ? (<>
-                <select value={st.controller_id || ''} onChange={(e) => upd(i, { controller_id: e.target.value })}
+                <select value={st.controller_id || ''}
+                        onChange={(e) => { upd(i, { controller_id: e.target.value, environment: '' }); loadEnvs(e.target.value) }}
+                        onFocus={() => loadEnvs(st.controller_id)}
                         title="Controller to enroll the applied VMs into" style={{ flex: '1 1 auto', minWidth: 0 }}>
                   {controllers.length === 0 && <option value="">(no connected Controller — connect one first)</option>}
                   {controllers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
                 </select>
-                <span className="muted" style={{ width: 288, fontSize: 11.5 }}>
-                  Installs each applied VM as an agent that self-enrolls into this Controller. Place after Apply.
+                <select value={st.environment || ''} onChange={(e) => upd(i, { environment: e.target.value })}
+                        onFocus={() => loadEnvs(st.controller_id)}
+                        title="Controller environment the VMs enroll into" style={{ width: 150 }}>
+                  <option value="">(unassigned)</option>
+                  {(envsByCtrl[st.controller_id] || []).map((n) => <option key={n} value={n}>{n}</option>)}
+                  {st.environment && !(envsByCtrl[st.controller_id] || []).includes(st.environment) && <option value={st.environment}>{st.environment}</option>}
+                </select>
+                <span className="muted" style={{ width: 130, fontSize: 11 }}>
+                  Self-enrolls each VM into this Controller environment. Place after Apply.
                 </span>
               </>)
             : (<>

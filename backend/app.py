@@ -1712,35 +1712,36 @@ def _dispatch_pipeline(project, steps, actor, stop_on_failure=True):
                                                 "start_at_task": str(s.get("start_at_task") or "").strip()})
         if kind == "terraform" and s.get("tool"):
             terraform_runner.stash_tool(rid, str(s["tool"]))
-        # Carry the enroll step's chosen Controller (if any) through to the worker.
+        # Carry the enroll step's chosen Controller + environment (if any) to the worker.
         _cid = s.get("controller_id") if kind == "enroll" else None
-        prepared.append((rid, kind, _cid))
+        _env = s.get("environment") if kind == "enroll" else None
+        prepared.append((rid, kind, _cid, _env))
 
     def worker():
-        for i, (rid, kind, cid) in enumerate(prepared):
+        for i, (rid, kind, cid, env) in enumerate(prepared):
             if kind == "inventory":
                 iid = _run_inventory_step(rid, project)
                 # Back-fill the inventory just built from the applied VMs into the
                 # following Ansible/Salt steps that don't already name one, so the
                 # sequence can configure/maintain the machines it just created.
                 if iid:
-                    for rid2, kind2, _cid2 in prepared[i + 1:]:
+                    for rid2, kind2, _cid2, _env2 in prepared[i + 1:]:
                         r2 = db.get_run(rid2)
                         if kind2 in ("ansible", "salt") and r2 and not r2.get("inventory_id"):
                             db.set_run_inventory(rid2, iid)
             elif kind == "enroll":
-                _run_enroll_step(rid, project, actor, controller_id=cid)
+                _run_enroll_step(rid, project, actor, controller_id=cid, environment=env)
             else:
                 RUNNERS[kind](rid)        # blocking — runs to completion
             r = db.get_run(rid)
             if stop_on_failure and (not r or r.get("status") != "success"):
-                for rid2, _, _ in prepared[i + 1:]:
+                for rid2, _, _, _ in prepared[i + 1:]:
                     db.set_run_status(rid2, "canceled", finished=int(time.time()))
                 break
 
     db.log_audit("pipeline_launched", actor, f"{len(prepared)} steps on {project['name']}")
     threading.Thread(target=worker, daemon=True).start()
-    return [rid for rid, _, _ in prepared], group_id
+    return [rid for rid, _, _, _ in prepared], group_id
 
 
 def _run_inventory_step(run_id: int, project) -> int | None:
@@ -1773,12 +1774,13 @@ def _run_inventory_step(run_id: int, project) -> int | None:
         return iid
 
 
-def _run_enroll_step(run_id: int, project, actor: str, controller_id=None) -> bool:
+def _run_enroll_step(run_id: int, project, actor: str, controller_id=None, environment=None) -> bool:
     """The 'enroll' pseudo-step: register the project's applied VMs into a
     Controller, writing a normal run log + status so it shows in the sequence
     visualizer. Uses the Controller picked on the step (controller_id); when none
-    is set it falls back to the project's stored/only Controller. Returns True on
-    success."""
+    is set it falls back to the project's stored/only Controller. `environment`
+    (optional) is the Controller environment picked on the step, so the VMs enroll
+    straight into it. Returns True on success."""
     log_path = db.run_log_path(run_id)
     db.set_run_status(run_id, "running", started=int(time.time()))
     with log_path.open("w", buffering=1) as log:
@@ -1787,7 +1789,7 @@ def _run_enroll_step(run_id: int, project, actor: str, controller_id=None) -> bo
 
         emit(f"== SLEP run #{run_id} · project '{project['name']}' · enroll VMs into Controller ==")
         try:
-            out = _enroll_infra_agents(project["id"], controller_id)
+            out = _enroll_infra_agents(project["id"], controller_id, environment=environment)
         except HTTPException as e:
             emit(f"!! {e.detail}")
             if "No Controller" in str(e.detail):
@@ -3987,21 +3989,30 @@ def _fetch_agent_bundle_tofu(ctrl: dict, environment: str = "") -> bytes:
                                                     environment=environment, cert_pem=fresh)
 
 
-def _enroll_infra_agents(project_id: int, controller_id=None):
+def _enroll_infra_agents(project_id: int, controller_id=None, environment=None):
     """Enroll a project's applied VMs as AGENTS (the pull model): for each VM, download a
     fresh one-time bundle from the project's Controller with the machine API key, then
     install it over SSH (SLEP's managed key, through the jump host). The agent then
     self-enrolls OUTBOUND — no inbound SSH-as-root and no human superuser token, which is
     why plain SSH-host registration (POST /remote/hosts) failed. Returns the same shape
-    as _enroll_infra_hosts: {results, enrolled, total, controller}."""
+    as _enroll_infra_hosts: {results, enrolled, total, controller}.
+
+    `environment` (optional) overrides the infra project's stored environment for this
+    enroll — used by the pipeline Enroll step's Environment picker. When given it's also
+    persisted so it sticks; None keeps the project's stored environment."""
     import base64
     import subprocess
     meta, ctrl = _resolve_enroll_controller(project_id, controller_id)
     bastion = meta.get("bastion") or ""
-    # The environment chosen for this infra (build wizard / enroll picker): the bundle
-    # is stamped with it so each VM self-enrolls straight into that Controller
-    # environment instead of "Unassigned". Empty → unassigned, as before.
-    environment = str(meta.get("environment") or "").strip()
+    # The Controller environment the bundle is stamped with, so each VM self-enrolls
+    # straight into it instead of "Unassigned". A per-call override (pipeline step) wins
+    # and is persisted; otherwise use the infra project's stored environment. Empty →
+    # unassigned, as before.
+    if environment is not None:
+        environment = str(environment or "").strip()
+        db.set_infra_environment(project_id, environment)
+    else:
+        environment = str(meta.get("environment") or "").strip()
     mk = keydist.managed_key_path()
     if not mk:
         raise HTTPException(status_code=400,
