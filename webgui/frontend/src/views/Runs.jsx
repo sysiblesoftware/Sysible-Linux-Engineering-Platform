@@ -274,7 +274,13 @@ export function RunLog({ runId, onBack, onOpenRun }) {
   return (
     <>
       <div className="row" style={{ marginBottom: 10 }}>
-        <button className="ghost sm" onClick={onBack}>← Runs</button>
+        {/* Inside a maximized pipeline stage, back returns to the side-by-side pipeline
+            overview (not out to the runs list) — so "click into a stage → back" lands on
+            the whole run, matching the maximize/restore the ⤡ glyph also does. */}
+        {maxed && seq.length > 1
+          ? <button className="ghost sm" title="Back to the whole pipeline run"
+              onClick={() => setMaxed(false)}>← Pipeline</button>
+          : <button className="ghost sm" onClick={onBack}>← Runs</button>}
         <h2 style={{ margin: 0 }}>Run #{runId}</h2>
         <span className="muted">{engine}</span>
         {(() => {
