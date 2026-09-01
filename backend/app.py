@@ -1458,6 +1458,23 @@ def controller_hosts(cid: int, request: Request, user: str = Depends(current_use
         raise HTTPException(status_code=400, detail=str(e))
 
 
+@app.get("/controllers/{cid}/environments")
+def controller_environments(cid: int, request: Request, user: str = Depends(current_user)):
+    """A connected Controller's defined environments, so the infra build/enroll UI can
+    offer "drop the new VMs into this environment". Returns {environments:[names]} — an
+    empty list for an older Controller without the route (the picker then just offers
+    "unassigned")."""
+    ctrl = db.get_controller(cid, include_key=True)
+    if not ctrl:
+        raise HTTPException(status_code=404, detail="Controller connection not found.")
+    _guard_object_org(request, ctrl.get("org_id"), "operator")
+    try:
+        return {"environments": controller_import.list_environments(
+            ctrl["base_url"], ctrl["api_key"], cert_pem=ctrl.get("tls_cert", ""))}
+    except controller_import.ControllerImportError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @app.post("/inventories/{iid}/import-controller")
 def import_controller(iid: int, request: Request, body: dict = Body(...), user: str = Depends(current_user)):
     _guard_inventory(request, iid, "operator")
@@ -3946,7 +3963,7 @@ def _resolve_enroll_controller(project_id, controller_id=None):
     return meta, ctrl
 
 
-def _fetch_agent_bundle_tofu(ctrl: dict) -> bytes:
+def _fetch_agent_bundle_tofu(ctrl: dict, environment: str = "") -> bytes:
     """Download an agent bundle, trusting the Controller's self-signed cert on first use.
     Enroll runs long after connect, and a standalone Controller's self-signed cert changes
     when it's rebuilt or moved (e.g. container → standalone app) — leaving the pinned cert
@@ -3956,7 +3973,8 @@ def _fetch_agent_bundle_tofu(ctrl: dict) -> bytes:
     only re-pins once. Any non-cert error propagates unchanged."""
     cert = ctrl.get("tls_cert", "") or ""
     try:
-        return controller_import.fetch_agent_bundle(ctrl["base_url"], ctrl["api_key"], cert_pem=cert)
+        return controller_import.fetch_agent_bundle(ctrl["base_url"], ctrl["api_key"],
+                                                    environment=environment, cert_pem=cert)
     except controller_import.ControllerImportError as e:
         if not controller_import._is_cert_error(e):
             raise
@@ -3965,7 +3983,8 @@ def _fetch_agent_bundle_tofu(ctrl: dict) -> bytes:
             raise    # couldn't fetch a cert, or the pinned one already matches — real failure
         db.set_controller_tls_cert(ctrl["id"], fresh)
         ctrl["tls_cert"] = fresh
-        return controller_import.fetch_agent_bundle(ctrl["base_url"], ctrl["api_key"], cert_pem=fresh)
+        return controller_import.fetch_agent_bundle(ctrl["base_url"], ctrl["api_key"],
+                                                    environment=environment, cert_pem=fresh)
 
 
 def _enroll_infra_agents(project_id: int, controller_id=None):
@@ -3979,6 +3998,10 @@ def _enroll_infra_agents(project_id: int, controller_id=None):
     import subprocess
     meta, ctrl = _resolve_enroll_controller(project_id, controller_id)
     bastion = meta.get("bastion") or ""
+    # The environment chosen for this infra (build wizard / enroll picker): the bundle
+    # is stamped with it so each VM self-enrolls straight into that Controller
+    # environment instead of "Unassigned". Empty → unassigned, as before.
+    environment = str(meta.get("environment") or "").strip()
     mk = keydist.managed_key_path()
     if not mk:
         raise HTTPException(status_code=400,
@@ -3992,7 +4015,7 @@ def _enroll_infra_agents(project_id: int, controller_id=None):
             results.append({"name": nm, "ip": "", "ok": False, "detail": "no IP yet"})
             continue
         try:
-            zip_bytes = _fetch_agent_bundle_tofu(ctrl)
+            zip_bytes = _fetch_agent_bundle_tofu(ctrl, environment=environment)
         except controller_import.ControllerImportError as e:
             results.append({"name": nm, "ip": ip, "ok": False, "detail": str(e)})
             continue
@@ -4023,6 +4046,12 @@ def infra_enroll(project_id: int, request: Request, body: dict = Body(default=No
     b = body or {}
     cid = b.get("controller_id")
     cid = int(cid) if cid else None
+    # Let the operator set/override the target Controller environment at enroll time
+    # (the build wizard also stores it up front). Persisted so it drives the bundle's
+    # environment stamp and any later enroll. Only touched when the key is present, so
+    # a plain enroll never clears a previously-chosen environment.
+    if "environment" in b:
+        db.set_infra_environment(project_id, str(b.get("environment") or "").strip())
     if str(b.get("method") or "agent").lower() == "ssh":
         out = _enroll_infra_hosts(project_id, controller_id=cid)
     else:

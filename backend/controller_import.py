@@ -314,16 +314,20 @@ def get_controller_key(controller_url: str, api_key: str) -> str:
 
 
 @_accepts_cert
-def fetch_agent_bundle(controller_url: str, api_key: str) -> bytes:
+def fetch_agent_bundle(controller_url: str, api_key: str, environment: str = "") -> bytes:
     """Download a fresh one-time AGENT enrollment bundle (zip) from a Controller with the
     machine API key (GET /remote/agent-bundle). Each call mints a new single-use token,
     so fetch ONE bundle per host. This is the agent (pull) enrollment path — the target
     runs the bundle and self-enrolls outbound, so there's no inbound SSH-as-root and no
-    human superuser token. Raises ControllerImportError on any failure."""
+    human superuser token. `environment` (optional) asks the Controller to drop the host
+    straight into that environment on enroll (it's ignored server-side unless it names a
+    real environment). Raises ControllerImportError on any failure."""
     base = _normalize_base(controller_url)
     url = base + "/remote/agent-bundle"
+    params = {"environment": environment} if (environment or "").strip() else None
     try:
-        resp = requests.get(url, headers={"X-API-Key": api_key}, verify=_verify(), timeout=30)
+        resp = requests.get(url, headers={"X-API-Key": api_key}, params=params,
+                            verify=_verify(), timeout=30)
     except requests.exceptions.RequestException as e:
         raise ControllerImportError(f"could not reach the Controller at {url}: {e}")
     if resp.status_code == 200:
@@ -359,6 +363,23 @@ def fetch_agent_bundle(controller_url: str, api_key: str) -> bytes:
         # bundle_addresses() came back empty — the Controller has no configured address.
         raise ControllerImportError(f"the Controller can't build a bundle yet: {detail}")
     raise ControllerImportError(f"agent bundle download failed ({url}): {detail}")
+
+
+@_accepts_cert
+def list_environments(controller_url: str, api_key: str) -> list:
+    """The Controller's defined environments (GET /environments), as a list of names.
+    Used to populate SLEP's "enroll into environment" picker so an operator building
+    VMs can drop them straight into an existing Controller environment. Returns [] on
+    an older Controller without the route. Raises ControllerImportError on auth/network
+    failure."""
+    base = _normalize_base(controller_url)
+    data = _get(base, "/environments", api_key, allow_404=True) or {}
+    out = []
+    for e in (data.get("environments") or []):
+        name = e.get("name") if isinstance(e, dict) else e
+        if name:
+            out.append(str(name))
+    return out
 
 
 @_accepts_cert

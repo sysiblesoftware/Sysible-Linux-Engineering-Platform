@@ -179,6 +179,17 @@ export function JumpHostEditor({ r, onClose, onSaved }) {
 export function EnrollPicker({ r, controllers, onClose, onPick }) {
   const [cid, setCid] = useState(controllers[0] ? String(controllers[0].id) : '')
   const [busy, setBusy] = useState(false)
+  const [env, setEnv] = useState(r.environment || '')
+  const [envs, setEnvs] = useState([])
+  // Load the chosen Controller's environments so the VMs can be dropped straight into
+  // one (agent-enrolled hosts otherwise land "Unassigned"). Empty list → just offer
+  // "unassigned" (older Controller, or none defined yet).
+  useEffect(() => {
+    if (!cid) { setEnvs([]); return }
+    let alive = true
+    api(`controllers/${cid}/environments`).then((d) => { if (alive) setEnvs(d.environments || []) }).catch(() => { if (alive) setEnvs([]) })
+    return () => { alive = false }
+  }, [cid])
   return (
     <Modal title={`Enroll “${r.project_name}” VMs into a Controller`} onClose={onClose}>
       <p className="muted" style={{ marginTop: 0 }}>Enroll the VMs this project applied into a connected Controller as agents — each installs the Controller’s agent and self-enrolls.</p>
@@ -187,10 +198,20 @@ export function EnrollPicker({ r, controllers, onClose, onPick }) {
           {controllers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
         </select>
       </Field>
+      <Field label="Environment">
+        <select value={env} onChange={(e) => setEnv(e.target.value)}>
+          <option value="">(unassigned)</option>
+          {envs.map((n) => <option key={n} value={n}>{n}</option>)}
+          {env && !envs.includes(env) && <option value={env}>{env}</option>}
+        </select>
+      </Field>
+      <div className="faint" style={{ fontSize: 12 }}>
+        The VMs enroll straight into this environment (inheriting its sudo policy). Create environments in the Controller if the one you want isn’t listed.
+      </div>
       <div className="row" style={{ marginTop: 12, justifyContent: 'flex-end' }}>
         <button className="ghost sm" onClick={onClose}>Cancel</button>
         <button className="primary sm" disabled={busy || !cid}
-          onClick={() => { setBusy(true); onPick(cid) }}>{busy ? 'Enrolling…' : 'Enroll →'}</button>
+          onClick={() => { setBusy(true); onPick(cid, env) }}>{busy ? 'Enrolling…' : 'Enroll →'}</button>
       </div>
     </Modal>
   )
@@ -452,6 +473,8 @@ export function CreateWizard({ onClose, onDone, project, editInfra }) {
   const [provider, setProvider] = useState('')
   const [values, setValues] = useState({})
   const [controllerId, setControllerId] = useState('')
+  const [environment, setEnvironment] = useState('')
+  const [envs, setEnvs] = useState([])
   const [creds, setCreds] = useState([])
   const [deployCredId, setDeployCredId] = useState('')
   const [invs, setInvs] = useState([])
@@ -467,11 +490,16 @@ export function CreateWizard({ onClose, onDone, project, editInfra }) {
     // so the operator can tweak (e.g. add a VM type) and regenerate. Falls back to the
     // first provider's defaults for a fresh create.
     if (editInfra?.project_id) {
+      // Pre-fill the Controller + its environment from the infra row so a regenerate
+      // keeps them (and the environment picker shows the current choice).
+      if (editInfra.controller_id) setControllerId(String(editInfra.controller_id))
+      if (editInfra.environment) setEnvironment(editInfra.environment)
       api(`infra/${editInfra.project_id}/options`).then((o) => {
         const p = o.provider || Object.keys(d.providers)[0]
         setProvider(p)
         const base = {}; for (const opt of (d.providers[p]?.options || [])) base[opt.key] = opt.default
         setValues({ ...base, ...(o.options || {}) })
+        if ((o.options || {}).environment) setEnvironment(o.options.environment)
       }).catch(() => { const f = Object.keys(d.providers)[0]; setProvider(f); seed(d.providers, f) })
       return
     }
@@ -479,6 +507,14 @@ export function CreateWizard({ onClose, onDone, project, editInfra }) {
     setProvider(first); seed(d.providers, first)
   }) }, [])
   useEffect(() => { api('controllers').then((d) => setControllers(d.controllers)) }, [])
+  // The chosen Controller's environments, so the new VMs can be enrolled straight into
+  // one (agents otherwise land "Unassigned"). Clears when no Controller is chosen.
+  useEffect(() => {
+    if (!controllerId) { setEnvs([]); return }
+    let alive = true
+    api(`controllers/${controllerId}/environments`).then((d) => { if (alive) setEnvs(d.environments || []) }).catch(() => { if (alive) setEnvs([]) })
+    return () => { alive = false }
+  }, [controllerId])
   // SSH key credentials only — those are the ones we can derive a public key from
   // and bake into the VMs so SLEP's Ansible/Salt can log in.
   useEffect(() => { api('credentials').then((d) => setCreds((d.credentials || []).filter((c) => c.kind === 'ssh'))) }, [])
@@ -578,10 +614,25 @@ export function CreateWizard({ onClose, onDone, project, editInfra }) {
         </select>
       </Field>
       <div className="faint" style={{ fontSize: 12 }}>If chosen, the Controller’s SSH key is also baked into the VMs’ cloud-init so it can reach them, and “Enroll →” registers them after apply.</div>
+      {controllerId && (
+        <>
+          <Field label="Controller environment for the new VMs">
+            <select value={environment} onChange={(e) => setEnvironment(e.target.value)}>
+              <option value="">(unassigned)</option>
+              {envs.map((n) => <option key={n} value={n}>{n}</option>)}
+              {environment && !envs.includes(environment) && <option value={environment}>{environment}</option>}
+            </select>
+          </Field>
+          <div className="faint" style={{ fontSize: 12 }}>The VMs enroll straight into this environment (inheriting its sudo policy) instead of “Unassigned”. Create environments in the Controller if the one you want isn’t listed.</div>
+        </>
+      )}
       {node}
       <button className="primary" onClick={() => wrap(async () => {
         if (!project && !name.trim()) throw new Error('Give it a name.')
-        let options = values
+        // The Controller environment the applied VMs enroll into (persisted on the infra
+        // project, then stamped onto each agent bundle at enroll). Only meaningful with a
+        // Controller chosen; harmless (blank) otherwise.
+        let options = { ...values, environment: controllerId ? environment : '' }
         if (groupsOn) {
           if (!values.groups.length) throw new Error('Add at least one VM type, or turn off “Multiple VM types”.')
           for (const g of values.groups) {
@@ -590,7 +641,8 @@ export function CreateWizard({ onClose, onDone, project, editInfra }) {
           }
           // The per-group specs drive the build; drop the now-unused flat per-VM fields
           // so they don't linger in the stored options or trip base_image validation.
-          options = { ...values }
+          // Keep the chosen Controller environment (it isn't a per-VM field).
+          options = { ...values, environment: controllerId ? environment : '' }
           for (const k of ['base_image', 'base_volume', ...perVmKeys]) delete options[k]
         }
         const editPid = editInfra?.project_id

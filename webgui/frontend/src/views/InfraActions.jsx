@@ -23,13 +23,14 @@ function buildActions(r, { controllers, setPipe, setVms, setEnrollFor, setJumpFo
     try { const d = await api('runs', { method: 'POST', json: { project_id: r.project_id, kind: 'terraform', target } }); onOpenRun && onOpenRun(d.run_id) }
     catch (e) { alert(e.message) }
   }
-  const enroll = async (controllerId) => {
+  const enroll = async (controllerId, environment) => {
     if (!r.controller_id && !controllerId) {
       if (!controllers.length) { alert('Connect a Controller first (Controllers tab).'); return }
       setEnrollFor(r); return
     }
     try {
       const body = controllerId ? { controller_id: Number(controllerId) } : {}
+      if (environment !== undefined) body.environment = environment
       const d = await api(`infra/${r.project_id}/enroll`, { method: 'POST', json: body })
       setEnrollFor(null); refresh && refresh()
       const lines = (d.results || []).map((h) => `${h.ok ? '✓' : '✗'} ${h.name} ${h.ip} — ${h.detail}`).join('\n')
@@ -92,7 +93,7 @@ function useInfraModals({ onOpenRun, refresh }) {
         onClose={() => setPipe(null)} onLaunched={(id) => { setPipe(null); onOpenRun && onOpenRun(id) }} />}
       {vms && <VmsModal data={vms} onClose={() => setVms(null)} />}
       {enrollFor && <EnrollPicker r={enrollFor} controllers={controllers}
-        onClose={() => setEnrollFor(null)} onPick={(cid) => enrollPick(cid)} />}
+        onClose={() => setEnrollFor(null)} onPick={(cid, env) => enrollPick(cid, env)} />}
       {jumpFor && <JumpHostEditor r={jumpFor} onClose={() => setJumpFor(null)}
         onSaved={() => { setJumpFor(null); refresh && refresh() }} />}
       {testFor && <TestAuthModal r={testFor} onClose={() => setTestFor(null)} />}
