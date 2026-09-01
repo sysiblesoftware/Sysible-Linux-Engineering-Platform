@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { api, tail, getTheme } from '../api.js'
 import { parseRun } from '../runParse.js'
-import RunViz, { PipelineFlow } from './RunViz.jsx'
+import RunViz, { PipelineFlow, stageTally } from './RunViz.jsx'
 import { RunModal } from './Ide.jsx'
 import { Modal, Field } from '../ui.jsx'
 
@@ -97,6 +97,7 @@ export function RunLog({ runId, onBack, onOpenRun }) {
   const [groupId, setGroupId] = useState('')   // pipeline group this run belongs to
   const [seq, setSeq] = useState([])           // the sibling runs of that pipeline
   const [stages, setStages] = useState({})     // runId -> {engine, text} for every stage (stacked viz)
+  const [maxed, setMaxed] = useState(false)    // pipeline view: one stage maximized (the selected runId) vs the side-by-side overview
   const [projectId, setProjectId] = useState(null)  // this run's project (for enroll)
   const [controllers, setControllers] = useState([])
   const [enrollBusy, setEnrollBusy] = useState(false)
@@ -276,7 +277,11 @@ export function RunLog({ runId, onBack, onOpenRun }) {
         <button className="ghost sm" onClick={onBack}>← Runs</button>
         <h2 style={{ margin: 0 }}>Run #{runId}</h2>
         <span className="muted">{engine}</span>
-        <span className={'pill ' + status}>{status}</span>
+        {(() => {
+          // On a partial failure show "1/3 failed" rather than a blanket "failed".
+          const t = status === 'failed' ? stageTally(engine, model) : null
+          return <span className={'pill ' + status} title={t ? t.title : status}>{t ? t.label : status}</span>
+        })()}
         <div className="spacer" />
         <button className="ghost sm" title={showLog ? 'Hide the log pane' : 'Show the log pane'}
           onClick={toggleLog}>{showLog ? 'Hide log' : 'Show log'}</button>
@@ -324,15 +329,28 @@ export function RunLog({ runId, onBack, onOpenRun }) {
               so the entire run is visible at a glance rather than a long scroll. */}
           <PipelineFlow seq={seq} runId={runId} onOpenRun={onOpenRun} />
           {seq.length > 1 ? (
-            <div className="stage-row">
-              {seq.map((s) => {
+            // Overview: all stages side by side. Click a stage to MAXIMIZE it — that
+            // stage becomes the selected run (log follows) and fills the pane; the
+            // top strip still navigates, and a ⤡ restores the overview.
+            <div className={'stage-row' + (maxed ? ' maximized' : '')}>
+              {(maxed ? seq.filter((s) => s.id === runId) : seq).map((s) => {
                 const st = stages[s.id]
                 const m = st ? parseRun(st.engine, st.text) : null
+                const tally = stageTally(s.kind, m)
                 return (
-                  <div key={s.id} className={'stage-block' + (s.id === runId ? ' current' : '')}>
-                    <div className="stage-block-h" onClick={() => s.id !== runId && onOpenRun && onOpenRun(s.id)}>
+                  <div key={s.id} className={'stage-block' + (s.id === runId ? ' current' : '') + (maxed ? ' maximized' : '')}>
+                    <div className="stage-block-h"
+                      title={maxed ? 'Restore the side-by-side overview' : 'Maximize this stage'}
+                      onClick={() => {
+                        if (maxed) { setMaxed(false); return }
+                        if (s.id !== runId && onOpenRun) onOpenRun(s.id)
+                        setMaxed(true)
+                      }}>
                       <b>{s.kind}</b><span className="muted"> · {s.target}</span>
-                      <span className={'pill ' + s.status}>{s.status}</span>
+                      <span className={'pill ' + s.status} title={tally ? tally.title : s.status}>
+                        {tally ? tally.label : s.status}
+                      </span>
+                      <span className="stage-max" aria-hidden="true">{maxed ? '⤡' : '⤢'}</span>
                     </div>
                     <div className="stage-block-body">
                       {m ? <RunViz engine={st.engine} model={m} seedHosts={s.id === runId ? seedHosts : []} />

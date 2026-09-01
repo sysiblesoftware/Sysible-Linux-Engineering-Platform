@@ -12,6 +12,31 @@ const STATUS_COLOR = {
   notrun: '#8b7fd0',   // task never ran — host failed/aborted earlier, or the run ended
 }
 
+// A run's status is "failed" the moment ANY target fails — but that alone reads as
+// if the whole fleet died when often just one of N hosts/minions broke. Given the
+// parsed model, return a precise tally so the pill can say "1/3 failed" instead of a
+// blanket "failed". Only Ansible + Salt have per-target results; returns null for
+// everything else (and when nothing failed — the plain status is clearer there).
+export function stageTally(engine, model) {
+  if (!model) return null
+  if (engine === 'ansible') {
+    const hosts = Object.values(model.hosts || {})
+    const total = hosts.length
+    const failed = hosts.filter((h) => (h.failed || 0) > 0 || (h.unreachable || 0) > 0
+      || h.last === 'failed' || h.last === 'unreachable').length
+    if (!total || !failed) return null
+    return { failed, total, label: `${failed}/${total} failed`, title: `${failed} of ${total} host(s) failed` }
+  }
+  if (engine === 'salt') {
+    const minions = Object.values(model.minions || {})
+    const total = minions.length
+    const failed = minions.filter((m) => (m.failed || 0) > 0).length
+    if (!total || !failed) return null
+    return { failed, total, label: `${failed}/${total} failed`, title: `${failed} of ${total} minion(s) failed` }
+  }
+  return null
+}
+
 export default function RunViz({ engine, model, seedHosts }) {
   if (engine === 'terraform') return <TerraformViz model={model} />
   if (engine === 'salt') return <SaltViz model={model} />

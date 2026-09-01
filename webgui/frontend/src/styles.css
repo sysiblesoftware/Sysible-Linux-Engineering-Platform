@@ -306,6 +306,12 @@ label.fld{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--
 .stage-block.current > .stage-block-h{color:var(--text)}
 .stage-block.current > .stage-block-h b{color:var(--accent)}
 .stage-block-h .pill{margin-left:auto}
+/* Maximize affordance: a subtle glyph at the far right of each stage header. */
+.stage-max{margin-left:8px;color:var(--muted);font-size:15px;line-height:1;opacity:.7}
+.stage-block-h:hover .stage-max{opacity:1;color:var(--accent)}
+/* Maximized: the single selected stage fills the whole viz pane. */
+.stage-row.maximized{overflow-x:hidden}
+.stage-row.maximized > .stage-block.maximized{flex:1 1 100%;min-width:0;border-left:0}
 /* Each column's diagram area scrolls on its own so a tall stage never grows the
    window; frameless so the stages read as one continuous picture. */
 .stage-block-body{flex:1 1 auto;min-height:0;overflow:auto}
