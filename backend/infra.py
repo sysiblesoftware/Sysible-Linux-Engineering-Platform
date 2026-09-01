@@ -1161,6 +1161,17 @@ _CONFIGURE_YML = """\
   hosts: all
   become: true
   gather_facts: true
+  pre_tasks:
+    # Freshly-built cloud VMs ship with an EMPTY/stale apt cache, so a package
+    # install fails with "No package matching '<pkg>' is available" until the cache
+    # is refreshed — even though the package installs fine by hand after a later
+    # `apt update`. Refresh it once up front (Debian/Ubuntu only; other families
+    # skip this). cache_valid_time avoids re-fetching on every run.
+    - name: Refresh the apt cache (Debian/Ubuntu)
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+      when: ansible_facts['os_family'] == 'Debian'
   tasks:
     - name: Ping the hosts
       ansible.builtin.ping:
