@@ -84,7 +84,7 @@ export default function Runs({ onOpen }) {
   )
 }
 
-export function RunLog({ runId, onBack, onOpenRun }) {
+export function RunLog({ runId, onBack, onOpenRun, backLabel = 'Runs' }) {
   const [rerun, setRerun] = useState(null)   // {run, failed, tasks} → opens the Run dialog
   const [text, setText] = useState('')
   const [status, setStatus] = useState('pending')
@@ -280,7 +280,7 @@ export function RunLog({ runId, onBack, onOpenRun }) {
         {maxed && seq.length > 1
           ? <button className="ghost sm" title="Back to the whole pipeline run"
               onClick={() => setMaxed(false)}>← Pipeline</button>
-          : <button className="ghost sm" onClick={onBack}>← Runs</button>}
+          : <button className="ghost sm" title={`Back to ${backLabel}`} onClick={onBack}>← {backLabel}</button>}
         <h2 style={{ margin: 0 }}>Run #{runId}</h2>
         <span className="muted">{engine}</span>
         {(() => {

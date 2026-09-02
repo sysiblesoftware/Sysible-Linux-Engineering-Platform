@@ -131,7 +131,8 @@ export default function App() {
       </aside>
       <main className="view">
         {runId == null && !project && <HealthBanner />}
-        {runId != null ? <RunLog runId={runId} onBack={() => setRunId(null)} onOpenRun={setRunId} />
+        {runId != null ? <RunLog runId={runId} onBack={() => setRunId(null)} onOpenRun={setRunId}
+          backLabel={project ? project.name : (NAV.find((n) => n.key === view)?.label || 'Runs')} />
           : project ? <><InfraActions project={project} refreshKey={infraBump} onOpenRun={setRunId} onOpenProject={setProject} /><Ide project={project} theme={theme} onBack={() => setProject(null)} onRun={(id) => setRunId(id)} onInfraChanged={() => setInfraBump((n) => n + 1)} /></>
             : view === 'organizations' ? <Organizations />
             : view === 'projects' ? <Projects onOpen={setProject} onOpenRun={setRunId} />
