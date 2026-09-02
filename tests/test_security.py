@@ -33,6 +33,24 @@ def test_login_throttle_locks_after_repeated_failures(client):
     assert 429 in codes, "repeated failures should eventually be throttled"
 
 
+def test_login_source_ip_uses_trusted_last_xff_hop():
+    # Behind the single SLOP gateway the real client is the RIGHTMOST X-Forwarded-For
+    # hop (the one our own proxy appended). A client-injected leftmost entry must be
+    # ignored, so an attacker can't rotate the first hop to dodge the IP throttle or
+    # forge a victim's IP. Mirrors the SLOP IdP's _client_ip.
+    from backend.app import _login_source_ip
+
+    class _Req:
+        def __init__(self, xff, peer):
+            self.headers = {"x-forwarded-for": xff} if xff else {}
+            self.client = type("C", (), {"host": peer})() if peer else None
+
+    # Caddy appends the true client (10.0.0.9) after a spoofed leftmost value.
+    assert _login_source_ip(_Req("1.2.3.4, 10.0.0.9", "172.16.0.1")) == "10.0.0.9"
+    # No XFF (standalone) → direct peer.
+    assert _login_source_ip(_Req("", "192.168.1.5")) == "192.168.1.5"
+
+
 def test_pbkdf2_hash_is_iterations_prefixed(client):
     client.post("/users", json={"username": "hashfmt", "password": "Strong-pw12", "role": "operator"})
     row = db.get_admin("hashfmt")

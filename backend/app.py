@@ -489,10 +489,13 @@ def setup(body: dict = Body(...)):
 
 def _login_source_ip(request: Request) -> str:
     """The source IP for the per-IP login throttle. Behind the SLOP gateway/BFF the
-    direct peer is the gateway, so honour its X-Forwarded-For (first hop) to see the
-    real client; standalone, use the direct peer. Worst case a spoofed XFF only lets an
-    attacker dodge the IP layer — the per-username throttle still holds."""
-    xff = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+    direct peer is the gateway, which APPENDS the real client to X-Forwarded-For — so
+    the LAST hop is the trusted client IP. The first hop is whatever the client itself
+    put there, i.e. spoofable (an attacker could rotate it to dodge the IP throttle, or
+    forge a victim's IP to grief them); taking the rightmost hop that our own proxy set
+    avoids both. Standalone (no XFF), use the direct peer. This matches the SLOP IdP's
+    _client_ip so the whole platform derives the client the same, spoofing-resistant way."""
+    xff = (request.headers.get("x-forwarded-for") or "").split(",")[-1].strip()
     if xff:
         return xff
     return request.client.host if request.client else ""
