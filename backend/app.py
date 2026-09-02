@@ -107,6 +107,11 @@ ROLES = set(ROLE_RANK)
 _LOGIN_MAX_FAILURES = 10
 _LOGIN_WINDOW_S = 15 * 60
 _LOGIN_LOCKOUT_S = 10 * 60
+# A SECOND throttle keyed on the source IP, to catch credential-spraying across many
+# usernames from one host (which the per-username throttle alone can't see). Threshold
+# is deliberately high (5×) so shared-NAT users behind one IP aren't locked out by a
+# neighbour's typos — only sustained spraying trips it. Same durable store.
+_LOGIN_IP_MAX_FAILURES = 50
 
 
 # ------------------------------------------------------------------ auth utils
@@ -384,13 +389,62 @@ async def viewer_read_only(request: Request, call_next):
 _MAX_REQUEST_BYTES = int(os.environ.get("SLEP_MAX_REQUEST_BYTES", str(16 * 1024 * 1024)))
 
 
-@app.middleware("http")
-async def body_limit(request: Request, call_next):
-    cl = request.headers.get("content-length")
-    if cl and cl.isdigit() and int(cl) > _MAX_REQUEST_BYTES:
-        from fastapi.responses import JSONResponse
-        return JSONResponse({"detail": "Request body too large."}, status_code=413)
-    return await call_next(request)
+class _BodyLimitASGI:
+    """Enforce the max request-body size on BOTH the declared Content-Length AND the
+    actual bytes streamed. A middleware that only checks Content-Length is bypassable
+    with `Transfer-Encoding: chunked` (no Content-Length header), letting an attacker
+    stream an unbounded body — a memory/disk DoS. This pure-ASGI middleware reads the
+    body up to the cap: once it exceeds, it returns 413 WITHOUT invoking the app; within
+    the cap it replays the buffered body to the app. Buffering is bounded by the cap
+    (default 16 MiB), so it can't be starved, and it never hangs — it just waits for the
+    body the app would read anyway."""
+
+    def __init__(self, app, max_bytes: int):
+        self.app = app
+        self.max_bytes = max_bytes
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        # Fast path: an honest, oversized Content-Length is rejected before reading.
+        for k, v in scope.get("headers") or []:
+            if k == b"content-length" and v.isdigit() and int(v) > self.max_bytes:
+                return await self._too_large(scope, send)
+
+        # Read the body, bounded by the cap. Stop the instant it exceeds — the
+        # remaining (attacker) bytes are never buffered.
+        body = bytearray()
+        more_body = True
+        while more_body:
+            message = await receive()
+            if message.get("type") == "http.disconnect":
+                return
+            body += message.get("body", b"")
+            more_body = message.get("more_body", False)
+            if len(body) > self.max_bytes:
+                return await self._too_large(scope, send)
+
+        # Under the cap: replay the buffered body to the app as a single message.
+        sent = False
+
+        async def replay_receive():
+            nonlocal sent
+            if not sent:
+                sent = True
+                return {"type": "http.request", "body": bytes(body), "more_body": False}
+            return await receive()   # subsequent reads (e.g. disconnect) pass through
+
+        await self.app(scope, replay_receive, send)
+
+    async def _too_large(self, scope, send):
+        from starlette.responses import JSONResponse
+        # Drive the response with a no-op receive — the body is irrelevant now.
+        async def _noop_receive():
+            return {"type": "http.request", "body": b"", "more_body": False}
+        await JSONResponse({"detail": "Request body too large."}, status_code=413)(scope, _noop_receive, send)
+
+
+app.add_middleware(_BodyLimitASGI, max_bytes=_MAX_REQUEST_BYTES)
 
 
 # Defense-in-depth response headers. The backend is a JSON API, so it can run the
@@ -433,15 +487,28 @@ def setup(body: dict = Body(...)):
             "token": _new_session(user, "superuser")}
 
 
+def _login_source_ip(request: Request) -> str:
+    """The source IP for the per-IP login throttle. Behind the SLOP gateway/BFF the
+    direct peer is the gateway, so honour its X-Forwarded-For (first hop) to see the
+    real client; standalone, use the direct peer. Worst case a spoofed XFF only lets an
+    attacker dodge the IP layer — the per-username throttle still holds."""
+    xff = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+    if xff:
+        return xff
+    return request.client.host if request.client else ""
+
+
 @app.post("/login")
-def login(body: dict = Body(...)):
+def login(request: Request, body: dict = Body(...)):
     user = str(body.get("username") or "").strip()
     pw = str(body.get("password") or "")
     throttle_key = user or "(empty)"
+    ip = _login_source_ip(request)
+    ip_key = f"ip:{ip}" if ip else ""
 
-    locked = db.login_throttle_locked_for(throttle_key)
+    locked = db.login_throttle_locked_for(throttle_key) or (ip_key and db.login_throttle_locked_for(ip_key))
     if locked:
-        db.log_audit("login_throttled", user, f"locked {locked}s")
+        db.log_audit("login_throttled", user, f"locked {locked}s (ip={ip})")
         raise HTTPException(status_code=429,
                             detail=f"Too many failed attempts. Try again in about "
                                    f"{max(1, locked // 60)} minute(s).")
@@ -457,6 +524,9 @@ def login(body: dict = Body(...)):
     if not valid:
         db.login_throttle_record_failure(throttle_key, _LOGIN_WINDOW_S,
                                          _LOGIN_MAX_FAILURES, _LOGIN_LOCKOUT_S)
+        if ip_key:
+            db.login_throttle_record_failure(ip_key, _LOGIN_WINDOW_S,
+                                             _LOGIN_IP_MAX_FAILURES, _LOGIN_LOCKOUT_S)
         db.log_audit("login_failed", user, "invalid username or password")
         raise HTTPException(status_code=401, detail="Invalid username or password.")
 
@@ -469,6 +539,8 @@ def login(body: dict = Body(...)):
             pass
 
     db.login_throttle_clear(throttle_key)
+    if ip_key:
+        db.login_throttle_clear(ip_key)
     role = row.get("role") or "operator"
     db.log_audit("login", user, f"role={role}")
     return {"status": "ok", "username": user, "role": role,

@@ -137,3 +137,26 @@ def test_git_ext_transport_rejected():
             gitops._validate_remote_url(bad)
     for ok in ("https://example.com/a/b.git", "ssh://git@host/a.git", "git@github.com:org/repo.git"):
         assert gitops._validate_remote_url(ok) == ok
+
+
+def test_chunked_body_bypass_is_blocked(client):
+    # A Transfer-Encoding: chunked request has no Content-Length, so a limit that only
+    # checks that header is bypassable — an attacker could stream an unbounded body.
+    # httpx sends a generator body as chunked; an over-limit stream must get 413, not
+    # be buffered. Use a small cap via the streaming path (default cap is 16 MiB, so
+    # stream just over it in bounded chunks).
+    import backend.app as app
+
+    def big():
+        chunk = b"A" * (1024 * 1024)          # 1 MiB
+        for _ in range((app._MAX_REQUEST_BYTES // len(chunk)) + 2):  # ~2 MiB over cap
+            yield chunk
+
+    r = client.post("/login", content=big(), headers={"Content-Type": "application/json"})
+    assert r.status_code == 413, f"chunked over-limit body should be 413, got {r.status_code}"
+
+
+def test_normal_request_under_limit_still_works(client):
+    # A normal (small, content-length) request is untouched by the limit.
+    r = client.post("/login", json={"username": "nobody-xyz", "password": "whatever"})
+    assert r.status_code in (401, 429)   # reaches the handler (bad creds / maybe throttled), not 413
