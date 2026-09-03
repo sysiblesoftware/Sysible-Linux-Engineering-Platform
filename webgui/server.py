@@ -47,7 +47,11 @@ _SSO_HEADERS = ("x-sysible-user", "x-sysible-role", "x-sysible-auth")
 # and script-src 'unsafe-eval' are required; images/fonts allow data: URIs.
 _CSP = ("default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; "
         "script-src 'self' 'unsafe-eval'; worker-src 'self' blob:; font-src 'self' data:; "
-        "connect-src 'self'; frame-ancestors 'none'; base-uri 'self'")
+        # frame-ancestors 'self', not 'none': behind SLOP every app shares ONE
+        # origin, and SLOP Administration hosts this console's settings UI in-page
+        # rather than keeping a second copy that drifts. 'self' still refuses every
+        # OTHER site, so the clickjacking protection is unchanged.
+        "connect-src 'self'; frame-ancestors 'self'; base-uri 'self'")
 
 
 @app.middleware("http")
@@ -57,7 +61,7 @@ async def guard(request: Request, call_next):
         return JSONResponse({"detail": "Request body too large."}, status_code=413)
     resp = await call_next(request)
     resp.headers.setdefault("X-Content-Type-Options", "nosniff")
-    resp.headers.setdefault("X-Frame-Options", "DENY")
+    resp.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
     resp.headers.setdefault("Referrer-Policy", "no-referrer")
     resp.headers.setdefault("Content-Security-Policy", _CSP)
     if request.url.scheme == "https":
