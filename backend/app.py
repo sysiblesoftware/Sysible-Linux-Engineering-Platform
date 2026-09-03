@@ -216,6 +216,18 @@ def _gateway_identity(request: Request) -> dict | None:
     return {"user": user, "role": role}
 
 
+def _sso_only() -> bool:
+    """True when SLOP is the identity authority for this instance.
+
+    SLEP's API is published on its own port, so anything it still accepts locally
+    is a second front door the gateway never sees: a SLEP-issued bearer token
+    would keep working there after the user signed out of SLOP, and a SLEP-local
+    account is one SLOP Administration does not manage. Under SSO there is
+    exactly one identity source — the gateway.
+    """
+    return bool(_TRUST_GATEWAY_AUTH and _SSO_SHARED_SECRET)
+
+
 def _resolve_identity(request: Request) -> dict | None:
     """The caller's identity from either source, or None if unauthenticated. A
     gateway-asserted identity (trusted only via the shared secret) takes precedence
@@ -223,6 +235,12 @@ def _resolve_identity(request: Request) -> dict | None:
     ident = _gateway_identity(request)
     if ident:
         return ident
+    if _sso_only():
+        # No gateway assertion on THIS request while SLOP owns identity: do not
+        # fall back to a SLEP-issued token. That fallback is what let a token
+        # outlive a SLOP sign-out and what made SLEP reachable directly on its
+        # published port with a credential the platform never issued.
+        return None
     sess = db.resolve_admin_token(_bearer(request))
     if sess:
         return {"user": sess["username"], "role": sess["role"]}
@@ -503,6 +521,17 @@ def _login_source_ip(request: Request) -> str:
 
 @app.post("/login")
 def login(request: Request, body: dict = Body(...)):
+    if _sso_only():
+        # SLEP has no login of its own here — SLOP is the identity authority and
+        # its administration owns every account. Refusing before the password
+        # check also means a SLEP-local credential cannot be probed on the
+        # published port.
+        db.log_audit("login_refused_sso", str(body.get("username") or "").strip(),
+                     "local login disabled: SLOP owns identity")
+        raise HTTPException(
+            status_code=403,
+            detail="SLEP has no separate login — sign in at the Sysible Linux "
+                   "Operations Platform. Accounts are managed in SLOP Administration.")
     user = str(body.get("username") or "").strip()
     pw = str(body.get("password") or "")
     throttle_key = user or "(empty)"

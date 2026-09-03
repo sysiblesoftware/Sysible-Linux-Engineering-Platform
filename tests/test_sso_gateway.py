@@ -92,3 +92,39 @@ def test_gateway_superuser_can_write(gw, trust_on):
     r = gw.post("/projects", headers=_hdrs(role="superuser", user="su-gw"),
                 json={"name": "gw superuser project"})
     assert r.status_code == 200
+
+
+# ---- SLOP is the ONLY way in --------------------------------------------------
+# SLEP's API is published on its own port, so anything it accepts locally is a
+# second front door the gateway never sees: a SLEP-issued bearer token would keep
+# working there after the user signed out of SLOP, and a SLEP-local account is one
+# SLOP Administration does not manage.
+def test_no_local_login_when_slop_owns_identity(gw, trust_on):
+    r = gw.post("/login", json={"username": "admin", "password": "whatever"})
+    assert r.status_code == 403
+    assert "Sysible Linux Operations Platform" in r.json()["detail"]
+
+
+def test_a_slep_token_stops_working_once_slop_owns_identity(client, monkeypatch):
+    """The sign-out gap: a bearer minted before SSO was enabled (or by someone
+    hitting the published port directly) must not survive."""
+    # `client` carries a real SLEP bearer from the standalone login.
+    assert client.get("/runs").status_code == 200
+
+    monkeypatch.setattr(app_mod, "_TRUST_GATEWAY_AUTH", True)
+    monkeypatch.setattr(app_mod, "_SSO_SHARED_SECRET", SECRET)
+    # Same token, no gateway assertion — refused, because the gateway is now the
+    # only identity source.
+    assert client.get("/runs").status_code == 401
+
+
+def test_the_gateway_identity_still_works(gw, trust_on):
+    # Close the second door, not the first.
+    assert gw.get("/runs", headers=_hdrs()).status_code == 200
+
+
+def test_standalone_slep_is_unchanged(gw, client):
+    assert app_mod._sso_only() is False
+    # A bad password is still a 401 from the real login path, not a 403 lockout.
+    assert gw.post("/login", json={"username": "admin", "password": "nope"}).status_code in (401, 429)
+    assert client.get("/runs").status_code == 200
