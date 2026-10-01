@@ -18,6 +18,8 @@ import Activity from './views/Activity.jsx'
 import HealthBanner from './components/HealthBanner.jsx'
 import Runs, { RunLog } from './views/Runs.jsx'
 import Pipelines from './views/Pipelines.jsx'
+import Templates from './views/Templates.jsx'
+import Notifications from './views/Notifications.jsx'
 
 // Left-rail navigation — same shape as the Sysible Controller console.
 // `su: true` items are shown only to superusers.
@@ -29,9 +31,11 @@ const NAV = [
   { key: 'credentials', label: 'Credentials', icon: 'key' },
   { key: 'jumphosts', label: 'Jump Hosts', icon: 'jump' },
   { key: 'vault', label: 'Variable Vault', icon: 'lock' },
+  { key: 'templates', label: 'Job Templates', icon: 'template' },
   { key: 'runs', label: 'Runs', icon: 'play' },
   { key: 'pipelines', label: 'Pipelines', icon: 'pipeline' },
   { key: 'schedules', label: 'Schedules', icon: 'clock' },
+  { key: 'notifications', label: 'Notifications', icon: 'bell' },
   { key: 'organizations', label: 'Organizations', icon: 'org', su: true },
   { key: 'activity', label: 'Activity', icon: 'activity', su: true },
   { key: 'users', label: 'Users', icon: 'users', su: true },
@@ -49,6 +53,8 @@ const ICONS = {
   users: <><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" /><circle cx="9" cy="7" r="4" /><path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75" /></>,
   clock: <><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></>,
   activity: <path d="M3 12h4l3 8 4-16 3 8h4" />,
+  template: <><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M3 9h18" /><path d="M8 13h8M8 16h5" /></>,
+  bell: <><path d="M18 9a6 6 0 1 0-12 0c0 6-2 7-2 7h16s-2-1-2-7" /><path d="M10.5 20a2 2 0 0 0 3 0" /></>,
   cloud: <path d="M6.5 19a4.5 4.5 0 0 1-.5-8.97 6 6 0 0 1 11.64-1.36A4 4 0 0 1 17.5 19z" />,
   jump: <><circle cx="5" cy="18" r="2" /><circle cx="19" cy="18" r="2" /><path d="M5 16V9a3 3 0 0 1 3-3h8a3 3 0 0 1 3 3v7" /><path d="M12 6V3M9 5l3-2 3 2" /></>,
   org: <><rect x="4" y="3" width="7" height="18" rx="1" /><rect x="13" y="8" width="7" height="13" rx="1" /><line x1="7" y1="7" x2="7.01" y2="7" /><line x1="7" y1="11" x2="7.01" y2="11" /><line x1="16" y1="12" x2="16.01" y2="12" /></>,
@@ -139,6 +145,8 @@ export default function App() {
               : view === 'inventories' ? <Inventories />
                 : view === 'infra' ? <Infrastructure onOpenProject={setProject} />
                 : view === 'pipelines' ? <Pipelines onOpenRun={setRunId} />
+                : view === 'templates' ? <Templates onOpenRun={setRunId} />
+                : view === 'notifications' ? <Notifications />
                 : view === 'controllers' ? <Controllers />
                   : view === 'credentials' ? <Credentials />
                     : view === 'jumphosts' ? <JumpHosts />
