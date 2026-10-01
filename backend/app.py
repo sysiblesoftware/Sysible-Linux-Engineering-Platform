@@ -31,13 +31,17 @@ from fastapi.responses import PlainTextResponse
 
 from . import (controller_import, db, engines, galaxy, gitops, infra, keydist,
                notifications, policy, projcfg, surveys, vault)
-from .runners import ansible_runner, salt_runner, terraform_runner
+from .runners import ansible_runner, molecule_runner, salt_runner, terraform_runner
 
 # Engine name -> runner.launch(run_id). Each runs to completion on a thread.
 RUNNERS = {
     "ansible": ansible_runner.launch,
     "terraform": terraform_runner.launch,
     "salt": salt_runner.launch,
+    # Not a fourth language — a verb on the Ansible content already in the
+    # project: converge a role against a throwaway instance and prove it is
+    # idempotent before it reaches the fleet.
+    "molecule": molecule_runner.launch,
 }
 
 
@@ -1981,6 +1985,21 @@ def pipeline_group_runs(group_id: str, request: Request, user: str = Depends(cur
 
 
 # ---- saved pipelines (named, re-runnable sequences) ----
+@app.get("/projects/{pid}/molecule")
+def project_molecule(pid: int, request: Request, user: str = Depends(current_user)):
+    """The scenarios this project defines, and whether SLEP can run each.
+
+    `runnable: false` with a reason is the point: a scenario on the docker driver
+    is told so here, instead of failing several minutes into a run with "Cannot
+    connect to the Docker daemon".
+    """
+    project = db.get_project(pid)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    _guard_object_org(request, project.get("org_id"), "viewer")
+    return {"scenarios": molecule_runner.scenarios(db.project_dir(pid))}
+
+
 # ------------------------------------------------------- project content (galaxy)
 #
 # AAP's "role management" is project sync: install the project's own
