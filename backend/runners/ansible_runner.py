@@ -57,6 +57,120 @@ def pop_opts(run_id: int) -> dict:
     return _RUNOPTS.pop(run_id, {})
 
 
+# ---------------------------------------------------------------------------
+# Job options — the set AAP exposes on a job template, translated to argv.
+#
+# SLEP had --limit and --start-at-task and nothing else, which left three things
+# an operator reaches for constantly out of the console: tags, a dry run, and
+# --force-handlers. The last one matters more than it looks: a handler only runs
+# at the END of a play, so a playbook that fails after notifying one leaves the
+# service un-restarted, and the RE-RUN does not notify again (the task is already
+# in the desired state). Without --force-handlers the only way out is to make a
+# cosmetic change to force the notify — which is exactly the kind of thing people
+# do at 2am and regret.
+#
+# Kept as a pure function: it is the part worth testing, and it needs no fleet.
+VERBOSITY_MAX = 4
+# Ansible tag names: identifiers, optionally comma-separated. Deliberately strict
+# — a typo here silently selects NO tasks and the run "succeeds" having done
+# nothing, which is the worst failure shape available.
+_TAGS_RE = re.compile(r"\A[A-Za-z0-9_.:@+-]+(?:\s*,\s*[A-Za-z0-9_.:@+-]+)*\Z")
+
+
+def build_options(opts: dict) -> tuple[list[str], list[str], str]:
+    """(argv, notes-for-the-log, error). A non-empty error refuses the run.
+
+    Nothing here is interpolated into a shell, and every value lands as its own
+    argv element after its flag — so a value can never be read as another flag.
+    The validation is about catching a mistake early, not about escaping.
+    """
+    argv: list[str] = []
+    notes: list[str] = []
+    opts = opts or {}
+
+    limit = str(opts.get("limit") or "").strip()
+    if limit:
+        argv += ["--limit", limit]
+        notes.append(f"limited to: {limit}")
+
+    start_at = str(opts.get("start_at_task") or "").strip()
+    if start_at:
+        argv += ["--start-at-task", start_at]
+        notes.append(f"starting at task: {start_at}")
+
+    for key, flag in (("tags", "--tags"), ("skip_tags", "--skip-tags")):
+        val = str(opts.get(key) or "").strip()
+        if not val:
+            continue
+        if not _TAGS_RE.match(val):
+            return [], [], (f"{flag} takes comma-separated tag names "
+                            f"(letters, digits, _ . : @ + -); got {val!r}")
+        val = ",".join(t.strip() for t in val.split(","))
+        argv += [flag, val]
+        notes.append(f"{flag[2:]}: {val}")
+
+    if opts.get("check"):
+        argv.append("--check")
+        notes.append("CHECK MODE — nothing will be changed")
+    if opts.get("diff"):
+        argv.append("--diff")
+        notes.append("showing diffs")
+    if opts.get("force_handlers"):
+        argv.append("--force-handlers")
+        notes.append("handlers will run even if the play fails")
+
+    verbosity = opts.get("verbosity")
+    if verbosity not in (None, "", 0, "0"):
+        try:
+            v = int(verbosity)
+        except (TypeError, ValueError):
+            return [], [], f"verbosity must be 0-{VERBOSITY_MAX}; got {verbosity!r}"
+        if not 0 <= v <= VERBOSITY_MAX:
+            return [], [], f"verbosity must be 0-{VERBOSITY_MAX}; got {v}"
+        if v:
+            argv.append("-" + "v" * v)
+            notes.append(f"verbosity: -{'v' * v}")
+
+    if opts.get("idempotence"):
+        # NOT an argv flag — it is a second pass, run after the first succeeds.
+        if opts.get("check"):
+            return [], [], ("an idempotence check cannot run in check mode: a check "
+                            "run changes nothing, so a second pass proves nothing")
+        if start_at:
+            return [], [], ("an idempotence check cannot start at a task: the second "
+                            "pass would skip the tasks whose idempotence is in question")
+        notes.append("idempotence check: the playbook will run a SECOND time, "
+                     "and must report no changes")
+
+    return argv, notes, ""
+
+
+# The PLAY RECAP is the only place Ansible states how many things it changed.
+_RECAP_CHANGED = re.compile(r"\bchanged=(\d+)")
+
+
+def changed_in_recap(output: str) -> int | None:
+    """Total `changed=` across the hosts in the LAST play recap, or None.
+
+    None means there was no recap at all — the run died before finishing — which
+    is a different thing from "changed nothing" and must not be read as success.
+    Only text after the final `PLAY RECAP` is considered: `changed=` also appears
+    in per-task output under high verbosity, and counting those would make every
+    run look non-idempotent.
+    """
+    idx = output.rfind("PLAY RECAP")
+    if idx < 0:
+        return None
+    total = 0
+    found = False
+    for line in output[idx:].splitlines()[1:]:
+        m = _RECAP_CHANGED.search(line)
+        if m:
+            total += int(m.group(1))
+            found = True
+    return total if found else None
+
+
 def _ansible_group(name: str) -> str:
     """Ansible INI group names allow only letters, digits and underscores — a
     Controller environment like "Sysible Labs" (with a space) would otherwise
@@ -375,15 +489,16 @@ def launch(run_id: int) -> None:
             extra_ssh_args = ""
             if is_infra and managed_key and key_ready and "--private-key" in cmd and cmd[cmd.index("--private-key") + 1] != managed_key:
                 extra_ssh_args = f"-o IdentityFile={managed_key}"
-            # Targeted re-run: --limit narrows to a subset of hosts, --start-at-task
-            # resumes at a named task (skipping the ones that already succeeded).
+            # Job options: --limit/--start-at-task/--tags/--skip-tags/--check/
+            # --diff/--force-handlers/-v, and the idempotence second pass.
             opts = pop_opts(run_id)
-            if opts.get("limit"):
-                cmd += ["--limit", str(opts["limit"])]
-                emit(f"-- limited to: {opts['limit']}")
-            if opts.get("start_at_task"):
-                cmd += ["--start-at-task", str(opts["start_at_task"])]
-                emit(f"-- starting at task: {opts['start_at_task']}")
+            opt_argv, opt_notes, opt_err = build_options(opts)
+            if opt_err:
+                emit(f"!! {opt_err}")
+                raise RuntimeError(opt_err)
+            cmd += opt_argv
+            for note in opt_notes:
+                emit(f"-- {note}")
             # Extra vars go through a 0600 @file, not `-e k=v` on argv — a value the
             # operator typed into the Variables box may be a secret, and argv is visible
             # in the process list (`ps`) to any local user. Matches the vault/become
@@ -490,6 +605,62 @@ def launch(run_id: int) -> None:
             emit(f"\n== finished: exit code {rc} ==")
             if unreachable:
                 _emit_unreachable_help(emit, bool(bastion), proxy_hop_closed, auth_denied, timed_out)
+
+            # THE IDEMPOTENCE CHECK. A correct playbook describes a desired state,
+            # so running it twice changes nothing the second time. Anything that
+            # reports `changed` on the second pass is doing work every run — a
+            # `command:` with no `creates:`, a template that rewrites a timestamp,
+            # a service bounced unconditionally — and on a schedule that is a
+            # restart every night that nobody asked for.
+            #
+            # Only after a clean first pass: a second run on top of a failure is
+            # measuring the wrong thing.
+            if rc == 0 and opts.get("idempotence"):
+                emit("\n== idempotence check: running it a second time ==")
+                emit("-- a playbook that describes a desired state changes nothing here.\n")
+                log.flush()
+                if _common.is_stopped(run_id):
+                    _common.clear_stop(run_id)
+                    emit("\n== canceled by operator ==")
+                    db.set_run_status(run_id, "canceled", exit_code=130, finished=int(time.time()))
+                    return
+                tail: list[str] = []
+                proc2 = subprocess.Popen(
+                    cmd, cwd=str(workdir), env=env,
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
+                    start_new_session=True,
+                )
+                _common.register(run_id, proc2)
+                try:
+                    for line in proc2.stdout:
+                        log.write(line)
+                        log.flush()
+                        # Bounded: only the recap is needed, and a -vvvv run can
+                        # pour out megabytes we would otherwise hold in memory.
+                        tail.append(line)
+                        if len(tail) > 400:
+                            del tail[:200]
+                    rc2 = proc2.wait()
+                finally:
+                    _common.unregister(run_id)
+                changed = changed_in_recap("".join(tail))
+                if rc2 != 0:
+                    emit(f"\n!! the second pass itself failed (exit {rc2}) — the playbook "
+                         f"is not repeatable on an already-converged host.")
+                    rc = rc2
+                elif changed is None:
+                    emit("\n!! the second pass produced no PLAY RECAP, so there is nothing "
+                         "to compare — treating the idempotence check as failed rather "
+                         "than assuming it passed.")
+                    rc = 1
+                elif changed:
+                    emit(f"\n!! NOT IDEMPOTENT: the second pass reported {changed} change(s). "
+                         f"Something in this playbook does work on every run. Re-run with "
+                         f"--diff to see what it rewrites.")
+                    rc = 1
+                else:
+                    emit("\n== idempotent: the second pass changed nothing ==")
+
             db.set_run_status(
                 run_id, "success" if rc == 0 else "failed",
                 exit_code=rc, finished=int(time.time()),

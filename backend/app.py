@@ -1729,7 +1729,8 @@ def _assert_step_org(project_org, credential_id=None, inventory_id=None):
 
 
 def _dispatch_run(project, kind, target, inventory_id, credential_id, extra_vars, actor,
-                  become_password="", limit="", start_at_task="", tf_tool=""):
+                  become_password="", limit="", start_at_task="", tf_tool="",
+                  job_opts=None):
     """Create a run row and launch its engine on a background thread. Shared by the
     manual /runs route and the scheduler. Returns the run id. `become_password` is
     a transient per-run sudo password — stashed in memory, never persisted.
@@ -1747,8 +1748,13 @@ def _dispatch_run(project, kind, target, inventory_id, credential_id, extra_vars
         from .runners import ansible_runner
         if become_password:
             ansible_runner.stash_become(run_id, become_password)
-        if limit or start_at_task:
-            ansible_runner.stash_opts(run_id, {"limit": limit, "start_at_task": start_at_task})
+        # The AAP job-template set. Validated in build_options, which REFUSES the
+        # run rather than quietly dropping a bad value — a mistyped tag selects no
+        # tasks at all and the run "succeeds" having done nothing, which is the
+        # worst failure shape on offer.
+        opts = {"limit": limit, "start_at_task": start_at_task, **(job_opts or {})}
+        if any(opts.values()):
+            ansible_runner.stash_opts(run_id, opts)
     if kind == "terraform" and tf_tool:
         terraform_runner.stash_tool(run_id, tf_tool)
     db.log_audit("run_launched", actor, f"#{run_id} {kind} '{target}' on {project['name']}")
@@ -2029,7 +2035,16 @@ def launch_run(request: Request, body: dict = Body(...), user: str = Depends(cur
                            become_password=str(body.get("become_password") or ""),
                            limit=str(body.get("limit") or "").strip(),
                            start_at_task=str(body.get("start_at_task") or "").strip(),
-                           tf_tool=str(body.get("tool") or "").strip())
+                           tf_tool=str(body.get("tool") or "").strip(),
+                           job_opts={
+                               "tags": str(body.get("tags") or "").strip(),
+                               "skip_tags": str(body.get("skip_tags") or "").strip(),
+                               "check": bool(body.get("check")),
+                               "diff": bool(body.get("diff")),
+                               "force_handlers": bool(body.get("force_handlers")),
+                               "verbosity": body.get("verbosity") or 0,
+                               "idempotence": bool(body.get("idempotence")),
+                           })
     return {"status": "launched", "run_id": run_id}
 
 
