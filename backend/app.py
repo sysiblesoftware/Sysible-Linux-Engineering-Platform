@@ -29,7 +29,8 @@ from contextlib import asynccontextmanager
 from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse
 
-from . import controller_import, db, engines, gitops, infra, keydist, policy, projcfg, surveys, vault
+from . import (controller_import, db, engines, gitops, infra, keydist, notifications,
+               policy, projcfg, surveys, vault)
 from .runners import ansible_runner, salt_runner, terraform_runner
 
 # Engine name -> runner.launch(run_id). Each runs to completion on a thread.
@@ -1980,6 +1981,104 @@ def pipeline_group_runs(group_id: str, request: Request, user: str = Depends(cur
 
 
 # ---- saved pipelines (named, re-runnable sequences) ----
+# ---------------------------------------------------------------- notifications
+def _run_finished(run_id: int, status: str) -> None:
+    """Fan a finished run out to whatever is listening. Never raises: db calls
+    this with the run already recorded, and a chat server being down must not
+    change that."""
+    run = db.get_run(run_id)
+    if not run:
+        return
+    project = db.get_project(run.get("project_id")) or {}
+    rules = [r for r in db.notifications_for(run.get("project_id"), project.get("org_id"))
+             if notifications.wants(r, status)]
+    if not rules:
+        return
+    body = notifications.payload(run, project, base_url=os.environ.get("SLEP_BASE_URL", ""))
+    notifications.send_async(rules, body, on_done=lambda rule, ok, detail:
+                             db.record_notification(rule["id"], ok, detail))
+
+
+db.set_run_finished_hook(_run_finished)
+
+
+@app.get("/notifications")
+def list_notification_rules(request: Request, user: str = Depends(require_operator)):
+    return {"notifications": db.list_notifications(_visible_org_ids(request))}
+
+
+def _notif_payload(body: dict, *, require_name: bool) -> dict:
+    kind = str(body.get("kind") or "webhook")
+    if require_name and not str(body.get("name") or "").strip():
+        raise HTTPException(status_code=400, detail="A notification needs a name.")
+    out = {k: body[k] for k in ("name", "kind", "project_id", "on_success",
+                                "on_failure", "enabled") if k in body}
+    if "config" in body or require_name:
+        try:
+            out["config"] = notifications.validate_config(kind, body.get("config"))
+        except notifications.NotificationError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+    return out
+
+
+@app.post("/notifications")
+def create_notification_rule(request: Request, body: dict = Body(...),
+                             user: str = Depends(require_operator)):
+    f = _notif_payload(body, require_name=True)
+    org = None
+    if f.get("project_id"):
+        p = db.get_project(f["project_id"])
+        if not p:
+            raise HTTPException(status_code=404, detail="Project not found.")
+        _guard_object_org(request, p.get("org_id"))
+        org = p.get("org_id")
+    n = db.create_notification(f["name"], f.get("kind") or "webhook", f["config"],
+                               f.get("on_success", False), f.get("on_failure", True),
+                               f.get("project_id"), org)
+    db.log_audit("notification_create", user, f"#{n['id']} '{n['name']}' ({n['kind']})")
+    return n
+
+
+@app.patch("/notifications/{nid}")
+def update_notification_rule(nid: int, request: Request, body: dict = Body(...),
+                             user: str = Depends(require_operator)):
+    cur = db.get_notification(nid)
+    if not cur:
+        raise HTTPException(status_code=404, detail="Notification not found.")
+    _guard_object_org(request, cur.get("org_id"))
+    n = db.update_notification(nid, _notif_payload(body, require_name=False))
+    db.log_audit("notification_update", user, f"#{nid} '{n['name']}'")
+    return n
+
+
+@app.delete("/notifications/{nid}")
+def delete_notification_rule(nid: int, request: Request,
+                             user: str = Depends(require_operator)):
+    cur = db.get_notification(nid)
+    if not cur:
+        raise HTTPException(status_code=404, detail="Notification not found.")
+    _guard_object_org(request, cur.get("org_id"))
+    db.delete_notification(nid)
+    db.log_audit("notification_delete", user, f"#{nid} '{cur['name']}'")
+    return {"status": "deleted"}
+
+
+@app.post("/notifications/{nid}/test")
+def test_notification_rule(nid: int, request: Request,
+                           user: str = Depends(require_operator)):
+    """Send one now. A notification nobody has ever tested is a notification you
+    find out about during the incident it was supposed to tell you about."""
+    rule = db.get_notification(nid, reveal=True)
+    if not rule:
+        raise HTTPException(status_code=404, detail="Notification not found.")
+    _guard_object_org(request, rule.get("org_id"))
+    ok, detail = notifications.deliver(rule, {
+        "event": "test", "status": "success", "ok": True,
+        "text": f"SLEP: test notification from '{rule['name']}'"})
+    db.record_notification(nid, ok, detail)
+    return {"ok": ok, "detail": detail}
+
+
 # ---------------------------------------------------------------- job templates
 #
 # A template is a saved, named automation: project + what to run + where + as

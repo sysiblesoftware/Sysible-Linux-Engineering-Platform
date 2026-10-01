@@ -250,6 +250,26 @@ def init_db() -> None:
                 FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
             );
 
+            -- NOTIFICATIONS. A run that fails in the console and nowhere else
+            -- keeps failing until somebody looks. A rule says where to send it
+            -- and which outcomes are worth sending.
+            CREATE TABLE IF NOT EXISTS notifications (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                kind TEXT NOT NULL DEFAULT 'webhook',    -- webhook | email
+                config TEXT NOT NULL DEFAULT '{}',       -- JSON; secrets encrypted
+                on_success INTEGER NOT NULL DEFAULT 0,
+                on_failure INTEGER NOT NULL DEFAULT 1,
+                project_id INTEGER,                      -- NULL = every project
+                enabled INTEGER NOT NULL DEFAULT 1,
+                org_id INTEGER,
+                last_status TEXT NOT NULL DEFAULT '',
+                last_detail TEXT NOT NULL DEFAULT '',
+                last_sent INTEGER,
+                created INTEGER NOT NULL,
+                FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+            );
+
             CREATE TABLE IF NOT EXISTS pipelines (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 project_id INTEGER NOT NULL,
@@ -1604,6 +1624,121 @@ def delete_template(tid: int) -> bool:
         return c.execute("DELETE FROM job_templates WHERE id=?", (tid,)).rowcount > 0
 
 
+# ---------------------------------------------------------------- notifications
+# The webhook secret and the SMTP password are encrypted at rest with the same
+# vault the credentials use, and are NEVER returned to the browser — a rule the
+# console can display is a rule whose secret anyone with a session can read.
+_SECRET_KEYS = ("secret", "password")
+
+
+def _notif_row(r, reveal=False):
+    d = dict(r)
+    try:
+        cfg = json.loads(d.get("config") or "{}")
+    except (TypeError, ValueError):
+        cfg = {}
+    for k in _SECRET_KEYS:
+        if cfg.get(k):
+            cfg[k] = _dec(cfg[k]) if reveal else "********"
+    d["config"] = cfg
+    for k in ("on_success", "on_failure", "enabled"):
+        d[k] = bool(d.get(k))
+    return d
+
+
+def list_notifications(org_ids=None, reveal=False):
+    q = "SELECT * FROM notifications"
+    args = []
+    if org_ids is not None:
+        if not org_ids:
+            return []
+        q += " WHERE org_id IS NULL OR org_id IN (%s)" % ",".join("?" * len(org_ids))
+        args = list(org_ids)
+    q += " ORDER BY name COLLATE NOCASE"
+    with _connect() as c:
+        return [_notif_row(r, reveal) for r in c.execute(q, args).fetchall()]
+
+
+def get_notification(nid: int, reveal=False):
+    with _connect() as c:
+        r = c.execute("SELECT * FROM notifications WHERE id=?", (nid,)).fetchone()
+        return _notif_row(r, reveal) if r else None
+
+
+def _notif_config_for_store(cfg: dict, previous: dict | None = None) -> str:
+    cfg = dict(cfg or {})
+    prev = previous or {}
+    for k in _SECRET_KEYS:
+        val = cfg.get(k)
+        if val in (None, "", "********"):
+            # Unchanged: keep whatever was stored. The console sends back the
+            # mask it was given, and reading that as "clear the secret" would
+            # silently unsign every webhook the next time anyone edits a name.
+            cfg.pop(k, None)
+            if prev.get(k):
+                cfg[k] = prev[k]
+        else:
+            cfg[k] = _enc(str(val))
+    return json.dumps(cfg)
+
+
+def create_notification(name, kind, config, on_success, on_failure,
+                        project_id=None, org_id=None):
+    with _connect() as c:
+        cur = c.execute(
+            "INSERT INTO notifications(name,kind,config,on_success,on_failure,"
+            "project_id,enabled,org_id,created) VALUES(?,?,?,?,?,?,1,?,?)",
+            (name, kind, _notif_config_for_store(config), int(bool(on_success)),
+             int(bool(on_failure)), project_id, org_id, _now()))
+        nid = cur.lastrowid
+    return get_notification(nid)
+
+
+def update_notification(nid: int, fields):
+    with _connect() as c:
+        row = c.execute("SELECT * FROM notifications WHERE id=?", (nid,)).fetchone()
+        if not row:
+            return None
+        prev = json.loads(dict(row).get("config") or "{}")
+    sets, args = [], []
+    for col in ("name", "kind", "project_id"):
+        if col in fields and fields[col] is not None:
+            sets.append(f"{col}=?"); args.append(fields[col])
+    for col in ("on_success", "on_failure", "enabled"):
+        if col in fields and fields[col] is not None:
+            sets.append(f"{col}=?"); args.append(int(bool(fields[col])))
+    if "config" in fields and fields["config"] is not None:
+        sets.append("config=?"); args.append(_notif_config_for_store(fields["config"], prev))
+    if sets:
+        args.append(nid)
+        with _connect() as c:
+            c.execute(f"UPDATE notifications SET {', '.join(sets)} WHERE id=?", args)
+    return get_notification(nid)
+
+
+def delete_notification(nid: int) -> bool:
+    with _connect() as c:
+        return c.execute("DELETE FROM notifications WHERE id=?", (nid,)).rowcount > 0
+
+
+def record_notification(nid: int, ok: bool, detail: str) -> None:
+    with _connect() as c:
+        c.execute("UPDATE notifications SET last_status=?, last_detail=?, last_sent=? "
+                  "WHERE id=?", ("ok" if ok else "failed", (detail or "")[:300], _now(), nid))
+
+
+def notifications_for(project_id, org_id=None, reveal=True):
+    """The enabled rules that cover this project — its own, plus the global ones."""
+    with _connect() as c:
+        rows = c.execute(
+            "SELECT * FROM notifications WHERE enabled=1 AND "
+            "(project_id IS NULL OR project_id=?)", (project_id,)).fetchall()
+    out = [_notif_row(r, reveal) for r in rows]
+    if org_id is not None:
+        out = [n for n in out if n.get("org_id") in (None, org_id)]
+    return out
+
+
 def list_pipelines():
     with _connect() as c:
         rows = c.execute(
@@ -1611,6 +1746,21 @@ def list_pipelines():
             " JOIN projects pr ON pr.id=p.project_id ORDER BY p.updated DESC"
         ).fetchall()
         return [_pipeline_row(r) for r in rows]
+
+
+# Set by backend/app.py at import: called once per run that reaches a terminal
+# state. Lives here because set_run_status is the ONE place every runner finishes
+# through — seventeen call sites across three engines — and a notification hook
+# anywhere else would quietly miss some of them.
+_on_run_finished = None
+
+
+def set_run_finished_hook(fn) -> None:
+    global _on_run_finished
+    _on_run_finished = fn
+
+
+_TERMINAL = ("success", "failed", "error", "canceled")
 
 
 def set_run_status(run_id, status, exit_code=None, started=None, finished=None):
@@ -1624,6 +1774,15 @@ def set_run_status(run_id, status, exit_code=None, started=None, finished=None):
     args.append(run_id)
     with _connect() as c:
         c.execute(f"UPDATE runs SET {', '.join(sets)} WHERE id=?", args)
+    # AFTER the write and OUTSIDE the connection: the run is finished the moment
+    # its status is recorded. A notifier that raised, or blocked on an
+    # unreachable chat server, must not be able to undo that or hold the runner's
+    # thread — so it is called last, and its failure is swallowed here.
+    if status in _TERMINAL and _on_run_finished:
+        try:
+            _on_run_finished(run_id, status)
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def set_run_inventory(run_id, inventory_id):
