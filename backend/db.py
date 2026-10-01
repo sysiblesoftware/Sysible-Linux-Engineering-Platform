@@ -216,6 +216,40 @@ def init_db() -> None:
 
             -- Saved pipelines: a named, ordered list of run steps for a project,
             -- so a create->configure->maintain (or any) sequence can be re-run.
+            -- JOB TEMPLATES. The missing noun: a saved, named, launchable
+            -- automation. Before this, every launch was assembled from scratch,
+            -- and schedules and pipeline steps each re-specified the same five
+            -- fields — so "the nightly patch run" existed three times, in three
+            -- places, and they drifted. A template is the one definition they can
+            -- all point at, and the only object you can hand to someone who
+            -- cannot write a playbook.
+            --
+            -- ask_* say which fields the LAUNCHER may override. Everything else is
+            -- the author's decision and is not negotiable at launch time — that is
+            -- the whole difference between a template and a saved form.
+            CREATE TABLE IF NOT EXISTS job_templates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                kind TEXT NOT NULL DEFAULT 'ansible',   -- ansible | terraform | salt
+                target TEXT NOT NULL DEFAULT '',        -- playbook path / action / state
+                inventory_id INTEGER,
+                credential_id INTEGER,
+                extra_vars TEXT NOT NULL DEFAULT '{}',  -- JSON, the author's fixed vars
+                job_opts TEXT NOT NULL DEFAULT '{}',    -- JSON, the AAP option set
+                survey TEXT NOT NULL DEFAULT '[]',      -- JSON, see backend/surveys.py
+                ask_inventory INTEGER NOT NULL DEFAULT 0,
+                ask_credential INTEGER NOT NULL DEFAULT 0,
+                ask_limit INTEGER NOT NULL DEFAULT 0,
+                ask_tags INTEGER NOT NULL DEFAULT 0,
+                org_id INTEGER,
+                created_by TEXT NOT NULL DEFAULT '',
+                created INTEGER NOT NULL,
+                updated INTEGER NOT NULL,
+                FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+            );
+
             CREATE TABLE IF NOT EXISTS pipelines (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 project_id INTEGER NOT NULL,
@@ -1466,6 +1500,108 @@ def get_pipeline(pipeline_id):
     with _connect() as c:
         r = c.execute("SELECT * FROM pipelines WHERE id=?", (pipeline_id,)).fetchone()
         return _pipeline_row(r) if r else None
+
+
+# ---------------------------------------------------------------- job templates
+def _template_row(r):
+    d = dict(r)
+    for col in ("extra_vars", "job_opts", "survey"):
+        try:
+            d[col] = json.loads(d.get(col) or ("[]" if col == "survey" else "{}"))
+        except (TypeError, ValueError):
+            d[col] = [] if col == "survey" else {}
+    for col in ("ask_inventory", "ask_credential", "ask_limit", "ask_tags"):
+        d[col] = bool(d.get(col))
+    return d
+
+
+def list_templates(project_id: int | None = None, org_ids=None):
+    q = ("SELECT t.*, pr.name AS project_name, pr.slug AS project_slug"
+         " FROM job_templates t JOIN projects pr ON pr.id=t.project_id")
+    where, args = [], []
+    if project_id is not None:
+        where.append("t.project_id=?"); args.append(project_id)
+    if org_ids is not None:
+        if not org_ids:
+            return []
+        where.append("(t.org_id IS NULL OR t.org_id IN (%s))" % ",".join("?" * len(org_ids)))
+        args += list(org_ids)
+    if where:
+        q += " WHERE " + " AND ".join(where)
+    q += " ORDER BY t.name COLLATE NOCASE"
+    with _connect() as c:
+        return [_template_row(r) for r in c.execute(q, args).fetchall()]
+
+
+def get_template(tid: int):
+    with _connect() as c:
+        r = c.execute(
+            "SELECT t.*, pr.name AS project_name, pr.slug AS project_slug"
+            " FROM job_templates t JOIN projects pr ON pr.id=t.project_id WHERE t.id=?",
+            (tid,)).fetchone()
+        return _template_row(r) if r else None
+
+
+_TEMPLATE_FIELDS = ("name", "description", "kind", "target", "inventory_id",
+                    "credential_id", "extra_vars", "job_opts", "survey",
+                    "ask_inventory", "ask_credential", "ask_limit", "ask_tags")
+
+
+def create_template(project_id, fields, created_by="", org_id=None):
+    now = _now()
+    vals = _template_values(fields)
+    with _connect() as c:
+        cur = c.execute(
+            "INSERT INTO job_templates(project_id,name,description,kind,target,"
+            "inventory_id,credential_id,extra_vars,job_opts,survey,ask_inventory,"
+            "ask_credential,ask_limit,ask_tags,org_id,created_by,created,updated)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (project_id, *vals, org_id, created_by, now, now))
+        rid = cur.lastrowid
+    # OUTSIDE the `with`: sqlite3's connection context manager commits on exit,
+    # and get_template opens its own connection — reading from inside the block
+    # asks a second connection for a row that has not been committed yet, which
+    # under WAL returns nothing at all.
+    return get_template(rid)
+
+
+def update_template(tid: int, fields):
+    cur = get_template(tid)
+    if not cur:
+        return None
+    merged = {k: (fields[k] if k in fields and fields[k] is not None else cur.get(k))
+              for k in _TEMPLATE_FIELDS}
+    vals = _template_values(merged)
+    with _connect() as c:
+        c.execute(
+            "UPDATE job_templates SET name=?,description=?,kind=?,target=?,"
+            "inventory_id=?,credential_id=?,extra_vars=?,job_opts=?,survey=?,"
+            "ask_inventory=?,ask_credential=?,ask_limit=?,ask_tags=?,updated=?"
+            " WHERE id=?", (*vals, _now(), tid))
+    return get_template(tid)
+
+
+def _template_values(f):
+    return (
+        str(f.get("name") or "").strip(),
+        str(f.get("description") or "").strip(),
+        str(f.get("kind") or "ansible"),
+        str(f.get("target") or "").strip(),
+        f.get("inventory_id") or None,
+        f.get("credential_id") or None,
+        json.dumps(f.get("extra_vars") or {}),
+        json.dumps(f.get("job_opts") or {}),
+        json.dumps(f.get("survey") or []),
+        int(bool(f.get("ask_inventory"))),
+        int(bool(f.get("ask_credential"))),
+        int(bool(f.get("ask_limit"))),
+        int(bool(f.get("ask_tags"))),
+    )
+
+
+def delete_template(tid: int) -> bool:
+    with _connect() as c:
+        return c.execute("DELETE FROM job_templates WHERE id=?", (tid,)).rowcount > 0
 
 
 def list_pipelines():

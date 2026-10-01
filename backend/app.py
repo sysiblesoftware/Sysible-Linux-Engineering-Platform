@@ -29,7 +29,7 @@ from contextlib import asynccontextmanager
 from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse
 
-from . import controller_import, db, engines, gitops, infra, keydist, policy, projcfg, vault
+from . import controller_import, db, engines, gitops, infra, keydist, policy, projcfg, surveys, vault
 from .runners import ansible_runner, salt_runner, terraform_runner
 
 # Engine name -> runner.launch(run_id). Each runs to completion on a thread.
@@ -1730,7 +1730,7 @@ def _assert_step_org(project_org, credential_id=None, inventory_id=None):
 
 def _dispatch_run(project, kind, target, inventory_id, credential_id, extra_vars, actor,
                   become_password="", limit="", start_at_task="", tf_tool="",
-                  job_opts=None):
+                  job_opts=None, survey_secrets=None):
     """Create a run row and launch its engine on a background thread. Shared by the
     manual /runs route and the scheduler. Returns the run id. `become_password` is
     a transient per-run sudo password — stashed in memory, never persisted.
@@ -1755,6 +1755,12 @@ def _dispatch_run(project, kind, target, inventory_id, credential_id, extra_vars
         opts = {"limit": limit, "start_at_task": start_at_task, **(job_opts or {})}
         if any(opts.values()):
             ansible_runner.stash_opts(run_id, opts)
+        # Survey password answers reach the play as extra vars but are NEVER
+        # written to the run row — a re-run of this run gets the rest and is
+        # asked for the password again, which is the correct behaviour for a
+        # secret somebody typed into a form.
+        if survey_secrets:
+            ansible_runner.stash_secret_vars(run_id, survey_secrets)
     if kind == "terraform" and tf_tool:
         terraform_runner.stash_tool(run_id, tf_tool)
     db.log_audit("run_launched", actor, f"#{run_id} {kind} '{target}' on {project['name']}")
@@ -1946,6 +1952,156 @@ def pipeline_group_runs(group_id: str, request: Request, user: str = Depends(cur
 
 
 # ---- saved pipelines (named, re-runnable sequences) ----
+# ---------------------------------------------------------------- job templates
+#
+# A template is a saved, named automation: project + what to run + where + as
+# whom + the author's fixed variables + the option set + a survey. Before this,
+# every launch was assembled from scratch and schedules and pipeline steps each
+# re-specified the same fields, so one automation existed in three places and
+# they drifted apart. It is also the only object that can be handed to someone
+# who cannot write a playbook: they see the survey, not the playbook path.
+#
+# ask_* is what makes it a template rather than a saved form: it names the few
+# fields a LAUNCHER may override. Everything else is the author's decision and
+# is not negotiable at launch time.
+@app.get("/templates")
+def list_job_templates(request: Request, project_id: int | None = None,
+                       user: str = Depends(current_user)):
+    return {"templates": db.list_templates(project_id, _visible_org_ids(request))}
+
+
+@app.get("/templates/{tid}")
+def get_job_template(tid: int, request: Request, user: str = Depends(current_user)):
+    t = db.get_template(tid)
+    if not t:
+        raise HTTPException(status_code=404, detail="Template not found.")
+    _guard_object_org(request, t.get("org_id"), "viewer")
+    return t
+
+
+def _template_payload(body: dict, *, require_name: bool) -> dict:
+    """The writable fields, with the survey and options validated BEFORE saving.
+
+    A survey that cannot be answered, or an option set that ansible-playbook
+    would refuse, must fail here — in front of the author who wrote it — and not
+    at 02:00 in front of whoever the schedule runs for.
+    """
+    from .runners.ansible_runner import build_options
+    fields = {k: body.get(k) for k in db._TEMPLATE_FIELDS if k in body}
+    # On create the name is required; on edit it is only checked when the edit
+    # actually touches it — a PATCH of one field must not have to resend the rest.
+    if require_name or "name" in fields:
+        if not str(fields.get("name") or "").strip():
+            raise HTTPException(status_code=400, detail="A template needs a name.")
+    if "survey" in fields:
+        try:
+            fields["survey"] = surveys.validate_spec(fields["survey"])
+        except surveys.SurveyError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+    if fields.get("job_opts"):
+        _argv, _notes, err = build_options(fields["job_opts"])
+        if err:
+            raise HTTPException(status_code=400, detail=err)
+    return fields
+
+
+@app.post("/templates")
+def create_job_template(request: Request, body: dict = Body(...),
+                        user: str = Depends(require_operator)):
+    project = db.get_project(body.get("project_id"))
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    _guard_object_org(request, project.get("org_id"))
+    fields = _template_payload(body, require_name=True)
+    t = db.create_template(project["id"], fields, created_by=user,
+                           org_id=project.get("org_id"))
+    db.log_audit("template_create", user, f"#{t['id']} '{t['name']}' in '{project['name']}'")
+    return t
+
+
+@app.patch("/templates/{tid}")
+def update_job_template(tid: int, request: Request, body: dict = Body(...),
+                        user: str = Depends(require_operator)):
+    cur = db.get_template(tid)
+    if not cur:
+        raise HTTPException(status_code=404, detail="Template not found.")
+    _guard_object_org(request, cur.get("org_id"))
+    t = db.update_template(tid, _template_payload(body, require_name=False))
+    db.log_audit("template_update", user, f"#{tid} '{t['name']}'")
+    return t
+
+
+@app.delete("/templates/{tid}")
+def delete_job_template(tid: int, request: Request, user: str = Depends(require_operator)):
+    cur = db.get_template(tid)
+    if not cur:
+        raise HTTPException(status_code=404, detail="Template not found.")
+    _guard_object_org(request, cur.get("org_id"))
+    db.delete_template(tid)
+    db.log_audit("template_delete", user, f"#{tid} '{cur['name']}'")
+    return {"status": "deleted"}
+
+
+@app.post("/templates/{tid}/launch")
+def launch_job_template(tid: int, request: Request, body: dict = Body(default={}),
+                        user: str = Depends(require_operator)):
+    """Run a template. The body carries survey answers and the ask_* overrides —
+    and nothing else: a field the author did not open is taken from the template,
+    not from the request."""
+    t = db.get_template(tid)
+    if not t:
+        raise HTTPException(status_code=404, detail="Template not found.")
+    _guard_object_org(request, t.get("org_id"))
+    project = db.get_project(t["project_id"])
+    if not project:
+        raise HTTPException(status_code=404, detail="The template's project is gone.")
+
+    try:
+        answers, secret_vars = surveys.validate_answers(t.get("survey"), body.get("answers"))
+    except surveys.SurveyError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    # The author's vars are the base; survey answers layer on top. A survey can
+    # only set variables the survey declares, so it can never reach a var the
+    # author pinned here under a different name.
+    extra_vars = dict(t.get("extra_vars") or {})
+    extra_vars.update(answers)
+
+    # ask_* — and ONLY ask_*. An override for a field the author kept fixed is
+    # refused rather than ignored: silently dropping it would run something other
+    # than what the launcher asked for, and tell them it was fine.
+    inventory_id, credential_id = t.get("inventory_id"), t.get("credential_id")
+    opts = dict(t.get("job_opts") or {})
+    offered = {"inventory_id": "ask_inventory", "credential_id": "ask_credential",
+               "limit": "ask_limit", "tags": "ask_tags"}
+    for field, flag in offered.items():
+        if body.get(field) in (None, ""):
+            continue
+        if not t.get(flag):
+            raise HTTPException(
+                status_code=400,
+                detail=f"This template does not let the launcher set {field}. "
+                       f"Ask its author to turn on '{flag}'.")
+        if field == "inventory_id":
+            inventory_id = body[field]
+        elif field == "credential_id":
+            credential_id = body[field]
+        else:
+            opts[field] = body[field]
+
+    _assert_step_org(project.get("org_id"), credential_id, inventory_id)
+    run_id = _dispatch_run(
+        project, t.get("kind") or "ansible", t.get("target") or "",
+        inventory_id, credential_id, extra_vars, user,
+        become_password=str(body.get("become_password") or ""),
+        limit=str(opts.pop("limit", "") or ""),
+        start_at_task=str(opts.pop("start_at_task", "") or ""),
+        job_opts=opts, survey_secrets=secret_vars,
+    )
+    db.log_audit("template_launch", user, f"#{tid} '{t['name']}' -> run #{run_id}")
+    return {"status": "launched", "run_id": run_id, "template_id": tid}
+
+
 @app.get("/pipelines")
 def list_saved_pipelines(request: Request, user: str = Depends(current_user)):
     vis = _visible_org_ids(request)

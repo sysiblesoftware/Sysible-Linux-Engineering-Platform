@@ -57,6 +57,23 @@ def pop_opts(run_id: int) -> dict:
     return _RUNOPTS.pop(run_id, {})
 
 
+# Survey password answers. Same transient treatment as the become password: they
+# reach the play as extra vars through a 0600 file, and are never written to the
+# run row — so a re-run repeats everything except the secret, and asks for that
+# again. A secret persisted on a run is readable by anyone who can list runs.
+_SECRET_VARS: dict[int, dict] = {}
+
+
+def stash_secret_vars(run_id: int, values: dict) -> None:
+    values = {k: v for k, v in (values or {}).items() if v not in (None, "")}
+    if values:
+        _SECRET_VARS[run_id] = values
+
+
+def pop_secret_vars(run_id: int) -> dict:
+    return _SECRET_VARS.pop(run_id, {})
+
+
 # ---------------------------------------------------------------------------
 # Job options — the set AAP exposes on a job template, translated to argv.
 #
@@ -525,6 +542,17 @@ def launch(run_id: int) -> None:
                 finally:
                     os.close(fd)
                 cmd += ["-e", "@" + str(vfile)]
+
+            # Survey password answers: 0600 @file, never argv, never the run row.
+            survey_secrets = pop_secret_vars(run_id)
+            if survey_secrets:
+                sfile = tmp / "survey.json"
+                fd = os.open(str(sfile), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                try:
+                    os.write(fd, json.dumps(survey_secrets).encode())
+                finally:
+                    os.close(fd)
+                cmd += ["-e", "@" + str(sfile)]
 
             # Sudo/become password: a per-run override (transient), else the one
             # stored (encrypted) on the credential. Passed via a 0600 vars file so
