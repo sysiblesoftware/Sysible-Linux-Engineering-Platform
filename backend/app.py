@@ -56,7 +56,11 @@ def _scheduler_loop():
                         db.delete_schedule(s["id"])
                         continue
                     actor = f"schedule:{s.get('name') or s['id']}"
-                    if s["kind"] == "pipeline":
+                    if s["kind"] == "template":
+                        # target holds the template id — one definition, fired
+                        # the same way the console fires it.
+                        run_id = _launch_template(int(s["target"]), actor)
+                    elif s["kind"] == "pipeline":
                         # target holds the saved pipeline id — fire the whole sequence.
                         pl = db.get_pipeline(int(s["target"]))
                         if not pl:
@@ -1782,6 +1786,17 @@ def _validate_steps(steps):
         raise HTTPException(status_code=400, detail="A pipeline needs at least one step.")
     for i, s in enumerate(steps, 1):
         kind = s.get("kind")
+        if kind == "template":
+            # A step that runs a saved template: one definition, not a second copy
+            # of the same five fields living inside a pipeline.
+            t = db.get_template(int(s["target"])) if str(s.get("target") or "").isdigit() else None
+            if not t:
+                raise HTTPException(status_code=400,
+                                    detail=f"Step {i}: no such job template.")
+            blocked = unattended_blockers(t)
+            if blocked:
+                raise HTTPException(status_code=400, detail=f"Step {i}: {blocked}")
+            continue
         if kind not in RUNNERS and kind not in _PSEUDO_STEPS:
             raise HTTPException(status_code=400, detail=f"Step {i}: unknown engine '{kind}'.")
         if kind not in _PSEUDO_STEPS and not str(s.get("target") or "").strip():
@@ -1810,6 +1825,16 @@ def _dispatch_pipeline(project, steps, actor, stop_on_failure=True):
     _porg = project.get("org_id")
     for s in steps:
         kind = s.get("kind")
+        # A template step is EXPANDED here, into exactly the row the step would be
+        # if its five fields had been written out longhand — so it joins the
+        # pipeline's group, shows up in the queued sequence, and the operator sees
+        # one list of runs rather than a pipeline that spawns a stray run.
+        if kind == "template":
+            r = _resolve_template(int(s["target"]), actor)
+            s = {**s, "kind": r["kind"], "target": r["target"],
+                 "inventory_id": r["inventory_id"], "credential_id": r["credential_id"],
+                 "extra_vars": r["extra_vars"], **r["opts"]}
+            kind = r["kind"]
         # Same cross-tenant guard the per-run path enforces: a step must not reference
         # another org's credential/inventory (pipelines bypassed this before).
         _assert_step_org(_porg, s.get("credential_id"), s.get("inventory_id"))
@@ -1823,9 +1848,12 @@ def _dispatch_pipeline(project, steps, actor, stop_on_failure=True):
         if kind == "ansible":
             if s.get("become_password"):
                 ansible_runner.stash_become(rid, str(s["become_password"]))
-            if s.get("limit") or s.get("start_at_task"):
-                ansible_runner.stash_opts(rid, {"limit": str(s.get("limit") or "").strip(),
-                                                "start_at_task": str(s.get("start_at_task") or "").strip()})
+            _step_opts = {k: s[k] for k in
+                          ("limit", "start_at_task", "tags", "skip_tags", "check",
+                           "diff", "force_handlers", "verbosity", "idempotence")
+                          if s.get(k)}
+            if _step_opts:
+                ansible_runner.stash_opts(rid, _step_opts)
         if kind == "terraform" and s.get("tool"):
             terraform_runner.stash_tool(rid, str(s["tool"]))
         # Carry the enroll step's chosen Controller + environment (if any) to the worker.
@@ -2042,16 +2070,40 @@ def delete_job_template(tid: int, request: Request, user: str = Depends(require_
     return {"status": "deleted"}
 
 
-@app.post("/templates/{tid}/launch")
-def launch_job_template(tid: int, request: Request, body: dict = Body(default={}),
-                        user: str = Depends(require_operator)):
-    """Run a template. The body carries survey answers and the ask_* overrides —
-    and nothing else: a field the author did not open is taken from the template,
-    not from the request."""
+def unattended_blockers(t) -> str:
+    """Why this template cannot be fired without a person, or "".
+
+    A schedule and a pipeline step have nobody to ask. A required survey field
+    with no default would stop the launch at 02:00, every night, for as long as
+    nobody looks — so it is refused when the schedule is SAVED instead.
+    """
+    unanswerable = [f.get("label") or f["var"] for f in (t.get("survey") or [])
+                    if f.get("required") and "default" not in f]
+    if unanswerable:
+        return (f"'{t['name']}' asks for {', '.join(unanswerable)} when it is launched, "
+                f"and an unattended run has nobody to ask. Give those survey fields a "
+                f"default, or make them optional.")
+    return ""
+
+
+def _resolve_template(tid: int, actor: str, body=None, request=None) -> dict:
+    """A template plus this launch's answers, flattened to run parameters.
+
+    Separate from the dispatch because a pipeline does not dispatch its steps —
+    it queues every run row up front so the whole sequence is visible at once,
+    then executes them. A template step has to expand into one of those rows, the
+    same as if the author had written the step out longhand.
+
+    One resolver for all three callers, so a schedule and a pipeline step get the
+    same variable merge, the same ask_* boundary and the same validation the
+    console gets — rather than three ways to run the same automation.
+    """
+    body = body or {}
     t = db.get_template(tid)
     if not t:
         raise HTTPException(status_code=404, detail="Template not found.")
-    _guard_object_org(request, t.get("org_id"))
+    if request is not None:
+        _guard_object_org(request, t.get("org_id"))
     project = db.get_project(t["project_id"])
     if not project:
         raise HTTPException(status_code=404, detail="The template's project is gone.")
@@ -2090,15 +2142,36 @@ def launch_job_template(tid: int, request: Request, body: dict = Body(default={}
             opts[field] = body[field]
 
     _assert_step_org(project.get("org_id"), credential_id, inventory_id)
+    return {
+        "template": t, "project": project,
+        "kind": t.get("kind") or "ansible", "target": t.get("target") or "",
+        "inventory_id": inventory_id, "credential_id": credential_id,
+        "extra_vars": extra_vars, "opts": opts, "secrets": secret_vars,
+        "become_password": str(body.get("become_password") or ""),
+    }
+
+
+def _launch_template(tid: int, actor: str, body=None, request=None) -> int:
+    r = _resolve_template(tid, actor, body, request)
+    opts = dict(r["opts"])
     run_id = _dispatch_run(
-        project, t.get("kind") or "ansible", t.get("target") or "",
-        inventory_id, credential_id, extra_vars, user,
-        become_password=str(body.get("become_password") or ""),
+        r["project"], r["kind"], r["target"], r["inventory_id"], r["credential_id"],
+        r["extra_vars"], actor, become_password=r["become_password"],
         limit=str(opts.pop("limit", "") or ""),
         start_at_task=str(opts.pop("start_at_task", "") or ""),
-        job_opts=opts, survey_secrets=secret_vars,
+        job_opts=opts, survey_secrets=r["secrets"],
     )
-    db.log_audit("template_launch", user, f"#{tid} '{t['name']}' -> run #{run_id}")
+    db.log_audit("template_launch", actor, f"#{tid} '{r['template']['name']}' -> run #{run_id}")
+    return run_id
+
+
+@app.post("/templates/{tid}/launch")
+def launch_job_template(tid: int, request: Request, body: dict = Body(default={}),
+                        user: str = Depends(require_operator)):
+    """Run a template. The body carries survey answers and the ask_* overrides —
+    and nothing else: a field the author did not open is taken from the template,
+    not from the request."""
+    run_id = _launch_template(tid, user, body, request)
     return {"status": "launched", "run_id": run_id, "template_id": tid}
 
 
@@ -2311,11 +2384,24 @@ def schedules_create(request: Request, body: dict = Body(...), user: str = Depen
         raise HTTPException(status_code=404, detail="Project not found.")
     _guard_project(request, project["id"], "operator")
     kind = str(body.get("kind") or "ansible")
-    if kind not in RUNNERS and kind != "pipeline":
+    if kind not in RUNNERS and kind not in ("pipeline", "template"):
         raise HTTPException(status_code=400, detail=f"Unknown engine '{kind}'.")
     target = str(body.get("target") or "").strip()
     if not target:
         raise HTTPException(status_code=400, detail="target is required.")
+    # A template schedule stores the template id as its target. Check it exists,
+    # and that it can actually run with nobody there: a required survey field
+    # with no default would stop the launch at 02:00, every night, silently.
+    if kind == "template":
+        t = db.get_template(int(target)) if target.isdigit() else None
+        if not t:
+            raise HTTPException(status_code=400, detail="No such job template.")
+        if t["project_id"] != project["id"]:
+            raise HTTPException(status_code=400,
+                                detail="That template belongs to another project.")
+        blocked = unattended_blockers(t)
+        if blocked:
+            raise HTTPException(status_code=400, detail=blocked)
     # A pipeline schedule stores the saved-pipeline id as its target — check it
     # exists and belongs to the chosen project so the scheduler can fire it.
     if kind == "pipeline":

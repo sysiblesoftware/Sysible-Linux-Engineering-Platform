@@ -219,3 +219,68 @@ def test_an_edit_cannot_blank_the_name(client, project):
     t = _tmpl(client, project)
     assert client.patch(f"/templates/{t['id']}", json={"name": "  "}).status_code == 400
     assert client.get(f"/templates/{t['id']}").json()["name"] == "Patch the web tier"
+
+
+# ---- one definition, three places that can run it ---------------------------
+def test_a_schedule_can_fire_a_template(client, project):
+    """The payoff: the nightly run stops being a second copy of the same five
+    fields and becomes a pointer at the one definition."""
+    t = _tmpl(client, project, target="patch.yml")
+    r = client.post("/schedules", json={
+        "name": "Nightly patch", "project_id": project["id"], "kind": "template",
+        "target": str(t["id"]), "cadence": "daily", "at": "02:00"})
+    assert r.status_code == 200, r.text
+    assert r.json()["kind"] == "template"
+
+
+def test_a_schedule_cannot_point_at_a_template_that_needs_an_answer(client, project):
+    """There is nobody at 02:00 to answer a required survey field. Refusing it
+    when the schedule is SAVED beats a launch that fails every night in silence."""
+    t = _tmpl(client, project, survey=[{"var": "app_version", "kind": "text",
+                                        "required": True, "label": "Version"}])
+    r = client.post("/schedules", json={
+        "project_id": project["id"], "kind": "template", "target": str(t["id"]),
+        "cadence": "daily", "at": "02:00"})
+    assert r.status_code == 400
+    assert "nobody to ask" in r.json()["detail"] and "Version" in r.json()["detail"]
+
+
+def test_a_required_field_with_a_default_can_be_scheduled(client, project):
+    t = _tmpl(client, project, survey=[{"var": "env", "kind": "text",
+                                        "required": True, "default": "prod"}])
+    assert client.post("/schedules", json={
+        "project_id": project["id"], "kind": "template", "target": str(t["id"]),
+        "cadence": "daily", "at": "02:00"}).status_code == 200
+
+
+def test_a_schedule_cannot_point_at_another_projects_template(client, project):
+    other = client.post("/projects", json={"name": "Other proj"}).json()
+    t = _tmpl(client, other)
+    r = client.post("/schedules", json={
+        "project_id": project["id"], "kind": "template", "target": str(t["id"]),
+        "cadence": "daily", "at": "02:00"})
+    assert r.status_code == 400 and "another project" in r.json()["detail"]
+
+
+def test_a_pipeline_step_can_be_a_template(client, project):
+    t = _tmpl(client, project, target="deploy.yml")
+    r = client.post("/pipelines", json={
+        "project_id": project["id"], "name": "Build then deploy",
+        "steps": [{"kind": "terraform", "target": "apply"},
+                  {"kind": "template", "target": str(t["id"])}]})
+    assert r.status_code == 200, r.text
+
+
+def test_a_pipeline_step_pointing_at_nothing_is_refused(client, project):
+    r = client.post("/pipelines", json={
+        "project_id": project["id"], "name": "Broken",
+        "steps": [{"kind": "template", "target": "99999"}]})
+    assert r.status_code == 400 and "no such job template" in r.json()["detail"].lower()
+
+
+def test_a_pipeline_step_cannot_need_an_answer_either(client, project):
+    t = _tmpl(client, project, survey=[{"var": "v", "kind": "text", "required": True}])
+    r = client.post("/pipelines", json={
+        "project_id": project["id"], "name": "Needs input",
+        "steps": [{"kind": "template", "target": str(t["id"])}]})
+    assert r.status_code == 400 and "nobody to ask" in r.json()["detail"]
