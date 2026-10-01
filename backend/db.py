@@ -76,6 +76,8 @@ def init_db() -> None:
                 scm_url TEXT DEFAULT '',
                 scm_branch TEXT DEFAULT '',
                 git_token TEXT DEFAULT '',          -- encrypted push/pull token
+                galaxy_servers TEXT DEFAULT '',     -- ordered Galaxy/Hub URLs, one per line
+                galaxy_token TEXT DEFAULT '',       -- encrypted Galaxy/Hub API token
                 created INTEGER NOT NULL,
                 updated INTEGER NOT NULL
             );
@@ -352,6 +354,13 @@ def init_db() -> None:
         proj_cols = [r["name"] for r in c.execute("PRAGMA table_info(projects)")]
         if "git_token" not in proj_cols:
             c.execute("ALTER TABLE projects ADD COLUMN git_token TEXT DEFAULT ''")
+        # Private Galaxy / Automation Hub for this project's role + collection
+        # content. The token is encrypted like git_token and never returned to
+        # the browser; the server list is an ordered, newline-separated list.
+        if "galaxy_servers" not in proj_cols:
+            c.execute("ALTER TABLE projects ADD COLUMN galaxy_servers TEXT DEFAULT ''")
+        if "galaxy_token" not in proj_cols:
+            c.execute("ALTER TABLE projects ADD COLUMN galaxy_token TEXT DEFAULT ''")
         # group_id links the runs of one launched pipeline so the visualizer can
         # show the whole sequence.
         run_cols = [r["name"] for r in c.execute("PRAGMA table_info(runs)")]
@@ -989,10 +998,16 @@ def touch_project(pid: int):
         c.execute("UPDATE projects SET updated=? WHERE id=?", (_now(), pid))
 
 
-def set_project_scm(pid: int, scm_url=None, scm_branch=None, git_token=None):
-    """Update a project's git remote URL / default branch / encrypted token.
-    None leaves a field unchanged."""
+def set_project_scm(pid: int, scm_url=None, scm_branch=None, git_token=None,
+                    galaxy_servers=None, galaxy_token=None):
+    """Update a project's git remote URL / default branch / encrypted token, and
+    its Galaxy server list + encrypted Galaxy token. None leaves a field
+    unchanged."""
     sets, vals = [], []
+    if galaxy_servers is not None:
+        sets.append("galaxy_servers=?"); vals.append(galaxy_servers)
+    if galaxy_token is not None:
+        sets.append("galaxy_token=?"); vals.append(galaxy_token)
     if scm_url is not None:
         sets.append("scm_url=?"); vals.append(scm_url)
     if scm_branch is not None:

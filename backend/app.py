@@ -29,8 +29,8 @@ from contextlib import asynccontextmanager
 from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse
 
-from . import (controller_import, db, engines, gitops, infra, keydist, notifications,
-               policy, projcfg, surveys, vault)
+from . import (controller_import, db, engines, galaxy, gitops, infra, keydist,
+               notifications, policy, projcfg, surveys, vault)
 from .runners import ansible_runner, salt_runner, terraform_runner
 
 # Engine name -> runner.launch(run_id). Each runs to completion on a thread.
@@ -1981,6 +1981,105 @@ def pipeline_group_runs(group_id: str, request: Request, user: str = Depends(cur
 
 
 # ---- saved pipelines (named, re-runnable sequences) ----
+# ------------------------------------------------------- project content (galaxy)
+#
+# AAP's "role management" is project sync: install the project's own
+# roles/requirements.yml and collections/requirements.yml INTO the project, from
+# an ordered list of servers, with a token for private content. SLEP had a
+# global five-collection install and nothing else, so a playbook that depended on
+# a role simply did not run.
+@app.get("/projects/{pid}/content")
+def project_content(pid: int, request: Request, user: str = Depends(current_user)):
+    project = db.get_project(pid)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    _guard_object_org(request, project.get("org_id"), "viewer")
+    root = db.project_dir(pid)
+    return {"requirements": galaxy.requirements(root), "installed": galaxy.installed(root)}
+
+
+@app.post("/projects/{pid}/content/galaxy")
+def project_galaxy_settings(pid: int, request: Request, body: dict = Body(...),
+                            user: str = Depends(require_operator)):
+    """Point this project at a private Galaxy / Automation Hub.
+
+    The token is encrypted at rest and never returned — same handling as the git
+    push token beside it. Sending "" clears it; omitting it leaves it alone, so
+    editing the server list does not silently drop the credential."""
+    project = db.get_project(pid)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    _guard_object_org(request, project.get("org_id"))
+    servers = body.get("servers")
+    if isinstance(servers, list):
+        servers = "\n".join(str(x).strip() for x in servers if str(x).strip())
+    elif servers is not None:
+        servers = str(servers)
+    tok = body.get("token")
+    db.set_project_scm(
+        pid, galaxy_servers=servers,
+        galaxy_token=(vault.encrypt(str(tok)) if tok else ("" if tok == "" else None)))
+    db.log_audit("galaxy_settings", user, f"project '{project['name']}'")
+    return {"status": "saved"}
+
+
+@app.post("/projects/{pid}/content/sync")
+def project_content_sync(pid: int, request: Request, body: dict = Body(default={}),
+                         user: str = Depends(require_operator)):
+    """Install this project's declared roles and collections.
+
+    Streams into a normal run log, so it is tailed, listed and audited exactly
+    like every other thing SLEP does — rather than being a special progress bar
+    nobody can find afterwards.
+    """
+    project = db.get_project(pid)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    _guard_object_org(request, project.get("org_id"))
+    root = db.project_dir(pid)
+    try:
+        galaxy.sync_commands(root)       # fail fast, before a run row exists
+    except galaxy.GalaxyError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    force = bool(body.get("force"))
+    servers = project.get("galaxy_servers") or []
+    if isinstance(servers, str):
+        servers = [x.strip() for x in servers.replace(",", "\n").splitlines() if x.strip()]
+    token = ""
+    if project.get("galaxy_token"):
+        try:
+            token = vault.decrypt(project["galaxy_token"])
+        except Exception:  # noqa: BLE001
+            token = ""
+
+    run_id = db.create_run(pid, "galaxy", "requirements.yml", created_by=user)
+    log_path = db.run_log_path(run_id)
+
+    def _work():
+        db.set_run_status(run_id, "running", started=int(time.time()))
+        rc = 1
+        try:
+            with open(log_path, "a", encoding="utf-8") as fh:
+                def emit(line):
+                    fh.write(line if line.endswith("\n") else line + "\n")
+                    fh.flush()
+                emit(f"== SLEP content sync · project '{project['name']}' ==\n")
+                rc = galaxy.sync(root, emit, force=force, servers=servers, token=token)
+        except Exception as e:  # noqa: BLE001
+            try:
+                with open(log_path, "a", encoding="utf-8") as fh:
+                    fh.write(f"!! sync aborted: {e}\n")
+            except OSError:
+                pass
+        db.set_run_status(run_id, "success" if rc == 0 else "failed",
+                          exit_code=rc, finished=int(time.time()))
+
+    threading.Thread(target=_work, name=f"galaxy-sync-{pid}", daemon=True).start()
+    db.log_audit("content_sync", user, f"project '{project['name']}'")
+    return {"status": "syncing", "run_id": run_id}
+
+
 # ---------------------------------------------------------------- notifications
 def _run_finished(run_id: int, status: str) -> None:
     """Fan a finished run out to whatever is listening. Never raises: db calls
