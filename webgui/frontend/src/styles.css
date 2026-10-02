@@ -69,6 +69,12 @@ button.danger{border-color:var(--danger);color:#ffb3b3}
 button.sm{padding:4px 9px;font-size:13px}
 input,select,textarea{font:inherit;background:var(--input-bg);border:1px solid var(--line);
   color:var(--text);padding:7px 9px;border-radius:7px;width:100%}
+/* The rule above is for text fields. A checkbox or radio inherited width:100% too,
+   so it stretched to fill its flex line: the glyph sat at the far left of an
+   invisible box and the label beside it was squeezed into wrapping ("Limit (which
+   hosts)" over three lines). Keep these at their intrinsic size. */
+input[type=checkbox],input[type=radio]{width:auto;flex:0 0 auto;padding:0;
+  margin:0;border-radius:0;accent-color:var(--accent)}
 textarea{resize:vertical;font-family:ui-monospace,Menlo,monospace}
 a{color:var(--accent2);cursor:pointer}
 .row{display:flex;gap:8px;align-items:center}

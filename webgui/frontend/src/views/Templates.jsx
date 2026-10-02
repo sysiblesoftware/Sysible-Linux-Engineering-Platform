@@ -289,7 +289,10 @@ function SurveyBuilder({ survey, setSurvey }) {
               <input type="checkbox" checked={!!fl.required}
                 onChange={(e) => up(i, { required: e.target.checked })} />Required
             </label>
-            <div className="row" style={{ gap: 4 }}>
+            {/* marginLeft:auto keeps these at the right edge of whichever wrapped
+                line they land on, instead of starting a new left-aligned row
+                under the Variable field. */}
+            <div className="row" style={{ gap: 4, marginLeft: 'auto' }}>
               <button className="ghost sm" onClick={() => move(i, -1)} disabled={i === 0}>↑</button>
               <button className="ghost sm" onClick={() => move(i, 1)} disabled={i === survey.length - 1}>↓</button>
               <button className="danger ghost sm" onClick={() => del(i)}>Remove</button>
