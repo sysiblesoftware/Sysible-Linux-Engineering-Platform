@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { api } from '../api.js'
+import ProjectContent from './ProjectContent.jsx'
 import { Field, Modal, useErr } from '../ui.jsx'
 import { useInfraRowActions } from './InfraActions.jsx'
 
@@ -13,6 +14,8 @@ export default function Projects({ onOpen, onOpenRun }) {
   const [orgs, setOrgs] = useState([])
   const [infraByPid, setInfraByPid] = useState({})  // project_id → infra row (for the ⋯ menu actions)
   const [newFor, setNewFor] = useState(undefined)   // undefined=closed; null=top-level; id=sub-project parent
+  // Roles/collections and molecule, for the project whose menu asked for it.
+  const [contentFor, setContentFor] = useState(null)
   const [moveP, setMoveP] = useState(null)          // project being reparented
   const [menuId, setMenuId] = useState(null)        // project whose ⋯ menu is open
   const [collapsed, setCollapsed] = useState({})    // {projectId: true} → children hidden
@@ -78,6 +81,8 @@ export default function Projects({ onOpen, onOpenRun }) {
                 onClose={() => setMenuId(null)}
                 items={[
                   { label: 'Open', accel: '↵', run: () => onOpen(p) },
+                  { label: 'Roles & collections…', run: () => setContentFor({ p, tab: 'content' }) },
+                  { label: 'Molecule tests…', run: () => setContentFor({ p, tab: 'molecule' }) },
                   { label: 'Add sub-project', run: () => setNewFor(p.id) },
                   { label: 'Move…', run: () => setMoveP(p) },
                   ...itemsFor(infraByPid[p.id]),
@@ -121,6 +126,10 @@ export default function Projects({ onOpen, onOpenRun }) {
         <MoveProject p={moveP} targets={moveTargetsFor(moveP)}
           onClose={() => setMoveP(null)}
           onMove={(parentId) => { setMoveP(null); move(moveP, parentId) }} />
+      )}
+      {contentFor && (
+        <ProjectContent project={contentFor.p} tab={contentFor.tab}
+          onClose={() => setContentFor(null)} onOpenRun={onOpenRun} />
       )}
       {infraModals}
     </>

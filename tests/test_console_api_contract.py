@@ -18,6 +18,7 @@ SRC = Path(__file__).resolve().parents[1] / "webgui" / "frontend" / "src"
 VIEWS = {
     "Templates": SRC / "views" / "Templates.jsx",
     "Notifications": SRC / "views" / "Notifications.jsx",
+    "ProjectContent": SRC / "views" / "ProjectContent.jsx",
 }
 
 
@@ -161,3 +162,86 @@ def test_the_views_are_reachable_from_the_navigation():
         assert f"key: '{key}'" in app_jsx, f"{key} is not in the nav"
         assert f"import {comp} from './views/{comp}.jsx'" in app_jsx
         assert f"view === '{key}'" in app_jsx, f"{key} is in the nav but renders nothing"
+
+
+# ------------------------------------------------- roles, collections and molecule
+def test_the_content_view_reads_the_keys_the_api_returns(client, project):
+    """`requirements` / `installed`, and the sub-keys under them."""
+    body = client.get(f"/projects/{project['id']}/content").json()
+    assert set(body) == {"requirements", "installed"}
+    assert set(body["requirements"]) >= {"roles", "collections", "errors"}
+    assert set(body["installed"]) == {"roles", "collections"}
+
+    text = VIEWS["ProjectContent"].read_text(encoding="utf-8")
+    for key in ("requirements", "installed", "errors", "roles", "collections"):
+        assert key in text, f"the view never reads '{key}'"
+
+
+def test_the_molecule_view_reads_the_fields_the_api_returns(client, project, tmp_path):
+    import backend.db as db
+    root = db.project_dir(project["id"])
+    (root / "molecule" / "default").mkdir(parents=True, exist_ok=True)
+    (root / "molecule" / "default" / "molecule.yml").write_text(
+        "driver:\n  name: delegated\n", encoding="utf-8")
+
+    body = client.get(f"/projects/{project['id']}/molecule").json()
+    assert "scenarios" in body and body["scenarios"], body
+    got = body["scenarios"][0]
+    assert set(got) == {"name", "driver", "runnable", "reason"}
+
+    text = VIEWS["ProjectContent"].read_text(encoding="utf-8")
+    assert "d.scenarios" in text
+    for f in ("s.name", "s.driver", "s.runnable", "s.reason"):
+        assert f in text, f"the view never reads {f}"
+
+
+def test_a_requirement_entry_uses_only_fields_galaxy_emits():
+    """The row renders name/version/src/source. A field the backend never sets would
+    render blank forever and nobody would notice."""
+    import inspect
+
+    from backend import galaxy
+    emitted = set(re.findall(r'"(\w+)"', re.search(
+        r"for k in \(([^)]*)\)", inspect.getsource(galaxy._entries)).group(1)))
+
+    # Only the requirement ROW. Searching the whole file picks up the `e` of
+    # `catch (e)` and `onChange={(e) => …}`, which are not entries at all.
+    text = VIEWS["ProjectContent"].read_text(encoding="utf-8")
+    block = text[text.index("declared(req).map("):text.index("{extra.length > 0")]
+    used = set(re.findall(r"\be\.(\w+)\b", block))
+    assert used, "the row block no longer reads any entry field — has it moved?"
+    assert used <= emitted, f"the view reads fields galaxy never emits: {used - emitted}"
+
+
+def test_launching_a_molecule_scenario_uses_the_runs_endpoint(client, project, routes):
+    """Not an invented /molecule/run — the generic launcher, with kind=molecule."""
+    text = VIEWS["ProjectContent"].read_text(encoding="utf-8")
+    assert "kind: 'molecule'" in text
+    assert ("POST", "/runs") in routes
+    import backend.app as app_mod
+    assert "molecule" in app_mod.RUNNERS
+
+
+def test_a_blank_galaxy_token_on_save_means_keep_not_clear(client, project):
+    """The editor omits an untouched token. If the API read that as "clear it",
+    renaming a server list would silently drop the credential."""
+    import backend.db as db
+    text = VIEWS["ProjectContent"].read_text(encoding="utf-8")
+    assert "...(token ? { token } : {})" in text, "the view now always sends the token"
+
+    pid = project["id"]
+    client.post(f"/projects/{pid}/content/galaxy",
+                json={"servers": "https://hub.example/api/galaxy/", "token": "s3cret"})
+    before = db.get_project(pid)["galaxy_token"]
+    assert before
+    client.post(f"/projects/{pid}/content/galaxy", json={"servers": "https://other/"})
+    assert db.get_project(pid)["galaxy_token"] == before, "the token was dropped"
+
+
+def test_the_panels_are_reachable_from_the_project_menu():
+    """A panel nobody can click is a panel nobody has."""
+    projects = (SRC / "views" / "Projects.jsx").read_text(encoding="utf-8")
+    assert "import ProjectContent from './ProjectContent.jsx'" in projects
+    assert "Roles & collections" in projects and "Molecule tests" in projects
+    assert "<ProjectContent" in projects
+    assert "onOpenRun={onOpenRun}" in projects, "a launched run would go nowhere"
