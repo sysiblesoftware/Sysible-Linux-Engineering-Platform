@@ -20,3 +20,11 @@ webgui/frontend/.vite/
 *.swp
 .idea/
 .vscode/
+
+# Local container env, written by SLOP's install.sh into the compose dir (the SSO
+# shared secret, the gateway trust flag, the base path). Untracked, it made
+# `git status --porcelain` dirty, and the updater refuses to pull a dirty checkout
+# — so every install permanently blocked its own updates ("the checkout has local
+# changes — resolve them on the host first"). It also holds a secret, which has no
+# business sitting one `git add -A` away from a commit.
+.env
