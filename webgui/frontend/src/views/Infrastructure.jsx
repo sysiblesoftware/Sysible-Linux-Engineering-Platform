@@ -41,11 +41,11 @@ export default function Infrastructure({ onOpenProject }) {
       </div>
       <div className="muted" style={{ marginBottom: 12 }}>
         The machines SLEP has built, and their live status. Infrastructure lives inside a project:
-        open a project and use <b>Build infra</b> to create it, then the lifecycle actions
+        open a project and use <b>Build Infrastructure</b> to create it, then the lifecycle actions
         (apply, configure, maintain, enroll) appear on top of the IDE and on the project’s row&nbsp;⋯ menu.
       </div>
       {rows.length === 0 ? (
-        <div className="muted">No infrastructure yet. Create a project in <b>Projects</b>, open it, and click <b>Build infra</b>.</div>
+        <div className="muted">No infrastructure yet. Create a project in <b>Projects</b>, open it, and click <b>Build Infrastructure</b>.</div>
       ) : (
         <table>
           <thead><tr><th>Name</th><th>Provider</th><th>VMs on hypervisor</th><th>Jump host</th><th>Enroll target</th></tr></thead>

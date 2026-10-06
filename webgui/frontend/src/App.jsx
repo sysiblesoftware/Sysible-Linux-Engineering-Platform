@@ -76,7 +76,7 @@ export default function App() {
   const [view, setView] = useState('projects')
   const [project, setProject] = useState(null)
   const [runId, setRunId] = useState(null)
-  const [infraBump, setInfraBump] = useState(0)   // bump → the IDE's infra bar refetches (e.g. after "Build infra")
+  const [infraBump, setInfraBump] = useState(0)   // bump → the IDE's infra bar refetches (e.g. after "Build Infrastructure")
   const [theme, setTheme] = useState(getTheme())
   useEffect(() => { applyTheme(theme) }, [theme])
 

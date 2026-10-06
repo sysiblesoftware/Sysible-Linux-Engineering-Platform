@@ -199,7 +199,7 @@ export default function Ide({ project, onBack, onRun, onInfraChanged, theme }) {
   const [pipeOpen, setPipeOpen] = useState(false)
   const [newOpen, setNewOpen] = useState(false)
   const [infraWizOpen, setInfraWizOpen] = useState(false)   // Build-infrastructure wizard for THIS project
-  const [isInfra, setIsInfra] = useState(false)             // already an infra project? (hides "Build infra")
+  const [isInfra, setIsInfra] = useState(false)             // already an infra project? (hides "Build Infrastructure")
   useEffect(() => { api('infra').then((d) => setIsInfra((d.infra || []).some((x) => x.project_id === project.id))).catch(() => {}) }, [project.id])
   const [taskOpen, setTaskOpen] = useState(false)
   const [playOpen, setPlayOpen] = useState(false)
@@ -470,7 +470,7 @@ export default function Ide({ project, onBack, onRun, onInfraChanged, theme }) {
           <button className="ghost sm" onClick={() => setNewOpen(true)}>＋ New file</button>
           {!isInfra && (
             <button className="ghost sm" title="Generate a full, working Terraform project here with the infrastructure wizard"
-              onClick={() => setInfraWizOpen(true)}>Build infra</button>
+              onClick={() => setInfraWizOpen(true)}>Build Infrastructure</button>
           )}
           {snip.engine === 'ansible' && (
             <button className="ghost sm" onClick={() => setPlayOpen(true)} disabled={path == null}
