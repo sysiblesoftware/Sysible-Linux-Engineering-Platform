@@ -25,7 +25,13 @@ services:
     image: sysible-slep:latest
     container_name: sysible-slep
     ports:
-      - "8810:8810"          # the web console over HTTPS (API via /api)
+      # The web console over HTTPS (API via /api). Defaults to every interface so
+      # a STANDALONE SLEP is unchanged; behind SLOP the installer sets this to the
+      # docker bridge gateway, so the console is reachable from this host and the
+      # Caddy gateway but not from the network. Otherwise the gateway's security
+      # headers and the platform's login throttle can be skipped by going straight
+      # to :8810.
+      - "${SYSIBLE_SLEP_BIND:-0.0.0.0}:8810:8810"
     volumes:
       - slep-data:/data
     environment:
