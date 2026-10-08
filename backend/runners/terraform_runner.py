@@ -422,13 +422,18 @@ def launch(run_id: int) -> None:
                 os.close(fd)
             var_args = ["-var-file", str(vf)]
         # Secret values must not be echoed into the (viewer-readable) run log.
-        redact = [str(v) for v in extra_vars.values() if str(v)]
+        # The credential's values belong here as much as extra_vars do: the cloud
+        # secret is in this process's environment and `terraform plan` prints
+        # resource attributes, so a provider error or a printed attribute can put
+        # ARM_CLIENT_SECRET in a log any authenticated viewer can open.
+        redact = _common.secret_values(credential, extra_vars)
 
         def run_action(upgrade: bool, refresh: bool = True) -> int:
             init = [tool, "init", "-input=false", "-no-color"]
             if upgrade:
                 init.append("-upgrade")
-            rc = _common.stream(init, workdir, env, log, run_id=run_id)
+            # init too: a backend-config failure quotes what it was given.
+            rc = _common.stream(init, workdir, env, log, redact=redact, run_id=run_id)
             if rc != 0:
                 emit(f"\n== {tool} init failed: exit {rc} ==")
                 return rc

@@ -589,9 +589,15 @@ def launch(run_id: int) -> None:
             if extra_ssh_args:
                 env["ANSIBLE_SSH_EXTRA_ARGS"] = (env.get("ANSIBLE_SSH_EXTRA_ARGS", "") + " " + extra_ssh_args).strip()
 
-            # Secret -e values must not be echoed into the (viewer-readable) log.
+            # Secret values must not be echoed into the (viewer-readable) log —
+            # the -e values, and the ssh_password, which is written into the
+            # inventory above in plaintext. `-vvv` prints that inventory, and a
+            # failing task quotes what it was given, so the echoed command line
+            # was never the only place a secret could appear. Both output loops
+            # below mask with the same list.
+            redact = _common.secret_values(credential, extra_vars)
             emit(f"== SLEP run #{run_id} · project '{project['name']}' ==")
-            emit(f"$ {_common.shown_cmd(cmd, [str(v) for v in extra_vars.values() if str(v)])}")
+            emit(f"$ {_common.shown_cmd(cmd, redact)}")
             emit(f"-- inventory: {len(hosts)} host(s); credential: "
                  f"{credential['name'] if credential else 'none'}"
                  f"{'; jump host: ' + bastion if bastion else ''} --\n")
@@ -611,7 +617,7 @@ def launch(run_id: int) -> None:
             unreachable = proxy_hop_closed = auth_denied = timed_out = False
             try:
                 for line in proc.stdout:      # live stream
-                    log.write(line)
+                    log.write(_common.mask(line, redact) if redact else line)
                     log.flush()
                     if "UNREACHABLE!" in line:
                         unreachable = True
@@ -661,10 +667,14 @@ def launch(run_id: int) -> None:
                 _common.register(run_id, proc2)
                 try:
                     for line in proc2.stdout:
-                        log.write(line)
+                        log.write(_common.mask(line, redact) if redact else line)
                         log.flush()
                         # Bounded: only the recap is needed, and a -vvvv run can
                         # pour out megabytes we would otherwise hold in memory.
+                        # The RAW line is kept, not the masked one: this feeds
+                        # changed_in_recap() and nothing else, it is never written
+                        # anywhere, and a mask landing inside "changed=0" would
+                        # silently break the idempotence verdict.
                         tail.append(line)
                         if len(tail) > 400:
                             del tail[:200]

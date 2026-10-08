@@ -124,6 +124,41 @@ def stream(cmd, cwd, env, log, redact=(), run_id=None) -> int:
         unregister(run_id)
 
 
+def secret_values(credential=None, extra_vars=None) -> list:
+    """Every secret value this run hands to the tool, for `redact`.
+
+    Run logs are readable by any authenticated viewer, and each runner injects
+    values the viewer is not entitled to see: extra_vars, the KEY=VALUE pairs a
+    cloud/env credential puts in the environment (AWS_SECRET_ACCESS_KEY,
+    ARM_CLIENT_SECRET, ...), and an ssh_password, which ansible and salt write
+    into the inventory/roster in plaintext. A tool echoes those back more readily
+    than it looks: `terraform plan` prints resource attributes, ansible -vvv
+    prints its inventory, and any task that fails quotes what it was given.
+
+    Each runner was assembling its own list, and each list was the extra_vars and
+    nothing else, so the credential values were never masked anywhere. One helper
+    so the three cannot drift apart again.
+
+    A private key is NOT here. Keys go to a 0600 file and are passed by path, so
+    they are never in-band, and a PEM is line-wrapped — masking it would need to
+    match per line, which is a different mechanism from this one.
+    """
+    out = []
+    for v in (extra_vars or {}).values():
+        if str(v):
+            out.append(str(v))
+    if credential and credential.get("secret"):
+        kind = credential.get("kind")
+        if kind in ("cloud", "env"):
+            # Only the VALUES. The names are not secret and masking them would
+            # make the log unreadable: "***=***" tells nobody anything.
+            injected = credential_env(credential, {})
+            out.extend(str(v) for v in injected.values() if str(v))
+        elif kind == "ssh_password":
+            out.append(str(credential["secret"]))
+    return [v for v in out if len(v) >= 3]
+
+
 def credential_env(credential, base_env) -> dict:
     """Merge a 'cloud' credential's secret (KEY=VALUE lines) into a copy of
     base_env. Blank lines and #comments are ignored. Non-cloud creds are a no-op

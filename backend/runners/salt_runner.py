@@ -192,9 +192,12 @@ def launch(run_id: int) -> None:
             emit(f"-- roster: {len(hosts)} host(s); credential: "
                  f"{credential['name'] if credential else 'none'}"
                  f"{'; test mode (dry-run)' if dry else ''} --")
-            # Secret pillar/kwarg values must not be echoed into the viewer-readable log.
+            # Secret pillar/kwarg values must not be echoed into the viewer-readable
+            # log — nor the ssh_password, which is written into the roster above in
+            # plaintext and which salt-ssh quotes back on an authentication error.
             rc = _common.stream(cmd, workdir, dict(os.environ), log,
-                                redact=[str(v) for v in extra_vars.values() if str(v)], run_id=run_id)
+                                redact=_common.secret_values(credential, extra_vars),
+                                run_id=run_id)
             if _common.is_stopped(run_id):
                 _common.clear_stop(run_id)
                 emit("\n== canceled by operator ==")
