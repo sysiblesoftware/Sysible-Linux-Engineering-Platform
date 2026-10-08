@@ -1,0 +1,39 @@
+# Every manifest here pins exactly — requirements.txt, package-lock.json, the
+# base image — which is right, and is also how a pin goes quietly stale. Nothing
+# was refreshing them, so a CVE in fastapi, ansible-core or a bundled front-end
+# package would sit in a pinned file indefinitely with nobody looking.
+#
+# Weekly, grouped per ecosystem, so the runtime and dev pins produce one pull
+# request rather than two.
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: /backend
+    schedule:
+      interval: weekly
+    groups:
+      python:
+        patterns: ["*"]
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: npm
+    directory: /webgui/frontend
+    schedule:
+      interval: weekly
+    groups:
+      frontend:
+        patterns: ["*"]
+
+  # The image SLEP builds on, and the images its compose file pins.
+  - package-ecosystem: docker
+    directory: /deploy
+    schedule:
+      interval: weekly
+    groups:
+      images:
+        patterns: ["*"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
