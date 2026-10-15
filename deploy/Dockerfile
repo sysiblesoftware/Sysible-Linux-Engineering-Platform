@@ -7,7 +7,7 @@
 # open :8810, done.
 
 # ---- stage 1: build the React console -------------------------------------
-FROM node:22-slim AS web
+FROM node:25-slim AS web
 WORKDIR /web
 # URL prefix the console is served under: "/" standalone, "/slep/" behind the SLOP
 # gateway (which path-routes /slep/* to this app on one shared origin). Vite bakes
@@ -21,7 +21,7 @@ COPY webgui/frontend/ ./
 RUN npm run build      # -> /web/dist
 
 # ---- stage 2: runtime ------------------------------------------------------
-FROM python:3.12-slim
+FROM python:3.14-slim
 
 # Engines + tooling: ssh client (Ansible/salt-ssh transport), sshpass (password
 # SSH auth for Ansible), git (SCM projects), curl/unzip (fetch terraform),
