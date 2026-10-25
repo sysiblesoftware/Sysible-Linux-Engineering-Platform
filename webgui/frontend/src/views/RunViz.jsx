@@ -3,7 +3,7 @@ import React, { useState } from 'react'
 // AAP-style run visualizations. Each takes the parsed model from runParse.js and
 // renders a live, at-a-glance picture of the run: which hosts the playbook is
 // reaching and how they're faring (Ansible), what Terraform is about to (or did)
-// change, and how each Salt minion came out. Purely presentational — the parser
+// change. Purely presentational — the parser
 // owns all the log-reading.
 
 const STATUS_COLOR = {
@@ -13,9 +13,9 @@ const STATUS_COLOR = {
 }
 
 // A run's status is "failed" the moment ANY target fails — but that alone reads as
-// if the whole fleet died when often just one of N hosts/minions broke. Given the
+// if the whole fleet died when often just one of N hosts broke. Given the
 // parsed model, return a precise tally so the pill can say "1/3 failed" instead of a
-// blanket "failed". Only Ansible + Salt have per-target results; returns null for
+// blanket "failed". Only Ansible has per-target results; returns null for
 // everything else (and when nothing failed — the plain status is clearer there).
 export function stageTally(engine, model) {
   if (!model) return null
@@ -27,31 +27,23 @@ export function stageTally(engine, model) {
     if (!total || !failed) return null
     return { failed, total, label: `${failed}/${total} failed`, title: `${failed} of ${total} host(s) failed` }
   }
-  if (engine === 'salt') {
-    const minions = Object.values(model.minions || {})
-    const total = minions.length
-    const failed = minions.filter((m) => (m.failed || 0) > 0).length
-    if (!total || !failed) return null
-    return { failed, total, label: `${failed}/${total} failed`, title: `${failed} of ${total} minion(s) failed` }
-  }
   return null
 }
 
 export default function RunViz({ engine, model, seedHosts }) {
   if (engine === 'terraform') return <TerraformViz model={model} />
-  if (engine === 'salt') return <SaltViz model={model} />
   if (engine === 'inventory') return <InventoryViz model={model} />
   if (engine === 'enroll') return <EnrollViz model={model} />
   return <AnsibleViz model={model} seedHosts={seedHosts} />
 }
 
-// The WHOLE run as a stage flow — Terraform → Inventory → Ansible → Salt (whatever
+// The WHOLE run as a stage flow — Terraform → Inventory → Ansible (whatever
 // steps were launched) — shown above the per-stage detail. Each node is one step's
 // run, coloured by its status, the one you're viewing ringed. Clicking a stage opens
 // that step's run, which swaps BOTH the detail viz and the log below to it — so the
 // log and steps track the stage you select. Renders nothing for a lone (non-pipeline)
 // run. `seq` is the group's runs [{id, kind, target, status}], from /pipelines/runs.
-const STAGE_ICON = { terraform: '⬢', inventory: '▤', ansible: '⏻', salt: '◆', enroll: '◈' }
+const STAGE_ICON = { terraform: '⬢', inventory: '▤', ansible: '⏻', enroll: '◈' }
 const STAGE_COLOR = {
   success: 'var(--ok,#63c869)', failed: 'var(--err,#e5534b)', canceled: '#7d8ca3',
   running: 'var(--warn,#e0a83b)', queued: '#7d8ca3', pending: '#7d8ca3',
@@ -100,7 +92,7 @@ function InventoryViz({ model }) {
           ? <div style={{ fontSize: 13 }}>✓ {built.trim()}</div>
           : <div className="muted">Reading the applied VMs into this project’s inventory…</div>}
       <div className="faint" style={{ fontSize: 12, marginTop: 10 }}>
-        The Ansible/Salt steps that follow in this sequence are pointed at the inventory built here.
+        The Ansible steps that follow in this sequence are pointed at the inventory built here.
       </div>
     </div>
   )
@@ -533,34 +525,3 @@ function MachineFlow({ machines, isDestroy = false, mlabel = (m) => (m.group ? `
   )
 }
 
-// ------------------------------------------------------------------ Salt
-function SaltViz({ model }) {
-  const minions = Object.entries(model.minions).map(([name, m]) => ({ name, ...m }))
-  return (
-    <div className="viz">
-      <div className="viz-head"><div style={{ fontWeight: 600 }}>Salt minions</div>
-        <div className="faint" style={{ fontSize: 12 }}>{minions.length} minion(s)</div></div>
-      {minions.length === 0 ? <div className="muted" style={{ padding: 8 }}>Waiting for minion results…</div> : (
-        <div className="viz-grid">
-          {minions.map((m) => {
-            const col = m.failed > 0 ? 'var(--err,#e5534b)' : m.changed > 0 ? 'var(--warn,#e0a83b)' : 'var(--ok,#63c869)'
-            return (
-              <div key={m.name} className="viz-host" style={{ borderLeft: `3px solid ${col}` }}>
-                <div className="row" style={{ justifyContent: 'space-between' }}>
-                  <b className="mono" style={{ fontSize: 13 }}>{m.name}</b>
-                  <span className="dot" style={{ background: col }} />
-                </div>
-                <div className="faint" style={{ fontSize: 11.5, marginTop: 4 }}>
-                  <span style={{ color: 'var(--ok,#63c869)' }}>{m.succeeded} ok</span>
-                  {m.changed ? <> · <span style={{ color: 'var(--warn,#e0a83b)' }}>{m.changed} changed</span></> : null}
-                  {m.failed ? <> · <span style={{ color: 'var(--err,#e5534b)' }}>{m.failed} failed</span></> : null}
-                  {m.total ? ` · ${m.total} states` : ''}
-                </div>
-              </div>
-            )
-          })}
-        </div>
-      )}
-    </div>
-  )
-}

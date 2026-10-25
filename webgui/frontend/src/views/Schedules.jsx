@@ -69,7 +69,7 @@ function NewSchedule({ onClose, onDone }) {
   useEffect(() => { api('inventories').then((d) => { setInvs(d.inventories); if (d.inventories[0]) setInv(String(d.inventories[0].id)) }) }, [])
   useEffect(() => { api('credentials').then((d) => setCreds(d.credentials)) }, [])
   useEffect(() => { api('pipelines').then((d) => setPipelines(d.pipelines || [])).catch(() => {}) }, [])
-  useEffect(() => { if (engine === 'terraform') setTarget('plan'); else if (engine === 'salt') setTarget('highstate'); else if (engine === 'ansible') setTarget('site.yml') }, [engine])
+  useEffect(() => { if (engine === 'terraform') setTarget('plan'); else if (engine === 'ansible') setTarget('site.yml') }, [engine])
   const isPipeline = engine === 'pipeline'
   const needsInv = engine !== 'terraform' && !isPipeline
   // Pipelines belong to a project — offer only the ones for the chosen project.
@@ -89,7 +89,6 @@ function NewSchedule({ onClose, onDone }) {
         <select value={engine} onChange={(e) => setEngine(e.target.value)}>
           <option value="ansible">Ansible — playbook</option>
           <option value="terraform">Terraform — plan / apply / destroy</option>
-          <option value="salt">Salt — state.apply</option>
           <option value="pipeline">Pipeline — a saved multi-step run</option>
         </select>
       </Field>

@@ -53,8 +53,9 @@ Monaco IDE's **clipboard/paste** and for encrypting the console across the netwo
 - Firewall the console port (8810) as needed; the backend stays on loopback inside
   the container and is never exposed.
 
-Salt (`salt-ssh`) is optional and left out of the default image to keep it lean —
-uncomment the `pip install salt` line in `deploy/Dockerfile` to bake it in.
+Salt is not part of SLEP. Keeping hosts in a declared configuration state is
+**Sysible Baseline**'s job — it installs and drives its own Salt, and reacts to
+Salt's event bus after a state is applied.
 
 ---
 
@@ -73,8 +74,8 @@ python3 -m venv .venv
 .venv/bin/pip install ansible-core          # Ansible (first-class today)
 # System tools the runners shell out to (Docker image bakes these in already):
 #   sudo apt install -y openssh-client sshpass    # sshpass = password-based SSH auth
-# terraform / salt: install per their vendors (Terraform via `sysible-tools` on
-# Sysible Server; salt via apt/pip). Runners for these land next.
+# terraform: install per its vendor (Terraform via `sysible-tools` on
+# Sysible Server).
 ```
 
 ## 2. Run the two services

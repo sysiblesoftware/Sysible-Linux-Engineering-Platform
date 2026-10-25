@@ -31,18 +31,62 @@ from fastapi.responses import PlainTextResponse
 
 from . import (controller_import, db, engines, galaxy, gitops, infra, keydist,
                notifications, policy, projcfg, surveys, vault)
-from .runners import ansible_runner, molecule_runner, salt_runner, terraform_runner
+from .runners import ansible_runner, molecule_runner, terraform_runner
 
 # Engine name -> runner.launch(run_id). Each runs to completion on a thread.
+#
+# SALT IS NOT HERE ANY MORE, AND THAT IS DELIBERATE. Configuration state moved
+# out of SLEP into Sysible Baseline, which drives Salt directly and reacts to
+# its event bus. SLEP builds and provisions things; Baseline keeps them in the
+# state they were built to.
+#
+# A project or schedule created before that move still has kind='salt' in the
+# database. Those rows are LEFT ALONE rather than deleted — they carry an
+# operator's target, inventory and history — and _refuse_removed_engine below
+# turns a launch into a run that fails with an explanation instead of a
+# KeyError in a background thread, where nobody would ever see it.
 RUNNERS = {
     "ansible": ansible_runner.launch,
     "terraform": terraform_runner.launch,
-    "salt": salt_runner.launch,
     # Not a fourth language — a verb on the Ansible content already in the
     # project: converge a role against a throwaway instance and prove it is
     # idempotent before it reaches the fleet.
     "molecule": molecule_runner.launch,
 }
+
+
+REMOVED_ENGINES = {
+    "salt": ("Salt moved to Sysible Baseline. SLEP no longer runs Salt states: "
+             "configuration state is Baseline's job, and it drives Salt directly "
+             "with its own event-driven follow-up. This project's target and "
+             "history are kept here, but it cannot be run from SLEP — recreate "
+             "it in Baseline."),
+}
+
+
+def _refuse_removed_engine(run_id, kind):
+    """Fail a run for an engine SLEP no longer has, with a reason in its log.
+
+    Not a KeyError: launches happen on a background thread, so an unhandled one
+    leaves the run wedged in 'running' forever with an empty log. An operator
+    whose nightly schedule quietly stopped working deserves a line saying what
+    happened and where the capability went.
+    """
+    why = REMOVED_ENGINES.get(kind, f"SLEP has no engine named {kind!r}.")
+    try:
+        with open(db.run_log_path(run_id), "a", encoding="utf-8") as fh:
+            fh.write(f"[slep] {why}\n")
+    except OSError:                                          # pragma: no cover
+        pass
+    db.set_run_status(run_id, "failed", exit_code=1, finished=int(time.time()))
+
+
+def _runner_for(kind):
+    """The launch callable for `kind`, or a refusal for an engine we removed."""
+    fn = RUNNERS.get(kind)
+    if fn is not None:
+        return fn
+    return lambda run_id: _refuse_removed_engine(run_id, kind)
 
 
 _scheduler_stop = threading.Event()
@@ -946,7 +990,7 @@ def write_file(pid: int, request: Request, body: dict = Body(...), user: str = D
 @app.post("/projects/{pid}/file")
 def create_path(pid: int, request: Request, body: dict = Body(...), user: str = Depends(current_user)):
     """Create a file or a directory (type=dir). An optional `content` seeds a new
-    file with starter text (e.g. a Terraform / Ansible / Salt template) — only
+    file with starter text (e.g. a Terraform / Ansible template) — only
     applied when the file doesn't already exist, so it never clobbers."""
     _guard_project(request, pid, "operator")
     path = str(body.get("path") or "").strip()
@@ -1344,7 +1388,7 @@ def inventories(request: Request, project_id: int | None = None, user: str = Dep
 # name. These charsets deliberately exclude spaces, quotes, newlines, and every shell
 # metacharacter ($ ` ; | & ( ) < > \ etc.) and forbid a leading '-' — so a value that
 # reaches an ssh argument, an ssh ProxyCommand string (which ssh re-tokenises through
-# /bin/sh), an INI inventory line, or a salt roster YAML value can never inject an
+# /bin/sh) or an INI inventory line can never inject an
 # option or a command. Validation happens at the INPUT boundary; renderers re-check.
 _RE_HOST = re.compile(r"^(?:\[[0-9A-Fa-f:]+\]|[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)$")
 _RE_USER = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]*$")
@@ -1508,7 +1552,7 @@ def add_host(iid: int, request: Request, body: dict = Body(...), user: str = Dep
     address = str(body.get("address") or "").strip() or name
     if not name:
         raise HTTPException(status_code=400, detail="Host name is required.")
-    # The address flows into ssh args, an INI inventory line, and a salt roster YAML
+    # The address flows into ssh args and an INI inventory line
     # value — reject anything that isn't a plain hostname/IP so it can't inject an
     # ssh option, an ansible connection var, or a roster directive.
     if not _valid_host(address):
@@ -1773,13 +1817,13 @@ def _dispatch_run(project, kind, target, inventory_id, credential_id, extra_vars
     if kind == "terraform" and tf_tool:
         terraform_runner.stash_tool(run_id, tf_tool)
     db.log_audit("run_launched", actor, f"#{run_id} {kind} '{target}' on {project['name']}")
-    threading.Thread(target=RUNNERS[kind], args=(run_id,), daemon=True).start()
+    threading.Thread(target=_runner_for(kind), args=(run_id,), daemon=True).start()
     return run_id
 
 
 # Pipeline steps are the real engines, plus the "inventory" pseudo-step: it has no
 # runner of its own — the worker reads the just-applied VMs into the project's
-# inventory and points the following Ansible/Salt steps at it.
+# inventory and points the following Ansible steps at it.
 # The pseudo-steps have no engine runner: "inventory" reads applied VMs into the
 # project inventory; "enroll" registers them into the project's Controller. Neither
 # needs a target.
@@ -1802,7 +1846,7 @@ def _validate_steps(steps):
             if blocked:
                 raise HTTPException(status_code=400, detail=f"Step {i}: {blocked}")
             continue
-        if kind not in RUNNERS and kind not in _PSEUDO_STEPS:
+        if kind not in RUNNERS and kind not in _PSEUDO_STEPS and kind not in REMOVED_ENGINES:
             raise HTTPException(status_code=400, detail=f"Step {i}: unknown engine '{kind}'.")
         if kind not in _PSEUDO_STEPS and not str(s.get("target") or "").strip():
             raise HTTPException(status_code=400, detail=f"Step {i}: a target is required.")
@@ -1871,17 +1915,17 @@ def _dispatch_pipeline(project, steps, actor, stop_on_failure=True):
             if kind == "inventory":
                 iid = _run_inventory_step(rid, project)
                 # Back-fill the inventory just built from the applied VMs into the
-                # following Ansible/Salt steps that don't already name one, so the
+                # following Ansible steps that don't already name one, so the
                 # sequence can configure/maintain the machines it just created.
                 if iid:
                     for rid2, kind2, _cid2, _env2 in prepared[i + 1:]:
                         r2 = db.get_run(rid2)
-                        if kind2 in ("ansible", "salt") and r2 and not r2.get("inventory_id"):
+                        if kind2 == "ansible" and r2 and not r2.get("inventory_id"):
                             db.set_run_inventory(rid2, iid)
             elif kind == "enroll":
                 _run_enroll_step(rid, project, actor, controller_id=cid, environment=env)
             else:
-                RUNNERS[kind](rid)        # blocking — runs to completion
+                _runner_for(kind)(rid)    # blocking — runs to completion
             r = db.get_run(rid)
             if stop_on_failure and (not r or r.get("status") != "success"):
                 for rid2, _, _, _ in prepared[i + 1:]:
@@ -1917,7 +1961,7 @@ def _run_inventory_step(run_id: int, project) -> int | None:
             db.set_run_status(run_id, "failed", exit_code=2, finished=int(time.time()))
             return None
         emit(f"Built inventory “{name}” (#{iid}) with {n} host(s).")
-        emit("The following Ansible/Salt steps in this sequence will target it.")
+        emit("The following Ansible steps in this sequence will target it.")
         emit("\n== finished: exit code 0 ==")
         db.set_run_status(run_id, "success", exit_code=0, finished=int(time.time()))
         return iid
@@ -2472,9 +2516,9 @@ def launch_run(request: Request, body: dict = Body(...), user: str = Depends(cur
                             detail=f"Unknown engine '{kind}'. One of: {', '.join(RUNNERS)}.")
     target = str(body.get("target") or "").strip()
     if not target:
-        # ansible: playbook path · terraform: plan/apply/destroy · salt: state name
+        # ansible: playbook path · terraform: plan/apply/destroy
         what = {"ansible": "playbook path", "terraform": "action (plan/apply/destroy)",
-                "salt": "state name"}.get(kind, "target")
+                }.get(kind, "target")
         raise HTTPException(status_code=400, detail=f"target ({what}) is required.")
     run_id = _dispatch_run(project, kind, target, body.get("inventory_id"),
                            body.get("credential_id"), body.get("extra_vars") or {}, user,
@@ -2682,7 +2726,6 @@ def health_warnings(user: str = Depends(current_user)):
     engine_bins = (
         (("ansible-playbook",), "Ansible", "ansible-playbook"),
         (("terraform", "tofu"), "Terraform", "terraform or tofu (OpenTofu)"),
-        (("salt-ssh",), "Salt", "salt-ssh"),
     )
     for binaries, engine, shown in engine_bins:
         if not any(shutil.which(b) for b in binaries):
@@ -3536,9 +3579,10 @@ def infra_install_hypervisor_key(request: Request, body: dict = Body(...), user:
 @app.post("/infra/{project_id}/scaffold")
 def infra_scaffold(project_id: int, request: Request, body: dict = Body(...), user: str = Depends(current_user)):
     """Scaffold the next cadence stage into an infra project: 'configure' writes a
-    starter Ansible playbook, 'maintain' a starter Salt state — so an operator goes
-    straight from built VMs to configuring/maintaining them. Won't overwrite an
-    existing file. Returns the path to open in the IDE."""
+    starter Ansible playbook — so an operator goes straight from built VMs to
+    configuring them. ('maintain' was a Salt state; keeping hosts in that state
+    is Sysible Baseline's job now.) Won't overwrite an existing file. Returns
+    the path to open in the IDE."""
     _guard_project(request, project_id, "operator")
     project = db.get_project(project_id)
     if not project:
@@ -3721,7 +3765,7 @@ def _derive_public_key(private_key: str) -> str:
 def infra_create(request: Request, body: dict = Body(...), user: str = Depends(require_operator)):
     """Generate a Terraform VM project from the wizard selections. A chosen deploy
     SSH credential's public key is baked into the VMs' cloud-init (so SLEP's own
-    Ansible/Salt can log in), as is a chosen Controller's key (so it can reach them
+    Ansible can log in), as is a chosen Controller's key (so it can reach them
     after boot); the project is tagged for one-click enroll."""
     name = str(body.get("name") or "").strip()
     provider = str(body.get("provider") or "")
@@ -3759,7 +3803,7 @@ def infra_create(request: Request, body: dict = Body(...), user: str = Depends(r
             controller_key = ""   # non-fatal: generate anyway, enroll can install the key later
 
     # Deploy credential: bake the public half of a SLEP SSH credential into the VMs
-    # so the same credential you pick for the cadence's Ansible/Salt steps can log in.
+    # so the same credential you pick for the cadence's Ansible steps can log in.
     deploy_key = ""
     deploy_cred_id = body.get("deploy_credential_id")
     if deploy_cred_id:
@@ -3985,7 +4029,7 @@ def _autobuild_infra_inventory(project_id: int, run=None):
     if run and run.get("group_id"):
         later_steps = [r for r in db.runs_in_group(run["group_id"])
                        if r.get("id", 0) > run.get("id", 0)
-                       and r.get("kind") in ("ansible", "salt")]
+                       and r.get("kind") == "ansible"]
 
     # If a downstream step already names an inventory, that's where the operator
     # expects the machines — target it directly instead of the default.

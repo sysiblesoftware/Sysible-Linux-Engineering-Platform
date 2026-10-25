@@ -1,8 +1,7 @@
 # Sysible Linux Engineering Platform — Community Edition, single container.
 #
 # One image runs both services (backend :9100 + web console :8810) with all three
-# engines baked in (Ansible + Terraform + Salt; Salt is toggleable via the
-# INSTALL_SALT build arg). SQLite + project workdirs + run logs live on the /data
+# engines baked in (Ansible + Terraform). SQLite + project workdirs + run logs live on the /data
 # volume. This is the "less of a hassle than AAP" promise: docker compose up,
 # open :8810, done.
 
@@ -23,7 +22,7 @@ RUN npm run build      # -> /web/dist
 # ---- stage 2: runtime ------------------------------------------------------
 FROM python:3.12-slim
 
-# Engines + tooling: ssh client (Ansible/salt-ssh transport), sshpass (password
+# Engines + tooling: ssh client (Ansible transport), sshpass (password
 # SSH auth for Ansible), git (SCM projects), curl/unzip (fetch terraform),
 # libvirt-clients (`virsh` — the "Test hypervisor connection" probe for the
 # libvirt/KVM VM builder), genisoimage (the dmacvicar/libvirt provider builds
@@ -58,19 +57,11 @@ COPY backend/requirements.txt backend/requirements.txt
 # sshpass (installed above) covers password SSH.
 RUN pip install --no-cache-dir -r backend/requirements.txt ansible
 
-# Salt (salt-ssh) is the third engine. It pulls C-extension deps (timelib) that
-# must be compiled, so we add a toolchain, build the wheels, then purge it in the
-# SAME layer — salt stays, the ~200 MB of build tools don't. Set INSTALL_SALT=0
-# (--build-arg) for a leaner image without Salt; the in-app installer can add it
-# later on a host that has a compiler.
-ARG INSTALL_SALT=1
-RUN if [ "$INSTALL_SALT" = "1" ]; then \
-      apt-get update && apt-get install -y --no-install-recommends gcc python3-dev libffi-dev \
-      && pip install --no-cache-dir --prefer-binary salt \
-      && apt-get purge -y gcc python3-dev libffi-dev && apt-get autoremove -y \
-      && rm -rf /var/lib/apt/lists/* ; \
-    fi
-
+# Salt is NOT installed here any more. Configuration state moved out of SLEP
+# into Sysible Baseline, which installs and drives its own Salt. This used to
+# cost a gcc/python3-dev/libffi toolchain added and purged in one layer just to
+# build Salt's timelib dependency — about 200 MB of build tools for an engine
+# this image no longer runs.
 COPY backend/ backend/
 COPY webgui/ webgui/
 COPY deploy/entrypoint.sh /entrypoint.sh

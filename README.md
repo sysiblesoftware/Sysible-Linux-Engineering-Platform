@@ -1,7 +1,7 @@
 
 # Sysible Linux Engineering Platform (SLEP)
 
-**Author, orchestrate, and run your automation — Ansible, Terraform, and Salt —
+**Author, orchestrate, and run your automation — Ansible and Terraform —
 from one self-hosted console, with a real in-browser IDE.**
 
 SLEP is to infrastructure *automation* what Sysible Controller is to fleet
@@ -19,7 +19,7 @@ IDE built in.
 
 - **[User Guide](docs/GUIDE.md)** — task-oriented walkthrough of every part of the
   console: projects & the IDE, inventories, credentials, running Ansible/Terraform/
-  Salt, provisioning VMs, connecting a Controller and enrolling hosts, pipelines,
+  provisioning VMs, connecting a Controller and enrolling hosts, pipelines,
   and troubleshooting.
 - **[Running SLEP](docs/RUNNING.md)** — install and day-2 operations (Docker, TLS,
   the `slep` CLI, backups).
@@ -29,7 +29,7 @@ IDE built in.
 <img width="2474" height="878" alt="Screenshot 2026-08-27 at 2 35 02 PM" src="https://github.com/user-attachments/assets/4de59dd6-6a8a-4203-98c9-b138dc77dc34" />
 
 
-- **Projects** — a workspace of playbooks / Terraform configs / Salt states,
+- **Projects** — a workspace of playbooks / Terraform configs,
   either authored right in the browser IDE or synced from Git.
 - **IDE** — a Monaco (VS Code) editor with a file tree, YAML/HCL/Jinja syntax,
   and a run panel. Write a playbook and run it without leaving the page.
@@ -38,7 +38,7 @@ IDE built in.
 - **Credentials** — SSH keys/passwords, cloud creds, vault tokens, stored server
   side and injected into runs, never surfaced to the browser.
 - **Runners** — execute `ansible-playbook`, `terraform plan/apply`, and
-  `salt`/`salt-ssh` in an isolated per-run workdir, streaming live output, with a
+  in an isolated per-run workdir, streaming live output, with a
   full run history.
 
 ## Why it exists (vs. AAP)
@@ -47,7 +47,7 @@ IDE built in.
 |---|---|
 | Kubernetes + Execution Environments + Operator | One container (or a venv), SQLite by default |
 | Automation mesh, receptors | Direct SSH (the way Ansible already works) |
-| Ansible only | Ansible **+ Terraform + Salt** |
+| Ansible only | Ansible **+ Terraform** |
 | Edit playbooks elsewhere, sync via SCM | **In-browser IDE**, SCM optional |
 | Heavy RBAC/licensing | Simple admin model, self-hosted |
 
@@ -82,7 +82,7 @@ Mirrors Sysible Controller so the two are operationally identical to run:
 ```
  Browser ──▶ Web console (BFF, :8810)  ──▶  Backend API (FastAPI, :9100)
                 React SPA + Monaco IDE          projects · inventory · runs
-                                                 └─▶ runners: ansible / terraform / salt
+                                                 └─▶ runners: ansible / terraform / molecule
                                                  └─▶ SSH ──▶ your hosts
                                                  └─▶ import ──▶ Sysible Controller /agents
 ```
@@ -101,7 +101,9 @@ Mirrors Sysible Controller so the two are operationally identical to run:
 
 Early MVP under active construction. First vertical slice: create a project,
 edit a playbook in the IDE, import/enter inventory, run `ansible-playbook`, watch
-the output stream. Terraform and Salt runners follow the same shape.
+the output stream. The Terraform and Molecule runners follow the same shape.
+
+Configuration state — keeping hosts in a declared state over time — is **Sysible Baseline**'s job, not SLEP's. Baseline drives Salt directly and reacts to its event bus; SLEP builds and provisions.
 
 ## Ports
 

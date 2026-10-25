@@ -114,9 +114,19 @@ def _src(name):
 
 
 def test_every_runner_uses_the_shared_helper():
-    """Three hand-rolled lists is how one of them ends up without the credential,
-    which is what had happened."""
-    for name in ("terraform_runner.py", "salt_runner.py", "ansible_runner.py"):
+    """Hand-rolled lists are how one of them ends up without the credential,
+    which is what had happened.
+
+    This covers the runners that interpolate OPERATOR-SUPPLIED values into a
+    command line — a credential, extra vars, pillar data. molecule_runner is
+    deliberately not among them: it converges a role against a throwaway
+    instance, takes no credential and no vars, and so has nothing per-run to
+    redact. Adding it here for symmetry only produces a failing test that
+    invites someone to paste a redact list it has no use for.
+
+    salt_runner was here until Salt moved to Sysible Baseline.
+    """
+    for name in ("terraform_runner.py", "ansible_runner.py"):
         src = _src(name)
         assert "_common.secret_values(" in src, f"{name} builds its own redact list"
         assert "for v in extra_vars.values()" not in src, \

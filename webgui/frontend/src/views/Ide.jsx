@@ -5,7 +5,6 @@ import { Field, Modal, useErr } from '../ui.jsx'
 import { SNIPPET_GROUPS as ANSIBLE_SNIPPETS, PLAY_GROUPS } from '../ansibleSnippets.js'
 import CollectionsInstall from '../components/CollectionsInstall.jsx'
 import { SNIPPET_GROUPS as TERRAFORM_SNIPPETS } from '../terraformSnippets.js'
-import { SNIPPET_GROUPS as SALT_SNIPPETS } from '../saltSnippets.js'
 import { SNIPPET_GROUPS as ANSIBLECFG_SNIPPETS } from '../ansibleCfgSnippets.js'
 import { CreateWizard } from './Infrastructure.jsx'
 
@@ -176,15 +175,13 @@ const langFor = (path) => {
 }
 
 // Pick the snippet library + wording for the open file's engine, so "+ Task"
-// becomes "+ Resource" on Terraform files and "+ State" on Salt states. Salt
-// SLS wins over the generic YAML→Ansible mapping.
+// becomes "+ Resource" on Terraform files.
 const snippetsFor = (path) => {
   const p = (path || '').toLowerCase()
   // ansible.cfg gets a settings palette (sections + options at their defaults) so
   // the config can be assembled from the menu rather than remembered/hand-typed.
   if (p === 'ansible.cfg' || p.endsWith('/ansible.cfg')) return { groups: ANSIBLECFG_SNIPPETS, verb: 'Setting', engine: 'ansiblecfg' }
   if (p.endsWith('.tf') || p.endsWith('.hcl')) return { groups: TERRAFORM_SNIPPETS, verb: 'Resource', engine: 'terraform' }
-  if (p.endsWith('.sls')) return { groups: SALT_SNIPPETS, verb: 'State', engine: 'salt' }
   // Ansible palette leads with playbook-structure blocks, then the task library.
   return { groups: [...PLAY_GROUPS, ...ANSIBLE_SNIPPETS], verb: 'Task', engine: 'ansible' }
 }
@@ -500,7 +497,7 @@ export default function Ide({ project, onBack, onRun, onInfraChanged, theme }) {
         </div>
         <div className="tree">
           <div className="tree-h"><span>Explorer</span><button className="tree-h-btn" title="New file" onClick={() => setNewOpen(true)}>＋</button></div>
-          {tree.length === 0 && <div className="muted" style={{ padding: 6, fontSize: 12 }}>Empty project. Click “＋ New file” to start from a template — Ansible playbook, Salt state, or Terraform.</div>}
+          {tree.length === 0 && <div className="muted" style={{ padding: 6, fontSize: 12 }}>Empty project. Click “＋ New file” to start from a template — Ansible playbook or Terraform.</div>}
           {tree.map((f) => {
             const depth = f.path.split('/').length - 1
             const base = f.path.split('/').pop()
@@ -637,10 +634,6 @@ const FILE_TEMPLATES = [
   ['Ansible playbook', 'site.yml',
     '---\n- name: Configure hosts\n  hosts: all\n  become: true\n  tasks:\n' +
     '    - name: Ping the host\n      ansible.builtin.ping:\n'],
-  ['Salt state', 'states/web.sls',
-    '# Salt state — apply with the Salt engine (state.apply / highstate).\n' +
-    'install_nginx:\n  pkg.installed:\n    - name: nginx\n\nnginx_running:\n' +
-    '  service.running:\n    - name: nginx\n    - enable: true\n'],
   ['Terraform', 'main.tf',
     '# Terraform — run with the Terraform/OpenTofu engine (plan / apply / destroy).\n' +
     '# For libvirt/cloud VMs, “Create infrastructure” in Projects scaffolds a full,\n' +
@@ -870,7 +863,7 @@ function NameModal({ title, label, placeholder, onClose, onSubmit }) {
   )
 }
 
-// Target picker for Ansible/Salt: a real dropdown that always lists every
+// Target picker for Ansible: a real dropdown that always lists every
 // matching file in the project (a bare <datalist> filters its options by the
 // text already in the box, so a pre-filled "main.yml" hides the rest). The
 // dropdown shows the full list whenever the project has files — even when the
@@ -908,7 +901,6 @@ export function RunModal({ project, currentFile, onClose, onLaunched, initial })
   const [newInvOpen, setNewInvOpen] = useState(false)
   const [cred, setCred] = useState(ini.credential_id ? String(ini.credential_id) : '')
   const [vars, setVars] = useState('')       // KEY=value per line
-  const [saltTest, setSaltTest] = useState(false)
   const [tfTool, setTfTool] = useState(ini.tool || 'terraform')   // terraform | tofu
   const [becomePw, setBecomePw] = useState('')   // per-run sudo override
   const [limit, setLimit] = useState(ini.limit || '')          // --limit
@@ -935,7 +927,7 @@ export function RunModal({ project, currentFile, onClose, onLaunched, initial })
   useEffect(() => { loadInvs() }, [])
   // Default the SSH credential to the ACCOUNT this project's VMs were built with —
   // the deploy credential set in ⚙ Access (or SLEP's managed key) — so Ansible and
-  // Salt authenticate as the same account cloud-init created, with no re-picking.
+  // authenticate as the same account cloud-init created, with no re-picking.
   useEffect(() => {
     api('credentials').then((d) => {
       setCreds(d.credentials)
@@ -951,12 +943,11 @@ export function RunModal({ project, currentFile, onClose, onLaunched, initial })
   }, [])   // eslint-disable-line
   useEffect(() => { if (project?.id) api(`projects/${project.id}/files`)
     .then((d) => setFiles((d.files || []).filter((f) => f.type === 'file').map((f) => f.path))).catch(() => {}) }, [project?.id])
-  const targetFiles = files.filter((p) => (engine === 'salt' ? p.endsWith('.sls') : (p.endsWith('.yml') || p.endsWith('.yaml'))))
+  const targetFiles = files.filter((p) => p.endsWith('.yml') || p.endsWith('.yaml'))
   const firstEngine = useRef(true)
   useEffect(() => {
     if (firstEngine.current) { firstEngine.current = false; return }   // keep a pre-filled target
     if (engine === 'terraform') setTarget('plan')
-    else if (engine === 'salt') setTarget('highstate')
     else setTarget(currentFile || 'site.yml')
   }, [engine])
 
@@ -967,7 +958,6 @@ export function RunModal({ project, currentFile, onClose, onLaunched, initial })
         <select value={engine} onChange={(e) => setEngine(e.target.value)}>
           <option value="ansible">Ansible — playbook</option>
           <option value="terraform">Terraform — plan / apply / destroy</option>
-          <option value="salt">Salt — state.apply (salt-ssh)</option>
         </select>
       </Field>
       {engine === 'terraform' && (
@@ -982,7 +972,7 @@ export function RunModal({ project, currentFile, onClose, onLaunched, initial })
         {engine === 'terraform'
           ? <select value={target} onChange={(e) => setTarget(e.target.value)}><option>plan</option><option>apply</option><option>destroy</option></select>
           : <FileTarget value={target} onChange={setTarget} files={targetFiles}
-                        placeholder={engine === 'salt' ? 'state.sls / highstate' : 'playbook.yml'} />}
+                        placeholder={'playbook.yml'} />}
       </Field>
       {needsInv && (
         <Field label="Inventory">
@@ -1000,7 +990,6 @@ export function RunModal({ project, currentFile, onClose, onLaunched, initial })
         </select>
       </Field>
       <Field label={engine === 'terraform' ? 'Variables — KEY=value per line (→ -var)'
-        : engine === 'salt' ? 'Pillar / kwargs — key=value per line'
           : 'Extra vars — KEY=value per line (→ -e)'}>
         <textarea rows={3} value={vars} onChange={(e) => setVars(e.target.value)}
           placeholder={engine === 'terraform' ? 'instance_type=t3.micro' : 'env=staging'}
@@ -1027,17 +1016,10 @@ export function RunModal({ project, currentFile, onClose, onLaunched, initial })
           </Field>
         </div>
       )}
-      {engine === 'salt' && (
-        <label className="row" style={{ gap: 8, fontSize: 13, cursor: 'pointer' }}>
-          <input type="checkbox" checked={saltTest} onChange={(e) => setSaltTest(e.target.checked)} style={{ width: 'auto' }} />
-          Test mode (dry-run — <span className="mono">test=True</span>, report changes without applying)
-        </label>
-      )}
       {node}
       <button className="primary" onClick={() => wrap(async () => {
         if (needsInv && !inv) throw new Error('Create and select an inventory first.')
         const extra = parseVars()
-        if (engine === 'salt' && saltTest) extra.test = 'True'
         const d = await api('runs', { method: 'POST', json: {
           project_id: project.id, kind: engine, target,
           inventory_id: needsInv ? Number(inv) : null, credential_id: cred ? Number(cred) : null,
@@ -1068,7 +1050,7 @@ export function PipelineModal({ project, currentFile, initialSteps, initialName,
   const [stopOnFail, setStopOnFail] = useState(stopDefault !== undefined ? stopDefault : true)
   const [name, setName] = useState(initialName || '')
   const blank = (over) => ({ kind: 'ansible', target: currentFile || 'site.yml', inventory_id: '', credential_id: '', tool: 'terraform',
-    vars: '', becomePw: '', limit: '', startAt: '', saltTest: false, controller_id: '', environment: '', ...over })
+    vars: '', becomePw: '', limit: '', startAt: '', controller_id: '', environment: '', ...over })
   // Load a Controller's environments (for the Enroll step's Environment picker), cached
   // per controller so switching back doesn't refetch. Empty list on an older Controller.
   const loadEnvs = (cid) => {
@@ -1079,7 +1061,7 @@ export function PipelineModal({ project, currentFile, initialSteps, initialName,
   const [steps, setSteps] = useState(initialSteps && initialSteps.length ? initialSteps.map((s) => blank(s)) : [blank()])
   const [openSteps, setOpenSteps] = useState(new Set())   // steps whose ⚙ options panel is expanded
   const toggleOpts = (i) => setOpenSteps((s) => { const n = new Set(s); n.has(i) ? n.delete(i) : n.add(i); return n })
-  // Parse a step's "KEY=value per line" box → object (→ -var / -e / pillar); salt
+  // Parse a step's "KEY=value per line" box → object (→ -var / -e)
   // test mode rides in as test=True.
   const stepVars = (st) => {
     const out = {}
@@ -1087,7 +1069,6 @@ export function PipelineModal({ project, currentFile, initialSteps, initialName,
       const l = raw.trim(); if (!l || l.startsWith('#')) continue
       const i = l.indexOf('='); if (i > 0) out[l.slice(0, i).trim()] = l.slice(i + 1).trim()
     }
-    if (st.kind === 'salt' && st.saltTest) out.test = 'True'
     return out
   }
   const isPseudo = (k) => k === 'inventory' || k === 'enroll'
@@ -1120,7 +1101,7 @@ export function PipelineModal({ project, currentFile, initialSteps, initialName,
     // Prefetch environments for any enroll step's controller so its picker is ready.
     for (const st of steps) if (st.kind === 'enroll') loadEnvs(st.controller_id || (cs[0] && String(cs[0].id)))
   }).catch(() => {}) }, [])   // eslint-disable-line
-  // Default each Ansible/Salt step's credential to the account this project's VMs
+  // Default each Ansible step's credential to the account this project's VMs
   // were built with (⚙ Access deploy credential, or SLEP's managed key), so the
   // whole cadence authenticates as one account with no per-step re-picking.
   useEffect(() => {
@@ -1132,7 +1113,7 @@ export function PipelineModal({ project, currentFile, initialSteps, initialName,
         if (!row) return
         const managed = (d.credentials || []).find((c) => c.name === 'SLEP managed key')
         const def = row.login_credential_id || row.deploy_credential_id || (managed && managed.id)
-        if (def) setSteps((s) => s.map((st) => (st.kind === 'ansible' || st.kind === 'salt')
+        if (def) setSteps((s) => s.map((st) => st.kind === 'ansible'
           ? { ...st, credential_id: st.credential_id || String(def) } : st))
       }).catch(() => {})
     })
@@ -1140,8 +1121,8 @@ export function PipelineModal({ project, currentFile, initialSteps, initialName,
   useEffect(() => { if (project?.id) api(`projects/${project.id}/files`)
     .then((d) => setFiles((d.files || []).filter((f) => f.type === 'file').map((f) => f.path))).catch(() => {}) }, [project?.id])
   // Files that make sense as a run target for each engine — playbooks for Ansible,
-  // state files for Salt — offered as a datalist so the target is picked, not typed.
-  const filesFor = (kind) => files.filter((p) => (kind === 'salt' ? p.endsWith('.sls') : (p.endsWith('.yml') || p.endsWith('.yaml'))))
+  // offered as a datalist so the target is picked, not typed.
+  const filesFor = (kind) => files.filter((p) => p.endsWith('.yml') || p.endsWith('.yaml'))
 
   const [newInvStep, setNewInvStep] = useState(null)   // step index awaiting a new inventory
   const invChange = (i, val) => { if (val === '__new') setNewInvStep(i); else upd(i, { inventory_id: val }) }
@@ -1155,11 +1136,11 @@ export function PipelineModal({ project, currentFile, initialSteps, initialName,
   const add = () => setSteps((s) => [...s, blank({ inventory_id: invs[0] ? String(invs[0].id) : '' })])
   const del = (i) => setSteps((s) => (s.length > 1 ? s.filter((_, j) => j !== i) : s))
   const move = (i, d) => setSteps((s) => { const a = [...s]; const j = i + d; if (j < 0 || j >= a.length) return a;[a[i], a[j]] = [a[j], a[i]]; return a })
-  const defTarget = (k) => (k === 'terraform' ? 'apply' : k === 'salt' ? 'highstate' : k === 'inventory' ? 'from VMs' : k === 'enroll' ? '→ Controller' : 'site.yml')
+  const defTarget = (k) => (k === 'terraform' ? 'apply' : k === 'inventory' ? 'from VMs' : k === 'enroll' ? '→ Controller' : 'site.yml')
 
   return (
     <Modal title="Run pipeline" onClose={onClose} wide>
-      <div className="faint" style={{ fontSize: 12, marginBottom: 8 }}>Steps run one after another — a common pipeline is build (Terraform/OpenTofu) → configure (Ansible) → maintain (Salt).</div>
+      <div className="faint" style={{ fontSize: 12, marginBottom: 8 }}>Steps run one after another — a common pipeline is build (Terraform/OpenTofu) → configure (Ansible). Keeping hosts in that state afterwards is Sysible Baseline's job.</div>
       <div className="pipe-scroll">
       <div className="pipe-inner">
       <div className="pipe-head">
@@ -1177,12 +1158,11 @@ export function PipelineModal({ project, currentFile, initialSteps, initialName,
           <select value={st.kind} onChange={(e) => upd(i, { kind: e.target.value, target: defTarget(e.target.value) })} style={{ width: 130 }}>
             <option value="ansible">Ansible</option>
             <option value="terraform">Terraform</option>
-            <option value="salt">Salt</option>
             <option value="inventory">Inventory (from VMs)</option>
             <option value="enroll">Enroll → Controller</option>
           </select>
           {st.kind === 'inventory'
-            ? <span className="muted" style={{ flex: 1, fontSize: 12.5 }}>Reads the applied VMs into this project’s inventory, then points the Ansible/Salt steps below at it.</span>
+            ? <span className="muted" style={{ flex: 1, fontSize: 12.5 }}>Reads the applied VMs into this project’s inventory, then points the Ansible steps below at it.</span>
             : st.kind === 'enroll'
             ? (<>
                 <select value={st.controller_id || ''}
@@ -1207,7 +1187,7 @@ export function PipelineModal({ project, currentFile, initialSteps, initialName,
                 {st.kind === 'terraform'
                   ? <select value={st.target} onChange={(e) => upd(i, { target: e.target.value })} title="Action" style={{ flex: '1 1 auto', minWidth: 0 }}><option>plan</option><option>apply</option><option>destroy</option></select>
                   : <FileTarget value={st.target} onChange={(v) => upd(i, { target: v })} files={filesFor(st.kind)}
-                                placeholder={st.kind === 'salt' ? 'state / highstate' : 'playbook.yml'} />}
+                                placeholder={'playbook.yml'} />}
                 {st.kind === 'terraform'
                   ? <select value={st.tool} onChange={(e) => upd(i, { tool: e.target.value })} title="Tool" style={{ width: 150 }}><option value="terraform">Terraform</option><option value="tofu">OpenTofu</option></select>
                   : <select value={st.inventory_id} onFocus={loadInvs} onChange={(e) => invChange(i, e.target.value)} title="Inventory (hosts to target)" style={{ width: 150 }}>
@@ -1230,7 +1210,7 @@ export function PipelineModal({ project, currentFile, initialSteps, initialName,
         {openSteps.has(i) && !isPseudo(st.kind) && (
           <div className="pipe-step-opts">
             <Field label={st.kind === 'terraform' ? 'Variables — KEY=value per line (→ -var)'
-              : st.kind === 'salt' ? 'Pillar / kwargs — key=value per line' : 'Extra vars — KEY=value per line (→ -e)'}>
+              : 'Extra vars — KEY=value per line (→ -e)'}>
               <textarea rows={2} value={st.vars} onChange={(e) => upd(i, { vars: e.target.value })}
                 placeholder={st.kind === 'terraform' ? 'network=homelab' : 'env=staging'}
                 style={{ fontFamily: 'ui-monospace,monospace', fontSize: 12, resize: 'vertical' }} />
@@ -1241,12 +1221,6 @@ export function PipelineModal({ project, currentFile, initialSteps, initialName,
                 <Field label="Start at task"><input value={st.startAt} onChange={(e) => upd(i, { startAt: e.target.value })} placeholder="exact task name" /></Field>
                 <Field label="Become (sudo) password"><input type="password" value={st.becomePw} autoComplete="off" onChange={(e) => upd(i, { becomePw: e.target.value })} /></Field>
               </div>
-            )}
-            {st.kind === 'salt' && (
-              <label className="row" style={{ gap: 7, fontSize: 13, cursor: 'pointer' }}>
-                <input type="checkbox" checked={!!st.saltTest} onChange={(e) => upd(i, { saltTest: e.target.checked })} style={{ width: 'auto' }} />
-                Test mode (dry-run — <span className="mono">test=True</span>)
-              </label>
             )}
           </div>
         )}

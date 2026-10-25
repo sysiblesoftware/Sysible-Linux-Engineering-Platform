@@ -57,7 +57,7 @@ function buildActions(r, { controllers, setPipe, setVms, setEnrollFor, setJumpFo
       if (d.note && !d.total) { alert(d.note); return }
       const lines = (d.results || []).map((h) => `${h.ok ? '✓' : '✗'} ${h.name} ${h.ip} — ${h.detail}`).join('\n')
       alert(`Installed SLEP's current key on ${d.installed}/${d.total} VM(s) over the password login:\n\n${lines}\n\n` +
-            (d.installed ? 'Re-run your Ansible/Salt step — key auth should work now.' : ''))
+            (d.installed ? 'Re-run your Ansible step — key auth should work now.' : ''))
     } catch (e) { alert(e.message) }
   }
   // Only the infra LIFECYCLE lives on this bar now. The SSH/access helpers (VMs,

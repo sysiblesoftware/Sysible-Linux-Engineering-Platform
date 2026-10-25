@@ -147,8 +147,8 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS runs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 project_id INTEGER NOT NULL,
-                kind TEXT NOT NULL DEFAULT 'ansible',   -- ansible | terraform | salt
-                target TEXT NOT NULL,                   -- playbook path / tf action / salt state
+                kind TEXT NOT NULL DEFAULT 'ansible',   -- ansible | terraform | molecule
+                target TEXT NOT NULL,                   -- playbook path / tf action
                 inventory_id INTEGER,
                 credential_id INTEGER,
                 extra_vars TEXT DEFAULT '{}',
@@ -234,7 +234,7 @@ def init_db() -> None:
                 project_id INTEGER NOT NULL,
                 name TEXT NOT NULL,
                 description TEXT NOT NULL DEFAULT '',
-                kind TEXT NOT NULL DEFAULT 'ansible',   -- ansible | terraform | salt
+                kind TEXT NOT NULL DEFAULT 'ansible',   -- ansible | terraform | molecule
                 target TEXT NOT NULL DEFAULT '',        -- playbook path / action / state
                 inventory_id INTEGER,
                 credential_id INTEGER,
@@ -403,7 +403,7 @@ def init_db() -> None:
             c.execute("ALTER TABLE infra ADD COLUMN deploy_public_key TEXT DEFAULT ''")
         # The auto-maintained password credential for the project's login account
         # (username + password from ⚙ Access) — the Controller-style single account
-        # used to log in AND for controlled sudo. Ansible/Salt default to it.
+        # used to log in AND for controlled sudo. Ansible defaults to it.
         if "login_credential_id" not in infra_cols:
             c.execute("ALTER TABLE infra ADD COLUMN login_credential_id INTEGER")
         # Multi-tenancy: every owned resource carries an org_id. Add the column
@@ -1803,7 +1803,7 @@ def set_run_status(run_id, status, exit_code=None, started=None, finished=None):
 def set_run_inventory(run_id, inventory_id):
     """Point an already-queued run at an inventory. Used by the pipeline's
     auto-inventory step to back-fill the inventory built from freshly-applied VMs
-    into the Ansible/Salt steps that follow it in the same sequence."""
+    into the Ansible steps that follow it in the same sequence."""
     with _connect() as c:
         c.execute("UPDATE runs SET inventory_id=? WHERE id=?", (inventory_id, run_id))
 

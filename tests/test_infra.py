@@ -299,7 +299,7 @@ def test_test_hypervisor_without_virsh_is_graceful(client, monkeypatch):
     assert body["ok"] is False and "libvirt-clients" in body["output"]
 
 
-def test_scaffold_configure_and_maintain(client):
+def test_scaffold_configure(client):
     pid = client.post("/infra", json={"name": "fleet-a", "provider": "libvirt",
                                      "options": {"count": 1, "base_image": "x"}}).json()["project_id"]
     # Configure → an Ansible playbook lands in the project.
@@ -309,10 +309,11 @@ def test_scaffold_configure_and_maintain(client):
     assert "hosts: all" in txt and "ansible.builtin" in txt
     # Idempotent — second call doesn't clobber.
     assert client.post(f"/infra/{pid}/scaffold", json={"stage": "configure"}).json()["created"] is False
-    # Maintain → a Salt state lands.
-    m = client.post(f"/infra/{pid}/scaffold", json={"stage": "maintain"}).json()
-    assert m["path"] == "maintain.sls"
-    assert "pkg.installed" in client.get(f"/projects/{pid}/file?path=maintain.sls").json()["content"]
+    # "maintain" was a Salt .sls scaffold and is GONE — keeping hosts in a
+    # declared state is Sysible Baseline's job now. It must 400 like any other
+    # unknown stage rather than half-work: scaffolding a file for an engine
+    # SLEP cannot run would leave an operator with a state nothing applies.
+    assert client.post(f"/infra/{pid}/scaffold", json={"stage": "maintain"}).status_code == 400
     # Unknown stage → 400.
     assert client.post(f"/infra/{pid}/scaffold", json={"stage": "bogus"}).status_code == 400
 

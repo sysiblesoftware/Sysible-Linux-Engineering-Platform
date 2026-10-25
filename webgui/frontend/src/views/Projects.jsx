@@ -108,7 +108,7 @@ export default function Projects({ onOpen, onOpenRun }) {
       {projects.length === 0 ? (
         <div className="empty-state">
           <div className="es-title">No projects yet</div>
-          <div>Create one to start authoring playbooks, Terraform, or Salt states.</div>
+          <div>Create one to start authoring playbooks or Terraform.</div>
           <div style={{ marginTop: 14 }}><button className="primary" onClick={() => setNewFor(null)}>+ New project</button></div>
         </div>
       ) : (

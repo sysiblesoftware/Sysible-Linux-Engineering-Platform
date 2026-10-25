@@ -13,7 +13,6 @@ import { Field, Modal, useErr } from '../ui.jsx'
 const KINDS = [
   ['ansible', 'Ansible playbook'],
   ['terraform', 'Terraform / OpenTofu'],
-  ['salt', 'Salt state'],
   ['molecule', 'Molecule scenario'],
 ]
 const FIELD_KINDS = [
@@ -24,7 +23,7 @@ const FIELD_KINDS = [
 const needsChoices = (k) => k === 'choice' || k === 'multiselect'
 const targetLabel = (k) => k === 'ansible' ? 'Playbook path'
   : k === 'terraform' ? 'Action (plan / apply / destroy)'
-    : k === 'salt' ? 'State name' : 'Scenario name'
+    : 'Scenario name'
 
 export default function Templates({ onOpenRun }) {
   const [rows, setRows] = useState([])

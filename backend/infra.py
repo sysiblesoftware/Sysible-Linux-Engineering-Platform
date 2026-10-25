@@ -1137,7 +1137,7 @@ def generate(provider: str, spec: dict, controller_key: str = "", deploy_key: st
         key" credential can always log in to a VM it built (no manual key
         distribution needed);
       * `deploy_key` — the public half of a chosen SLEP SSH credential (when the
-        operator picks one for the cadence's Ansible/Salt steps);
+        operator picks one for the cadence's Ansible steps);
       * `controller_key` — so a connected Controller can reach it;
       * the operator's typed `ssh_public_key`.
     Blank/duplicate keys are dropped by the cloud-init renderer."""
@@ -1149,7 +1149,8 @@ def generate(provider: str, spec: dict, controller_key: str = "", deploy_key: st
 
 # --- Lifecycle cadence scaffolds -------------------------------------------
 # After Create (Terraform/OpenTofu), the recommended flow is Configure (Ansible)
-# then Maintain (Salt). These write a sensible starter file into the same project
+# (Maintain was a third stage, driven by Salt; that is Sysible Baseline's job
+# now). These write a sensible starter file into the same project
 # so the operator can go straight from built VMs to configuring and maintaining
 # them, without hand-typing the scaffolding.
 _CONFIGURE_YML = """\
@@ -1184,31 +1185,16 @@ _CONFIGURE_YML = """\
         state: present
 """
 
-_MAINTAIN_SLS = """\
-# Maintain - Salt. Keep the hosts in a known state over time: declare what must
-# always be true (packages, services, files) and re-apply it on a schedule. Run
-# it from the IDE: press Run -> Salt (salt-ssh state.apply / highstate).
-base_packages:
-  pkg.installed:
-    - pkgs:
-      - htop
-      - curl
-
-# Example - ensure a service stays running:
-#sshd_running:
-#  service.running:
-#    - name: ssh
-#    - enable: true
-"""
-
 _SCAFFOLDS = {
     "configure": ("configure.yml", lambda name: _CONFIGURE_YML.format(name=name or "hosts")),
-    "maintain": ("maintain.sls", lambda name: _MAINTAIN_SLS),
+    # "maintain" was a Salt .sls scaffold. Keeping hosts in a declared state
+    # over time is Sysible Baseline's job now; SLEP scaffolds the things that
+    # BUILD a host, not the states that hold it there.
 }
 
 
 def scaffold(stage: str, project_name: str = "") -> tuple:
-    """(filename, content) for a cadence stage: 'configure' (Ansible) | 'maintain' (Salt)."""
+    """(filename, content) for a cadence stage: 'configure' (Ansible)."""
     entry = _SCAFFOLDS.get((stage or "").strip().lower())
     if not entry:
         raise ValueError(f"unknown stage '{stage}'")

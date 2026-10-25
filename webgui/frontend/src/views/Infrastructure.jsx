@@ -106,7 +106,7 @@ export function JumpHostEditor({ r, onClose, onSaved }) {
     <Modal title={`VM access — ${r.project_name}`} onClose={onClose}>
       <p className="muted" style={{ marginTop: 0 }}>
         One login account — like Sysible Controller: the same user + password (or key) is created on the VMs and
-        used by SLEP to log in and to <span className="mono">sudo</span>. cloud-init creates it; Ansible and Salt
+        used by SLEP to log in and to <span className="mono">sudo</span>. cloud-init creates it; Ansible
         both authenticate as it. Re-apply to rebuild existing VMs with these settings.
       </p>
       <Field label="Login credential — a stored credential used as the VM account (login + sudo)">
@@ -116,7 +116,7 @@ export function JumpHostEditor({ r, onClose, onSaved }) {
         </select>
         {picked
           ? <div className="faint" style={{ fontSize: 11.5 }}>
-              cloud-init creates <b>{picked.username}</b> with this credential’s {picked.kind === 'ssh_password' ? 'password' : 'key'}; Ansible &amp; Salt log in as it.
+              cloud-init creates <b>{picked.username}</b> with this credential’s {picked.kind === 'ssh_password' ? 'password' : 'key'}; Ansible logs in as it.
             </div>
           : <div className="faint" style={{ fontSize: 11.5 }}>Type an account below — or pick one you already made in the <b>Credentials</b> tab.</div>}
       </Field>
@@ -438,13 +438,13 @@ export function DiagnoseModal({ r, onClose }) {
 }
 
 // The Sysible lifecycle cadence: create the machines (Terraform/OpenTofu), then
-// configure them (Ansible), then keep them in a known state over time (Salt).
+// configure them (Ansible). Keeping them in that state over time is Sysible
+// Baseline's job, not SLEP's.
 // Shown as a guide so the recommended flow is obvious from the Infrastructure page.
 export function CadenceBar() {
   const steps = [
     ['1', 'Create', 'Terraform / OpenTofu', 'Build the VMs on a hypervisor or cloud', true],
     ['2', 'Configure', 'Ansible', 'Install & set up software on the new hosts'],
-    ['3', 'Maintain', 'Salt', 'Keep hosts in a known state over time'],
   ]
   return (
     <div className="cadence">
@@ -516,7 +516,7 @@ export function CreateWizard({ onClose, onDone, project, editInfra }) {
     return () => { alive = false }
   }, [controllerId])
   // SSH key credentials only — those are the ones we can derive a public key from
-  // and bake into the VMs so SLEP's Ansible/Salt can log in.
+  // and bake into the VMs so SLEP's Ansible can log in.
   useEffect(() => { api('credentials').then((d) => setCreds((d.credentials || []).filter((c) => c.kind === 'ssh'))) }, [])
   useEffect(() => { api('inventories').then((d) => setInvs(d.inventories || [])) }, [])
 
@@ -593,7 +593,7 @@ export function CreateWizard({ onClose, onDone, project, editInfra }) {
         </select>
       </Field>
       <div className="faint" style={{ fontSize: 12 }}>
-        SLEP bakes this credential’s <b>public</b> key into the VMs’ cloud-init, so the same credential you pick for the cadence’s Ansible/Salt steps can SSH in. Pick an <b>SSH key</b> credential.
+        SLEP bakes this credential’s <b>public</b> key into the VMs’ cloud-init, so the same credential you pick for the cadence’s Ansible steps can SSH in. Pick an <b>SSH key</b> credential.
         {creds.length === 0 && <> No SSH key credentials yet — add one under <b>Credentials</b> first.</>}
       </div>
 
@@ -605,7 +605,7 @@ export function CreateWizard({ onClose, onDone, project, editInfra }) {
         </select>
       </Field>
       {invTarget === '__new' && <Field label="New inventory name"><input value={invName} onChange={(e) => setInvName(e.target.value)} placeholder="prod-web" /></Field>}
-      <div className="faint" style={{ fontSize: 12 }}>On apply, the created VMs are read into this inventory automatically, and the cadence’s Ansible/Salt steps default to it.</div>
+      <div className="faint" style={{ fontSize: 12 }}>On apply, the created VMs are read into this inventory automatically, and the cadence’s Ansible steps default to it.</div>
 
       <Field label="Auto-enroll new VMs into Controller (optional)">
         <select value={controllerId} onChange={(e) => setControllerId(e.target.value)}>

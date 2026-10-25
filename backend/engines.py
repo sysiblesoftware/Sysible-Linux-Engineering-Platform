@@ -1,13 +1,13 @@
 """One-click engine installation.
 
-The container image bakes Ansible/Terraform/Salt in, but when SLEP runs directly
+The container image bakes Ansible/Terraform in, but when SLEP runs directly
 on a host an engine may be missing. Rather than make the operator drop to a shell,
 these helpers install an engine into a SLEP-managed location under the data dir and
 put it on PATH so the runners (which inherit os.environ) pick it up immediately —
 no container rebuild, no root, no touching system paths:
 
   * Terraform → a static binary in DATA_DIR/engine-bin/
-  * Ansible / Salt → a dedicated venv at DATA_DIR/engine-venv/ (pip install)
+  * Ansible → a dedicated venv at DATA_DIR/engine-venv/ (pip install)
 
 Installs run on a background thread and stream to DATA_DIR/engine-installs/<e>.log,
 which the console tails exactly like a run log.
@@ -33,7 +33,6 @@ TERRAFORM_VERSION = "1.9.8"
 ENGINES = {
     "ansible": {"label": "Ansible", "binary": "ansible-playbook"},
     "terraform": {"label": "Terraform", "binary": "terraform"},
-    "salt": {"label": "Salt", "binary": "salt-ssh"},
 }
 
 # The Galaxy collections the built-in task snippets reach for (community.general,
@@ -217,23 +216,15 @@ def _ensure_venv(emit) -> Path:
 
 
 def _install_pip(engine: str, emit) -> None:
-    pkg = "ansible" if engine == "ansible" else "salt"
+    # Ansible is the only pip-installed engine left; Salt moved to Sysible
+    # Baseline, which installs and drives its own. The C-toolchain special case
+    # that used to live here went with it — that was Salt's timelib dependency,
+    # which has no universal wheel.
+    pkg = "ansible"
     py = _ensure_venv(emit)
     _stream([str(py), "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel"], emit)
-    # --prefer-binary avoids source builds where a wheel exists. Salt still pulls a
-    # C-extension dep (timelib) that has no universal wheel; if there's no compiler
-    # the build fails, so translate that into an actionable message.
-    try:
-        _stream([str(py), "-m", "pip", "install", "--prefer-binary", pkg], emit)
-    except RuntimeError:
-        if engine == "salt" and not (shutil.which("gcc") or shutil.which("cc")):
-            emit("")
-            emit("!! Salt needs a C toolchain to build a dependency (timelib), and none was found.")
-            emit("   Fix ONE of these, then retry:")
-            emit("     • Debian/Ubuntu:  sudo apt-get install -y gcc python3-dev libffi-dev")
-            emit("     • RHEL/Rocky:     sudo dnf install -y gcc python3-devel libffi-devel")
-            emit("     • Or run the container image, which bakes salt-ssh in already.")
-        raise
+    # --prefer-binary avoids source builds where a wheel exists.
+    _stream([str(py), "-m", "pip", "install", "--prefer-binary", pkg], emit)
 
 
 def _install_terraform(emit) -> None:

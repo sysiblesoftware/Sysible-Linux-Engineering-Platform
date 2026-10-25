@@ -4,9 +4,14 @@ here — we exercise the plumbing and the endpoints.)"""
 import backend.engines as engines
 
 
-def test_status_lists_all_three_engines(client):
+def test_status_lists_every_installable_engine(client):
+    """Salt is deliberately absent: configuration state moved to Sysible
+    Baseline, which installs and drives its own. An engine listed here but not
+    runnable would offer an operator a one-click install for something SLEP
+    cannot then execute."""
     d = client.get("/engines").json()["engines"]
-    assert set(d) == {"ansible", "terraform", "salt"}
+    assert set(d) == {"ansible", "terraform"}
+    assert "salt" not in d
     for e in d.values():
         assert set(e) >= {"label", "binary", "installed", "installing"}
 

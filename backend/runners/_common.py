@@ -1,6 +1,6 @@
 """Shared runner plumbing — stream a subprocess to a run log, and parse a cloud
 credential's secret into environment variables. Keeps the per-engine runners
-(terraform, salt, …) short and consistent with the Ansible one.
+(terraform, molecule, …) short and consistent with the Ansible one.
 """
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import threading
 
 # ---- run cancellation -------------------------------------------------------
 # A run executes on a background thread and shells out to one or more child
-# processes (terraform init→apply, ansible-playbook, salt-call). To make a run
+# processes (terraform init→apply, ansible-playbook). To make a run
 # stoppable we keep a registry of the child currently streaming for each run,
 # plus a set of run ids a stop was requested for. `request_stop` kills the live
 # child (its process group, so provider/ssh grandchildren die too) and flags the
@@ -73,7 +73,7 @@ def clear_stop(run_id) -> None:
 
 def mask(s: str, redact=()) -> str:
     """Replace each secret VALUE in `s` with ***. Used for both the echoed command
-    and every streamed output line (a playbook/terraform/salt task can print a secret
+    and every streamed output line (a playbook/terraform task can print a secret
     it was given, and the run log is readable by any authenticated viewer)."""
     for r in redact:
         r = str(r)
@@ -85,7 +85,7 @@ def mask(s: str, redact=()) -> str:
 def shown_cmd(cmd, redact=()) -> str:
     """Render a command line for the run log with secret substrings masked. Run
     logs are readable by any authenticated user (viewers included), so values
-    passed inline (e.g. `-var k=secret` / `-e k=secret` / salt `k=secret`) must not
+    passed inline (e.g. `-var k=secret` / `-e k=secret`) must not
     be echoed verbatim. `redact` is the list of secret VALUE strings to mask."""
     return mask(" ".join(cmd), redact)
 

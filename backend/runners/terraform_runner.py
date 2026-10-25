@@ -541,7 +541,7 @@ def launch(run_id: int) -> None:
 
         # After a successful apply of a Create-Infrastructure project, read the new
         # VMs into the project's own inventory automatically — so they're immediately
-        # targetable by Ansible/Salt with no manual "→ Inventory" step. Best-effort:
+        # targetable by Ansible with no manual "→ Inventory" step. Best-effort:
         # a non-infra project or a not-yet-ready output just skips silently.
         # Stopped by an operator (POST /runs/{id}/cancel killed the child): record
         # the run as canceled, not failed, and skip the post-apply inventory build.
@@ -564,7 +564,7 @@ def launch(run_id: int) -> None:
                     iid, iname, n = built
                     if n > 0:
                         emit(f"\n-- SLEP: added {n} VM(s) to inventory “{iname}” (#{iid}) — "
-                             f"the next Ansible/Salt step will target them.")
+                             f"the next Ansible step will target them.")
                         # Confirm SLEP can log into the new VMs with its managed key
                         # (through the jump host) right now, so a connect failure
                         # shows here instead of surfacing as a confusing UNREACHABLE
@@ -578,7 +578,7 @@ def launch(run_id: int) -> None:
                         emit(f"\n-- SLEP: inventory “{iname}” (#{iid}) got 0 hosts — the VMs "
                              f"applied but have no IP yet (libvirt assigns addresses via "
                              f"DHCP/guest-agent after boot). Wait for them to come up, then "
-                             f"re-run the Ansible/Salt step (or the '→ Inventory' action).")
+                             f"re-run the Ansible step (or the '→ Inventory' action).")
             except Exception:  # noqa: BLE001 — never fail the apply over this
                 pass
 

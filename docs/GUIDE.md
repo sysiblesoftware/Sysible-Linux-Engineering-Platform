@@ -1,7 +1,7 @@
 # SLEP User Guide
 
 *Sysible Linux Engineering Platform — author, orchestrate, and run your
-automation (Ansible, Terraform, Salt) from one self-hosted console.*
+automation (Ansible, Terraform) from one self-hosted console.*
 
 This guide is task-oriented: it walks through what each part of SLEP is for and
 how to use it, from your first playbook to a full **build → configure → maintain →
@@ -41,11 +41,11 @@ everything:
 
 | Object | What it is |
 |---|---|
-| **Project** | A workspace of automation content — playbooks, Terraform configs, Salt states — authored in the in-browser IDE or synced from Git. |
+| **Project** | A workspace of automation content — playbooks, Terraform configs — authored in the in-browser IDE or synced from Git. |
 | **Inventory** | The hosts (and groups) a run targets. Entered by hand or **imported from a Sysible Controller**. |
 | **Credential** | An SSH key/password, cloud cred, or vault token — stored server-side, injected into a run, never shown to the browser. |
-| **Run** | One execution of an engine (`ansible-playbook`, `terraform`, `salt`) against an inventory with a credential, streaming live output into a history. |
-| **Pipeline** | An ordered sequence of runs — e.g. Terraform apply → Ansible → Salt → Enroll — visualized together. |
+| **Run** | One execution of an engine (`ansible-playbook`, `terraform`) against an inventory with a credential, streaming live output into a history. |
+| **Pipeline** | An ordered sequence of runs — e.g. Terraform apply → Ansible → Enroll — visualized together. |
 
 Everything else (Infrastructure, Controllers, Jump Hosts, Variable Vault,
 Schedules, Organizations) supports those five.
@@ -100,7 +100,7 @@ workdir are created for you.
 **The IDE** is a Monaco (VS Code) editor with a file tree, syntax highlighting for
 YAML/HCL/Jinja, an inline linter, and a run panel:
 
-- **+ File** to add `site.yml`, `main.tf`, a Salt state, etc. **Ctrl/⌘-S** saves.
+- **+ File** to add `site.yml`, `main.tf`, etc. **Ctrl/⌘-S** saves.
 - The linter flags common mistakes early (for example, brittle apt version pins).
 - **Sync from Git** instead of authoring in-browser if you keep content in SCM.
 - The **infra bar** at the top of an infrastructure project exposes its lifecycle
@@ -150,7 +150,6 @@ Hosts → add a bastion* (address + user + key). Runs and enrollment then tunnel
 through it:
 
 - Ansible/Terraform SSH through the bastion via a `ProxyCommand`.
-- `salt-ssh` uses the same hop (SLEP builds a correctly-quoted roster
   `ProxyCommand` so multi-hop targets work).
 - Agent enrollment installs the bundle over the bastion too.
 
@@ -178,7 +177,6 @@ Every engine follows the same shape: pick a **target**, an **inventory**, and a
 |---|---|---|
 | **Ansible** | a playbook (`site.yml`) | Live PLAY/TASK/RECAP parsing; **Re-run failed** targets just the hosts that broke (`--limit` + `--start-at-task`). |
 | **Terraform / OpenTofu** | `plan` / `apply` / `destroy` | Self-heals stale provider locks and orphaned libvirt objects; auto-reads applied VMs into inventory. |
-| **Salt** | a state or `highstate` | `salt-ssh` over your inventory (optionally through a jump host). SLS names are normalized (`maintain.sls` → `maintain`). |
 
 **Stop a run** with the Stop button — the engine process is terminated and the run
 is marked `canceled`. For Terraform **apply**, canceling automatically launches a
@@ -200,12 +198,11 @@ to resize, or **Hide log**). The visualization is engine-aware:
   task fared (ok / changed / failed / unreachable / didn't-run).
 - **Terraform** — what's being created/changed/destroyed, live, by real VM name
   (not "Machine 1"); destroy mode says *destroyed*, not *created*.
-- **Salt** — per-minion success/changed/failed and states run.
 - **Enroll** — one row per VM with its ✓/✗ into the Controller and the reason on
   failure, plus the `X/Y enrolled → <controller>` tally.
 
 For a **pipeline**, the whole run is shown as **one window**: the stages laid out
-side by side (Terraform → Ansible → Salt → Enroll), each with its live status, so
+side by side (Terraform → Ansible → Enroll), each with its live status, so
 you see the entire build at a glance instead of scrolling. A stage flow strip at
 the top doubles as navigation.
 
@@ -231,7 +228,7 @@ the VMs come up reachable.
   (e.g. add a VM type after a destroy). Existing wiring (bastion, controller) is
   preserved.
 - **Apply auto-inventory** — after a successful apply, the new VMs are read into
-  the project's inventory automatically, ready for Ansible/Salt.
+  the project's inventory automatically, ready for Ansible.
 - **Enroll** — register the applied VMs into a Controller (see §12).
 
 ---
@@ -279,13 +276,13 @@ default.
 **Author one** in the IDE's **Pipeline** panel or on the project. A common shape:
 
 ```
-Terraform apply  →  Inventory (from VMs)  →  Ansible site.yml  →  Salt maintain  →  Enroll → Controller
+Terraform apply  →  Inventory (from VMs)  →  Ansible site.yml  →  Enroll → Controller
 ```
 
 Two **pseudo-steps** make the end-to-end flow one click:
 
 - **Inventory (from VMs)** — reads the freshly-applied VMs into the project's
-  inventory and points the following Ansible/Salt steps at it.
+  inventory and points the following Ansible steps at it.
 - **Enroll → Controller** — registers the applied VMs into the project's
   Controller (agent enrollment) as the final step.
 
@@ -352,11 +349,6 @@ The running process is serving old code. Restart the Controller so it reloads,
 and confirm nothing *else* owns its port — e.g. a leftover **container** publishing
 `:9000` will intercept LAN-IP traffic while `127.0.0.1` reaches a different
 process. One controller per port.
-
-**`salt-ssh` errors** (`Bad stdio forwarding %h:%p`, `Connection closed … port
-65535`, `No matching sls`). These are handled by SLEP's roster generation (concrete
-`ProxyCommand`, quoted values, normalized SLS names). If you hit one, confirm the
-project's jump host is set correctly and the target address resolves.
 
 **Apply left orphaned libvirt objects** ("domain already exists"). The Terraform
 runner self-heals stale domains/cloud-init ISOs from a partial apply and retries;

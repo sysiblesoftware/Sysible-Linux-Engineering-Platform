@@ -100,31 +100,6 @@ export function parseTerraform(text) {
   return { engine: 'terraform', resources, plan, applied, errored }
 }
 
-// -------------------------------------------------------------------- Salt
-// Reads salt-ssh output: the per-minion "Summary for <minion>" blocks with
-// "Succeeded: N (changed=M)" / "Failed: N". Falls back to counting Result lines
-// when a run errors before a summary prints.
-export function parseSalt(text) {
-  const t = stripAnsi(text)
-  const minions = {}
-  const lines = t.split('\n')
-  let current = null
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i]
-    let m
-    if ((m = line.match(/^Summary for (\S+)/))) {
-      current = minions[m[1]] || (minions[m[1]] = { succeeded: 0, changed: 0, failed: 0, total: 0 })
-    } else if (current && (m = line.match(/^Succeeded:\s*(\d+)(?:\s*\(changed=(\d+)\))?/))) {
-      current.succeeded = +m[1]; current.changed = m[2] ? +m[2] : 0
-    } else if (current && (m = line.match(/^Failed:\s*(\d+)/))) {
-      current.failed = +m[1]
-    } else if (current && (m = line.match(/^Total states run:\s*(\d+)/))) {
-      current.total = +m[1]; current = null
-    }
-  }
-  return { engine: 'salt', minions }
-}
 
 // ------------------------------------------------------------------ Enroll
 // Reads the 'enroll' pseudo-step log: one "✓/✗ <name> <ip> — <detail>" line per
@@ -158,7 +133,6 @@ export function parseEnroll(text) {
 
 export function parseRun(engine, text) {
   if (engine === 'terraform') return parseTerraform(text)
-  if (engine === 'salt') return parseSalt(text)
   if (engine === 'enroll') return parseEnroll(text)
   // The pipeline's auto-inventory pseudo-step has no host/task model — its viz
   // reads the summary straight from the log, so hand back the raw text.
