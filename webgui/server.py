@@ -45,13 +45,38 @@ _SSO_HEADERS = ("x-sysible-user", "x-sysible-role", "x-sysible-auth")
 # CSP for the SPA: self-hosted only (airgap-friendly). Monaco runs its language
 # services in blob workers and uses eval in its tokenizer, so worker-src blob:
 # and script-src 'unsafe-eval' are required; images/fonts allow data: URIs.
-_CSP = ("default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; "
-        "script-src 'self' 'unsafe-eval'; worker-src 'self' blob:; font-src 'self' data:; "
+def _csp(script_extra: str = "", style_extra: str = "", font_extra: str = "") -> str:
+    return (
+        "default-src 'self'; "
+        "img-src 'self' data:; "
+        f"style-src 'self' 'unsafe-inline'{style_extra}; "
+        f"script-src 'self' 'unsafe-eval'{script_extra}; "
+        "worker-src 'self' blob:; "
+        f"font-src 'self' data:{font_extra}; "
         # frame-ancestors 'self', not 'none': behind SLOP every app shares ONE
         # origin, and SLOP Administration hosts this console's settings UI in-page
         # rather than keeping a second copy that drifts. 'self' still refuses every
         # OTHER site, so the clickjacking protection is unchanged.
         "connect-src 'self'; frame-ancestors 'self'; base-uri 'self'")
+
+
+_CSP = _csp()
+
+# The NO-BUILD dev console (webgui/static/index.html) loads Monaco from a CDN —
+# docs/RUNNING.md's "Development (without Docker)" says so, and says to vendor it
+# under webgui/static/vs for airgapped installs (still a TODO in that file). The
+# CSP above forbids exactly that, so following the documented dev steps gave a
+# console whose editor never appeared, with only a CSP violation in the browser
+# console to say why.
+#
+# So the fallback document gets a CSP that permits the one host it actually
+# needs. The BUILT console — the only thing the Docker image and every SLOP
+# install serve — keeps the airgap-friendly policy unchanged, which is checked by
+# tests/test_the_dev_console_can_load_its_editor.py.
+_MONACO_CDN = "https://cdn.jsdelivr.net"
+_CSP_STATIC = _csp(script_extra=f" {_MONACO_CDN}",
+                   style_extra=f" {_MONACO_CDN}",
+                   font_extra=f" {_MONACO_CDN}")
 
 
 @app.middleware("http")
@@ -63,7 +88,11 @@ async def guard(request: Request, call_next):
     resp.headers.setdefault("X-Content-Type-Options", "nosniff")
     resp.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
     resp.headers.setdefault("Referrer-Policy", "no-referrer")
-    resp.headers.setdefault("Content-Security-Policy", _CSP)
+    # Tied to the document actually being served, not to a build-time guess: the
+    # built SPA keeps the strict policy, the no-build dev console gets the one
+    # that lets its editor load.
+    resp.headers.setdefault("Content-Security-Policy",
+                            _CSP if (DIST / "index.html").exists() else _CSP_STATIC)
     if request.url.scheme == "https":
         resp.headers.setdefault("Strict-Transport-Security", "max-age=63072000; includeSubDomains")
     return resp
