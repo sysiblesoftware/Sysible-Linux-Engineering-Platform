@@ -625,13 +625,21 @@ def setup(body: dict = Body(...)):
 
 
 def _login_source_ip(request: Request) -> str:
-    """The source IP for the per-IP login throttle. Behind the SLOP gateway/BFF the
-    direct peer is the gateway, which APPENDS the real client to X-Forwarded-For — so
-    the LAST hop is the trusted client IP. The first hop is whatever the client itself
-    put there, i.e. spoofable (an attacker could rotate it to dodge the IP throttle, or
-    forge a victim's IP to grief them); taking the rightmost hop that our own proxy set
-    avoids both. Standalone (no XFF), use the direct peer. This matches the SLOP IdP's
-    _client_ip so the whole platform derives the client the same, spoofing-resistant way."""
+    """The source IP for the per-IP login throttle.
+
+    Take the RIGHTMOST X-Forwarded-For hop: the header is client-appendable, so
+    anything to the LEFT is whatever the client itself put there — rotate it and
+    every guess gets a fresh bucket, or forge a victim's address and grief them.
+    The rightmost entry is the one our own infrastructure wrote. Standalone (no
+    XFF at all), use the direct peer. Matches the SLOP IdP's _client_ip, so the
+    whole platform derives the client the same, spoofing-resistant way.
+
+    That is only sound because the console BFF — the only thing that talks to
+    this backend — now OVERWRITES the header with exactly one value it vouches
+    for (the gateway-appended browser address behind SLOP, its own socket peer
+    standalone). It used to forward the client's header through untouched, which
+    made this read attacker-controlled on a standalone install; see
+    tests/test_the_login_throttle_cannot_be_dodged_by_a_header.py."""
     xff = (request.headers.get("x-forwarded-for") or "").split(",")[-1].strip()
     if xff:
         return xff

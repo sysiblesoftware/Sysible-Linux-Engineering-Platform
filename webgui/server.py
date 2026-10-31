@@ -93,13 +93,43 @@ async def proxy(path: str, request: Request):
     # re-add them below only for a request that already proves it came through the gateway.
     headers = {k: v for k, v in request.headers.items()
                if k.lower() not in _HOP and k.lower() not in _SSO_HEADERS}
-    if _TRUST_GATEWAY_AUTH and _SSO_SHARED_SECRET and \
-            secrets.compare_digest(request.headers.get("x-sysible-auth", ""), _SSO_SHARED_SECRET):
+    via_gateway = bool(
+        _TRUST_GATEWAY_AUTH and _SSO_SHARED_SECRET
+        and secrets.compare_digest(request.headers.get("x-sysible-auth", ""),
+                                   _SSO_SHARED_SECRET))
+    if via_gateway:
         # Legitimate gateway hop (valid shared secret) — forward the identity headers.
         for h in _SSO_HEADERS:
             v = request.headers.get(h)
             if v is not None:
                 headers[h] = v
+    # OVERWRITE X-Forwarded-For with one value we vouch for.
+    #
+    # The backend keys its per-IP login throttle on the RIGHTMOST hop, on the
+    # reasoning that a trusted proxy APPENDS the real peer. True behind the SLOP
+    # gateway, where Caddy appends — and not true standalone, because this BFF
+    # used to forward the header through untouched and never append anything. A
+    # standalone SLEP publishes :8810 on 0.0.0.0, so the value the throttle keyed
+    # on was wholly attacker-chosen: one rotating header per attempt gave every
+    # guess a fresh bucket and the 50-failure spray lockout never tripped.
+    #
+    # This BFF is the only client the backend has (it listens on 127.0.0.1:9100
+    # inside the container and is not published), so this is the one place that
+    # can decide. Behind the gateway, take the rightmost incoming hop — the
+    # browser address Caddy appended, which a client cannot put anything to the
+    # right of. Standalone, take the socket peer. Either way the backend reads a
+    # single entry it can trust, and appending instead of replacing would have
+    # made every browser behind SLOP share one bucket: the gateway's.
+    for k in list(headers):
+        if k.lower() == "x-forwarded-for":
+            del headers[k]
+    peer = request.client.host if request.client else ""
+    if via_gateway:
+        hops = [h.strip() for h in
+                (request.headers.get("x-forwarded-for") or "").split(",") if h.strip()]
+        headers["X-Forwarded-For"] = hops[-1] if hops else peer
+    else:
+        headers["X-Forwarded-For"] = peer
     body = await request.body()
     params = dict(request.query_params)
 
