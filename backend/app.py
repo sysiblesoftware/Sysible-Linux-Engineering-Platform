@@ -2676,13 +2676,26 @@ def launch_run(request: Request, body: dict = Body(...), user: str = Depends(cur
     return {"status": "launched", "run_id": run_id}
 
 
+# How many runs /runs returns by default, and the most it will ever return.
+# db.list_runs has always capped at 100 and this route accepted no limit at all,
+# so a caller asking for more got 100 and no indication it had been truncated —
+# SLOP's Visualizer asks for up to 500 and reported nothing in `notes`, so a
+# truncated activity feed looked complete.
+_RUNS_DEFAULT_LIMIT = 100
+_RUNS_MAX_LIMIT = 500
+
+
 @app.get("/runs")
-def runs(request: Request, project_id: int | None = None, user: str = Depends(current_user)):
+def runs(request: Request, project_id: int | None = None,
+         limit: int = _RUNS_DEFAULT_LIMIT, user: str = Depends(current_user)):
     role = _session_or_401(request)["role"]
+    # Bounded: the default keeps every existing caller's behaviour byte for byte,
+    # and the ceiling stops one request pulling the whole table.
+    limit = max(1, min(int(limit), _RUNS_MAX_LIMIT))
     # Org-scope: only runs whose project is in the caller's visible orgs — otherwise an
     # operator saw every tenant's runs (and their extra_vars, which may hold secrets).
-    runs = db.list_runs(project_id, org_ids=_visible_org_ids(request))
-    return {"runs": [_mask_extra_vars(r, role) for r in runs]}
+    runs = db.list_runs(project_id, limit=limit, org_ids=_visible_org_ids(request))
+    return {"runs": [_mask_extra_vars(r, role) for r in runs], "limit": limit}
 
 
 def _guard_run(request: Request, run_id: int, min_role: str = "viewer"):
