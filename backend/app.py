@@ -269,6 +269,51 @@ def _gateway_identity(request: Request) -> dict | None:
     return {"user": user, "role": role}
 
 
+# SLEP's own tiers → the org role a provisioned SSO user gets in the Default org.
+# Mirrors what POST /users does for a locally created account.
+_SSO_ORG_ROLE = {"superuser": "admin", "operator": "operator", "viewer": "viewer"}
+
+
+def _ensure_sso_account(user: str, role: str) -> None:
+    """Give a gateway-asserted identity a local row and a home org, once.
+
+    SLOP owns identity, but SLEP's tenancy is keyed on a username that exists
+    HERE: _visible_org_ids calls db.orgs_for_user, the org-member route refuses a
+    username with no `admins` row ("No such user."), and the console's member
+    picker is filled from GET /users. With nothing provisioned, an SSO operator
+    or auditor signed in successfully and found every list empty, with no way for
+    a superuser to grant them anything. The Controller solved the same problem
+    with ensure_sso_account; this is SLEP's.
+
+    Strictly additive, because it runs on every request:
+
+      * no `admins` row → create one at the mapped tier with an UNUSABLE random
+        password (the row is for membership and for the user list, never a second
+        way in — and if SSO is later switched off it cannot be signed into), and
+        enrol it in the Default org at the matching org role, exactly as POST
+        /users does for a local account;
+      * a row that already exists is left completely alone — role, password and
+        org grants. A SLEP set up standalone and later put behind SLOP has both
+        defaulting to the name `admin`, and realigning that row would demote a
+        local superuser on the strength of an asserted role. Under SSO the row's
+        role is not consulted anyway: _resolve_identity returns the GATEWAY role.
+
+    The caller must already have verified the shared secret.
+    """
+    if db.get_admin(user) is not None:
+        return
+    try:
+        pw_hash, salt = _hash_password(secrets.token_urlsafe(32))
+        db.add_admin(user, pw_hash, salt, role=role)
+        db.set_org_member(db.default_org_id(), user, _SSO_ORG_ROLE.get(role, "viewer"))
+        db.log_audit("sso_account_provisioned", user, f"role={role} (via SLOP SSO)")
+    except Exception as e:  # noqa: BLE001
+        # Never fail a request over provisioning: a race (two requests for a
+        # first-seen user) or a malformed name should degrade to the old
+        # behaviour, not 500 the console.
+        print(f"WARNING: could not provision SSO account {user!r}: {e}", file=sys.stderr)
+
+
 def _sso_only() -> bool:
     """True when SLOP is the identity authority for this instance.
 
@@ -287,6 +332,7 @@ def _resolve_identity(request: Request) -> dict | None:
     over a SLEP bearer token. Never raises — callers decide how to react."""
     ident = _gateway_identity(request)
     if ident:
+        _ensure_sso_account(ident["user"], ident["role"])
         return ident
     if _sso_only():
         # No gateway assertion on THIS request while SLOP owns identity: do not
@@ -536,12 +582,32 @@ async def security_headers(request: Request, call_next):
 # ------------------------------------------------------------------ health/setup
 @app.get("/healthz")
 def healthz():
-    return {"status": "ok", "admins": db.count_admins()}
+    # `sso` is what the console reads before rendering anything. Without it, a
+    # 401 plus admins==0 looked like a fresh install, and the SPA offered a
+    # "Create the first administrator" wizard to whoever opened the page — on an
+    # instance where accounts are managed in SLOP Administration.
+    return {"status": "ok", "admins": db.count_admins(), "sso": _sso_only()}
 
 
 @app.post("/setup")
 def setup(body: dict = Body(...)):
-    """First-run: create the initial admin. Refused once an admin exists."""
+    """First-run: create the initial admin. Refused once an admin exists, and
+    refused outright when SLOP owns identity.
+
+    The 409 below was the only guard, and under SSO it never armed: SLEP created
+    no local row for an SSO user, so count_admins() stayed 0 for ever. Any
+    signed-in SLOP user — an auditor included — could plant a SLEP-local
+    superuser that SLOP Administration can neither see nor revoke. Inert while
+    SSO holds, live the moment the trust flag or the shared secret is lost, and
+    that loss is a documented real event (deploy/sysiblectl exists partly to
+    recover from it). Accounts are provisioned by _ensure_sso_account now, so
+    there is also no first administrator left to create in this mode.
+    """
+    if _sso_only():
+        raise HTTPException(
+            status_code=403,
+            detail="SLEP has no first-run setup — sign in at the Sysible Linux "
+                   "Operations Platform. Accounts are managed in SLOP Administration.")
     if db.count_admins() > 0:
         raise HTTPException(status_code=409, detail="Setup already complete.")
     user = str(body.get("username") or "").strip()

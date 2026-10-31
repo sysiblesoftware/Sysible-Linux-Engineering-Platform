@@ -70,6 +70,7 @@ function NavIcon({ name }) {
 export default function App() {
   const [ready, setReady] = useState(false)
   const [needSetup, setNeedSetup] = useState(false)
+  const [sso, setSso] = useState(false)
   const [authed, setAuthed] = useState(false)
   const [username, setUsername] = useState('')
   const [roleName, setRoleName] = useState('')
@@ -94,7 +95,14 @@ export default function App() {
       } catch { /* not signed in yet — decide between first-run setup and login */ }
       try {
         const h = await fetch(apiUrl('/api/health')).then((r) => r.json())
-        if (h.admins === 0) setNeedSetup(true)
+        // Which kind of "not signed in" is this? Under SLOP SSO, SLEP has no
+        // login and no first-run setup of its own — both answer 403 — so a form
+        // here strands the operator on a screen whose every answer is refused.
+        // It used to be worse than that: SLEP provisioned no local row for an
+        // SSO user, so admins stayed 0 and this offered "Create the first
+        // administrator" to whoever opened the page, and it worked.
+        if (h.sso) setSso(true)
+        else if (h.admins === 0) setNeedSetup(true)
       } catch { /* ignore — fall through to the login screen */ }
       setReady(true)
     })()
@@ -102,6 +110,7 @@ export default function App() {
   }, [])
 
   if (!ready) return <div className="center muted">Loading…</div>
+  if (!authed && sso) return <SsoSignIn />
   if (!authed) return <Auth needSetup={needSetup} onAuthed={(u, r) => { setNeedSetup(false); setUsername(u); setRoleName(r); setAuthed(true) }} />
 
   const go = (v) => { setView(v); setProject(null); setRunId(null) }
@@ -159,6 +168,33 @@ export default function App() {
     </div>
   )
 }
+
+function SsoSignIn() {
+  // Accounts live in SLOP Administration; this instance has no login of its own.
+  // The link goes to the platform sign-in, which comes back here once signed in.
+  const next = encodeURIComponent(window.location.pathname + window.location.search)
+  return (
+    <div className="center">
+      <div className="card col" style={{ width: 'min(420px,92vw)' }}>
+        <div className="brand" style={{ gap: 12 }}>
+          <Logo size={40} />
+          <div className="col" style={{ gap: 2 }}>
+            <div style={{ fontSize: 17, lineHeight: 1.15 }}>Sysible Linux<br />Engineering Platform</div>
+          </div>
+        </div>
+        <div className="muted">Sign in at the Sysible Linux Operations Platform</div>
+        <div className="faint" style={{ fontSize: 13, lineHeight: 1.45 }}>
+          This console has no separate sign-in — accounts are managed in SLOP
+          Administration. If you are already signed in there, your session may
+          have expired.
+        </div>
+        <a className="primary" style={{ textAlign: 'center', textDecoration: 'none' }}
+           href={`/login?next=${next}`}>Go to sign in</a>
+      </div>
+    </div>
+  )
+}
+
 
 function Auth({ needSetup, onAuthed }) {
   const [u, setU] = useState('')
