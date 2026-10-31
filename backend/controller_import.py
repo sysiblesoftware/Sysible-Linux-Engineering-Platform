@@ -475,14 +475,32 @@ def fetch_hosts(controller_url: str, api_key: str):
     return {"hosts": out, "errors": errors}
 
 
-def import_into_inventory(inventory_id: int, controller_url: str, api_key: str, only_names=None):
+@_accepts_cert
+def import_into_inventory(inventory_id: int, controller_url: str, api_key: str, only_names=None,
+                          _cert_pem: str = ""):
     """Import the Controller's hosts into a SLEP inventory. `only_names` (a set/list
     of host names) restricts the import to that selection — so the operator can send
-    different hosts to different inventories. Returns {imported, agents, ssh, total}."""
+    different hosts to different inventories. Returns {imported, agents, ssh, total}.
+
+    THE PIN HAS TO BE THREADED EXPLICITLY HERE. @_accepts_cert sets the pin for
+    the duration of this call, but fetch_hosts is itself decorated, and that
+    decorator's `cert_pem` defaults to "" — which _pinned() then SETS, clearing
+    the pin this call established. So calling fetch_hosts bare would drop the
+    certificate even with the decorator in place. _cert_pem is read back out of
+    the contextvar and handed on.
+
+    This helper was the only public one in the module without the decorator, and
+    the route calling it passed no cert_pem. Since a stock Controller serves a
+    self-signed cert — the entire reason the trust-on-first-use pinning exists —
+    the one call that actually writes hosts into an inventory was also the only
+    one that could not reach the Controller: Connect pinned the cert, Test said
+    "reachable · N host(s)", the host list rendered, and "Add N →" answered 400
+    "certificate verify failed: self-signed certificate".
+    """
     inv = db.get_inventory(inventory_id)
     if not inv:
         raise ControllerImportError("Inventory not found.")
-    fetched = fetch_hosts(controller_url, api_key)
+    fetched = fetch_hosts(controller_url, api_key, cert_pem=_cert_pem or _PINNED_CERT.get())
     wanted = set(only_names) if only_names is not None else None
 
     agents_n = ssh_n = 0

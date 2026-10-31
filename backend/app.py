@@ -1599,6 +1599,58 @@ def delete_host(hid: int, request: Request, user: str = Depends(current_user)):
     return {"status": "deleted"}
 
 
+def _controller_call(ctrl: dict, call):
+    """Run `call(cert_pem)` against a SAVED Controller, with its pinned certificate.
+
+    A standalone Controller serves a self-signed cert, which changes whenever it
+    is rebuilt or moved (container → standalone app, a new host, a regenerated
+    cert). Four of the six routes that reach a saved Controller then failed
+    permanently with a raw "certificate verify failed: self-signed certificate"
+    and no suggested action — Test, the host listing, the environment picker and
+    the import. The cure was Disconnect + reconnect, which nothing said.
+
+    On a verification failure the two cases are NOT the same, and treating them
+    the same is how the hole got in:
+
+      * NO pinned cert — a Controller connected before pinning existed, or one
+        that used to serve a publicly trusted cert. Trust on FIRST use: fetch
+        what it is presenting, pin and persist it, retry. That is the same trust
+        decision Connect makes, just made later, and it is what enrolment has
+        always done here.
+      * A pinned cert that no longer matches. Report it, and name the cure.
+        Silently re-pinning — which enrolment used to do — hands an on-path
+        attacker who can also break the existing connection a re-pin for free,
+        and enrolment is the one call that ships a one-time enrollment token to
+        a host. A pin that replaces itself on mismatch is not a pin.
+        Reconnecting is one click in Controllers and is an operator saying
+        "yes, that is the new certificate".
+
+    `ctrl` is mutated in place on a first-use pin, so a multi-host enroll pins
+    once rather than per host.
+    """
+    cert = ctrl.get("tls_cert", "") or ""
+    try:
+        return call(cert)
+    except controller_import.ControllerImportError as e:
+        if not controller_import._is_cert_error(e):
+            raise
+        if cert:
+            raise controller_import.ControllerImportError(
+                f"The TLS certificate {ctrl.get('name') or ctrl.get('base_url')} is "
+                "presenting no longer matches the one SLEP pinned when it was "
+                "connected. If you rebuilt or moved the Controller, Disconnect it in "
+                "Controllers and connect again to trust the new certificate. If you "
+                "did not, the connection may be intercepted — do not reconnect until "
+                f"you know why it changed. (Underlying error: {e})") from None
+        fresh = controller_import.fetch_server_cert(ctrl["base_url"])
+        if not fresh:
+            raise
+        if ctrl.get("id"):
+            db.set_controller_tls_cert(ctrl["id"], fresh)
+        ctrl["tls_cert"] = fresh
+        return call(fresh)
+
+
 @app.get("/controllers/{cid}/hosts")
 def controller_hosts(cid: int, request: Request, user: str = Depends(current_user)):
     """List a connected Controller's hosts (agents + SSH) WITHOUT importing — the
@@ -1610,7 +1662,8 @@ def controller_hosts(cid: int, request: Request, user: str = Depends(current_use
     # could drive another tenant's Controller key to enumerate that Controller's fleet.
     _guard_object_org(request, ctrl.get("org_id"), "operator")
     try:
-        return controller_import.fetch_hosts(ctrl["base_url"], ctrl["api_key"], cert_pem=ctrl.get("tls_cert", ""))
+        return _controller_call(ctrl, lambda c: controller_import.fetch_hosts(
+            ctrl["base_url"], ctrl["api_key"], cert_pem=c))
     except controller_import.ControllerImportError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -1626,30 +1679,40 @@ def controller_environments(cid: int, request: Request, user: str = Depends(curr
         raise HTTPException(status_code=404, detail="Controller connection not found.")
     _guard_object_org(request, ctrl.get("org_id"), "operator")
     try:
-        return {"environments": controller_import.list_environments(
-            ctrl["base_url"], ctrl["api_key"], cert_pem=ctrl.get("tls_cert", ""))}
+        return {"environments": _controller_call(ctrl, lambda c: controller_import.list_environments(
+            ctrl["base_url"], ctrl["api_key"], cert_pem=c))}
     except controller_import.ControllerImportError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
 
 @app.post("/inventories/{iid}/import-controller")
 def import_controller(iid: int, request: Request, body: dict = Body(...), user: str = Depends(current_user)):
-    _guard_inventory(request, iid, "operator")
     """Import hosts into this inventory from a Controller — either a saved one
     (controller_id) or an ad-hoc controller_url + api_key. Pass `host_names` (a
     list) to import only that selection; omit it to import everything."""
+    _guard_inventory(request, iid, "operator")
     cid = body.get("controller_id")
+    cert_pem = ""
     if cid:
         ctrl = db.get_controller(int(cid), include_key=True)
         if not ctrl:
             raise HTTPException(status_code=404, detail="Controller connection not found.")
         url, key = ctrl["base_url"], ctrl["api_key"]
+        # The pinned cert, same as every sibling call. Without it this route —
+        # the only one that actually writes the hosts — fell back to the system
+        # CA store and 400'd on the self-signed cert a stock Controller serves,
+        # while Connect, Test and the host listing all worked.
+        cert_pem = ctrl.get("tls_cert", "")
     else:
         url, key = str(body.get("controller_url") or ""), str(body.get("api_key") or "")
     names = body.get("host_names")
     only = list(names) if isinstance(names, list) else None
     try:
-        summary = controller_import.import_into_inventory(iid, url, key, only_names=only)
+        if cid:
+            summary = _controller_call(ctrl, lambda c: controller_import.import_into_inventory(
+                iid, url, key, only_names=only, cert_pem=c))
+        else:
+            summary = controller_import.import_into_inventory(iid, url, key, only_names=only)
     except controller_import.ControllerImportError as e:
         raise HTTPException(status_code=400, detail=str(e))
     if cid:
@@ -1750,7 +1813,8 @@ def test_controller(cid: int, user: str = Depends(require_superuser)):
     if not ctrl:
         raise HTTPException(status_code=404, detail="Controller connection not found.")
     try:
-        return {"status": "ok", **controller_import.test_connection(ctrl["base_url"], ctrl["api_key"], cert_pem=ctrl.get("tls_cert", ""))}
+        return {"status": "ok", **_controller_call(ctrl, lambda c: controller_import.test_connection(
+            ctrl["base_url"], ctrl["api_key"], cert_pem=c))}
     except controller_import.ControllerImportError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -3828,7 +3892,8 @@ def infra_create(request: Request, body: dict = Body(...), user: str = Depends(r
         if not ctrl:
             raise HTTPException(status_code=404, detail="Controller not found.")
         try:
-            controller_key = controller_import.get_controller_key(ctrl["base_url"], ctrl["api_key"], cert_pem=ctrl.get("tls_cert", ""))
+            controller_key = _controller_call(ctrl, lambda c: controller_import.get_controller_key(
+                ctrl["base_url"], ctrl["api_key"], cert_pem=c))
         except controller_import.ControllerImportError:
             controller_key = ""   # non-fatal: generate anyway, enroll can install the key later
 
@@ -4583,9 +4648,9 @@ def _enroll_infra_hosts(project_id: int, controller_id=None):
         if not ip:
             results.append({"name": nm, "ip": "", "ok": False, "detail": "no IP yet"})
             continue
-        ok, detail = controller_import.register_ssh_host(
+        ok, detail = _controller_call(ctrl, lambda c: controller_import.register_ssh_host(
             ctrl["base_url"], ctrl["api_key"], nm, ip, huser, meta.get("environment", ""),
-            cert_pem=ctrl.get("tls_cert", ""))
+            cert_pem=c))
         ok_n += 1 if ok else 0
         results.append({"name": nm, "ip": ip, "ok": ok, "detail": detail})
     return {"results": results, "enrolled": ok_n, "total": len(hosts), "controller": ctrl["name"]}
@@ -4618,27 +4683,16 @@ def _resolve_enroll_controller(project_id, controller_id=None):
 
 
 def _fetch_agent_bundle_tofu(ctrl: dict, environment: str = "") -> bytes:
-    """Download an agent bundle, trusting the Controller's self-signed cert on first use.
-    Enroll runs long after connect, and a standalone Controller's self-signed cert changes
-    when it's rebuilt or moved (e.g. container → standalone app) — leaving the pinned cert
-    stale or never set, so the fetch fails 'certificate verify failed: self-signed'. On that
-    one error, fetch the Controller's CURRENT cert, PIN + PERSIST it (so the next enroll and
-    key-bake reuse it), and retry once. `ctrl` is mutated in place so a multi-host enroll
-    only re-pins once. Any non-cert error propagates unchanged."""
-    cert = ctrl.get("tls_cert", "") or ""
-    try:
-        return controller_import.fetch_agent_bundle(ctrl["base_url"], ctrl["api_key"],
-                                                    environment=environment, cert_pem=cert)
-    except controller_import.ControllerImportError as e:
-        if not controller_import._is_cert_error(e):
-            raise
-        fresh = controller_import.fetch_server_cert(ctrl["base_url"])
-        if not fresh or fresh == cert:
-            raise    # couldn't fetch a cert, or the pinned one already matches — real failure
-        db.set_controller_tls_cert(ctrl["id"], fresh)
-        ctrl["tls_cert"] = fresh
-        return controller_import.fetch_agent_bundle(ctrl["base_url"], ctrl["api_key"],
-                                                    environment=environment, cert_pem=fresh)
+    """Download an agent bundle with the Controller's PINNED certificate.
+
+    The trust-on-first-use half is unchanged and now shared by every route that
+    reaches a saved Controller: no pinned cert means pin what it presents and
+    retry. What is gone is re-pinning a cert that was already pinned and has
+    CHANGED — see _controller_call. Enrolment is the worst place to trust a
+    changed certificate silently, because the bundle it downloads carries a
+    one-time enrollment token for the host."""
+    return _controller_call(ctrl, lambda c: controller_import.fetch_agent_bundle(
+        ctrl["base_url"], ctrl["api_key"], environment=environment, cert_pem=c))
 
 
 def _enroll_infra_agents(project_id: int, controller_id=None, environment=None):
