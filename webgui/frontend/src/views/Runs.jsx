@@ -233,7 +233,15 @@ export function RunLog({ runId, onBack, onOpenRun, backLabel = 'Runs' }) {
     let alive = true, offset = 0, acc = ''
     ;(async () => {
       while (alive) {
-        const r = await tail(`runs/${runId}/log?offset=${offset}`)
+        let r
+        try {
+          r = await tail(`runs/${runId}/log?offset=${offset}`)
+        } catch (e) {
+          // An expired session makes tail() throw (see api.js). Stop the loop
+          // rather than spin on a rejection until the page reloads.
+          if (alive) { acc += '\n' + (e.message || 'the log stream stopped'); setText(acc) }
+          break
+        }
         if (!alive) break
         if (r.text) { acc += r.text; setText(acc); const b = boxRef.current; if (b) b.scrollTop = b.scrollHeight }
         offset = r.next; setStatus(r.status)

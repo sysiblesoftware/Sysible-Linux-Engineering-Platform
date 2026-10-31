@@ -185,10 +185,19 @@ function useLogStream() {
     setLog(''); setRunning(true)
     await startFn()
     let off = 0
+    const stop = () => { clearInterval(timer.current); timer.current = null; setRunning(false) }
     const tick = async () => {
-      const { text, next, status } = await tail(`${logPath}?offset=${off}`)
+      // tail() throws on an expired session (see api.js). Without stopping here
+      // the interval keeps firing and rejecting until the page reloads.
+      let chunk
+      try {
+        chunk = await tail(`${logPath}?offset=${off}`)
+      } catch (e) {
+        setLog((l) => l + '\n' + (e.message || 'the log stream stopped')); stop(); return
+      }
+      const { text, next, status } = chunk
       if (text) { off = next; setLog((l) => l + text) }
-      if (status !== 'running') { clearInterval(timer.current); timer.current = null; setRunning(false) }
+      if (status !== 'running') stop()
     }
     timer.current = setInterval(tick, 900); tick()
   }
@@ -346,10 +355,17 @@ function DistributeKey({ inv, hosts, onClose }) {
 
   const poll = () => {
     let off = 0
+    const stop = () => { clearInterval(timer.current); timer.current = null; setRunning(false) }
     const tick = async () => {
-      const { text, next, status } = await tail(`inventories/${inv.id}/distribute-key/log?offset=${off}`)
+      let chunk
+      try {
+        chunk = await tail(`inventories/${inv.id}/distribute-key/log?offset=${off}`)
+      } catch (e) {
+        setLog((l) => l + '\n' + (e.message || 'the log stream stopped')); stop(); return
+      }
+      const { text, next, status } = chunk
       if (text) { off = next; setLog((l) => l + text) }
-      if (status !== 'running') { clearInterval(timer.current); timer.current = null; setRunning(false) }
+      if (status !== 'running') stop()
     }
     timer.current = setInterval(tick, 900); tick()
   }
