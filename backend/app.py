@@ -2828,11 +2828,19 @@ def keydist_public_key(user: str = Depends(current_user)):
 
 
 @app.post("/inventories/{iid}/distribute-key")
-def keydist_distribute(iid: int, body: dict = Body(...), user: str = Depends(require_superuser)):
+def keydist_distribute(iid: int, request: Request, body: dict = Body(...),
+                       user: str = Depends(require_superuser)):
     """Install SLEP's public key on the inventory's hosts (a selection via
     host_names, or all), authenticating once with the supplied SSH password
     through the inventory's jump host. On success a 'SLEP managed key' credential
-    is (re)created for key-based runs. Streams progress to the distribute log."""
+    is (re)created for key-based runs. Streams progress to the distribute log.
+
+    The guard is not a tenancy fix here — a system admin is 'admin' in every org
+    — but the rule is "every /inventories/{iid} route goes through it", and that
+    is the only version of the rule a test can keep true. It also makes an
+    unknown inventory a 404 here the way it is everywhere else.
+    """
+    _guard_inventory(request, iid, "operator")
     names = body.get("host_names")
     only = list(names) if isinstance(names, list) else None
     # Validate the jump host: it is interpolated into an ssh ProxyCommand that /bin/sh
@@ -2849,19 +2857,23 @@ def keydist_distribute(iid: int, body: dict = Body(...), user: str = Depends(req
 
 
 @app.get("/inventories/{iid}/distribute-key/log", response_class=PlainTextResponse)
-def keydist_log(iid: int, offset: int = 0, user: str = Depends(current_user)):
+def keydist_log(iid: int, request: Request, offset: int = 0,
+                user: str = Depends(current_user)):
+    # Reading a job log is a viewer action, but only within the inventory's own
+    # org: the log names every host and address, the jump host, the credential
+    # label and each host's SSH outcome.
+    _guard_inventory(request, iid, "viewer")
     text, nxt = keydist.job_log(iid, offset)
     status = "running" if keydist.job_running(iid) else "done"
     return PlainTextResponse(text, headers={"X-Log-Next": str(nxt), "X-Run-Status": status})
 
 
 @app.post("/inventories/{iid}/prepare-bastion")
-def keydist_prepare_bastion(iid: int, body: dict = Body(...), user: str = Depends(require_superuser)):
+def keydist_prepare_bastion(iid: int, request: Request, body: dict = Body(...),
+                            user: str = Depends(require_superuser)):
     """Install SLEP's key on the inventory's jump host so the ProxyJump hop is
     key-based. Uses the bastion spec from the body (or the inventory's saved one)."""
-    inv = db.get_inventory(iid)
-    if not inv:
-        raise HTTPException(status_code=404, detail="Inventory not found.")
+    inv = _guard_inventory(request, iid, "operator")
     bastion = _validate_bastion(str(body.get("bastion") or inv.get("bastion") or "").strip())
     try:
         keydist.start_prepare_bastion(iid, bastion, str(body.get("password") or ""))
@@ -2872,7 +2884,9 @@ def keydist_prepare_bastion(iid: int, body: dict = Body(...), user: str = Depend
 
 
 @app.get("/inventories/{iid}/prepare-bastion/log", response_class=PlainTextResponse)
-def keydist_prepare_bastion_log(iid: int, offset: int = 0, user: str = Depends(current_user)):
+def keydist_prepare_bastion_log(iid: int, request: Request, offset: int = 0,
+                                user: str = Depends(current_user)):
+    _guard_inventory(request, iid, "viewer")
     key = f"{iid}-bastion"
     text, nxt = keydist.job_log(key, offset)
     status = "running" if keydist.job_running(key) else "done"
@@ -2880,20 +2894,36 @@ def keydist_prepare_bastion_log(iid: int, offset: int = 0, user: str = Depends(c
 
 
 @app.post("/inventories/{iid}/test-connection")
-def keydist_test(iid: int, body: dict = Body(default={}), user: str = Depends(current_user)):
+def keydist_test(iid: int, request: Request, body: dict = Body(default={}),
+                 user: str = Depends(current_user)):
     """Probe SSH reachability of the inventory's hosts with a chosen credential
-    (or the SLEP managed key), through the jump host. Streams a per-host report."""
+    (or the SLEP managed key), through the jump host. Streams a per-host report.
+
+    Operator, not viewer: this opens SSH connections to the fleet. And the
+    credential is a SEPARATE id the caller chooses — keydist.start_test loads it
+    with include_secret=True and does no org check of its own — so the guard on
+    the inventory is not enough on its own.
+    """
+    _guard_inventory(request, iid, "operator")
     names = body.get("host_names")
     only = list(names) if isinstance(names, list) else None
+    cid = body.get("credential_id")
+    if cid not in (None, ""):
+        cred = db.get_credential(int(cid))
+        if not cred:
+            raise HTTPException(status_code=404, detail="Credential not found.")
+        _guard_object_org(request, cred.get("org_id"), "operator")
     try:
-        keydist.start_test(iid, only, body.get("credential_id"))
+        keydist.start_test(iid, only, cid)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return {"status": "started"}
 
 
 @app.get("/inventories/{iid}/test-connection/log", response_class=PlainTextResponse)
-def keydist_test_log(iid: int, offset: int = 0, user: str = Depends(current_user)):
+def keydist_test_log(iid: int, request: Request, offset: int = 0,
+                     user: str = Depends(current_user)):
+    _guard_inventory(request, iid, "viewer")
     key = f"{iid}-test"
     text, nxt = keydist.job_log(key, offset)
     status = "running" if keydist.job_running(key) else "done"
