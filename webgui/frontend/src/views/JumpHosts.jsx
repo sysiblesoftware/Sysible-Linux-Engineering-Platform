@@ -56,7 +56,7 @@ function AddJumpHost({ onClose, onDone }) {
   return (
     <Modal title="Add jump host" onClose={onClose}>
       <Field label="Name"><input value={name} onChange={(e) => setName(e.target.value)} autoFocus placeholder="hypervisor-1" /></Field>
-      <Field label="Host (address)"><input value={host} onChange={(e) => setHost(e.target.value)} placeholder="192.168.8.212" /></Field>
+      <Field label="Host (address)"><input value={host} onChange={(e) => setHost(e.target.value)}  /></Field>
       <Field label="SSH username"><input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="admin" /></Field>
       <Field label="Port"><input value={port} onChange={(e) => setPort(e.target.value)} placeholder="22" /></Field>
       {node}

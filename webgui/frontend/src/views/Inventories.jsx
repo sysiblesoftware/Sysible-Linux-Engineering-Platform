@@ -134,7 +134,7 @@ function NewInventory({ onClose, onDone }) {
         <input value={environment} list="env-suggestions" onChange={(e) => setEnvironment(e.target.value)} placeholder="dev" />
         <datalist id="env-suggestions">{ENV_SUGGESTIONS.map((e) => <option key={e} value={e} />)}</datalist>
       </Field>
-      <Field label="SSH jump host / bastion (optional)"><input value={bastion} onChange={(e) => setBastion(e.target.value)} placeholder="user@192.168.8.212  — reach hosts through this box" /></Field>
+      <Field label="SSH jump host / bastion (optional)"><input value={bastion} onChange={(e) => setBastion(e.target.value)} placeholder="user@198.51.100.10  — reach hosts through this box" /></Field>
       <div className="muted">Set the jump host when hosts aren’t directly reachable (e.g. VMs on a hypervisor’s internal network). Runs tunnel SSH through it (ProxyJump).</div>
       {node}
       <button className="primary" onClick={() => wrap(async () => { await api('inventories', { method: 'POST', json: { name, bastion, environment } }); onDone() })}>Create</button>
@@ -153,7 +153,7 @@ function SetBastion({ inv, onClose, onDone }) {
         <datalist id="env-suggestions">{ENV_SUGGESTIONS.map((e) => <option key={e} value={e} />)}</datalist>
       </Field>
       <div className="muted" style={{ margin: '4px 0' }}>SSH bastion to reach this inventory’s hosts through (ProxyJump). Leave empty for direct connections.</div>
-      <Field label="Jump host"><input value={bastion} onChange={(e) => setBastion(e.target.value)} placeholder="user@192.168.8.212" /></Field>
+      <Field label="Jump host"><input value={bastion} onChange={(e) => setBastion(e.target.value)} placeholder="user@198.51.100.10" /></Field>
       {node}
       <button className="primary" onClick={() => wrap(async () => { await api('inventories/' + inv.id, { method: 'PATCH', json: { bastion, environment } }); onDone() })}>Save</button>
     </Modal>
@@ -315,7 +315,7 @@ function PrepareBastion({ inv, onClose }) {
       <div className="muted">Installs SLEP’s key on the jump host so runs and key distribution hop through it with the key — not a password. The password is used once and never saved.</div>
       <div className="job-split">
         <div className="job-col">
-          <Field label="Jump host (user@host)"><input value={bastion} onChange={(e) => setBastion(e.target.value)} placeholder="admin@192.168.8.212" autoFocus /></Field>
+          <Field label="Jump host (user@host)"><input value={bastion} onChange={(e) => setBastion(e.target.value)} placeholder="admin@198.51.100.10" autoFocus /></Field>
           <Field label="Jump host password (used once)"><input type="password" value={password} autoComplete="off" onChange={(e) => setPassword(e.target.value)} /></Field>
           {node}
           <div className="row" style={{ marginTop: 8 }}>
@@ -390,7 +390,7 @@ function DistributeKey({ inv, hosts, onClose }) {
             <Field label="SSH username"><input value={username} autoComplete="off" onChange={(e) => setUsername(e.target.value)} placeholder="e.g. admin" autoFocus /></Field>
             <Field label="Host password (used once)"><input type="password" value={password} autoComplete="off" onChange={(e) => setPassword(e.target.value)} /></Field>
           </div>
-          <Field label="Jump host (optional)"><input value={bastion} onChange={(e) => setBastion(e.target.value)} placeholder="user@192.168.8.212" /></Field>
+          <Field label="Jump host (optional)"><input value={bastion} onChange={(e) => setBastion(e.target.value)} placeholder="user@198.51.100.10" /></Field>
           <div className="faint" style={{ fontSize: 12, margin: '4px 2px' }}>{sel.size} of {hosts.length} host(s) selected</div>
           <div style={{ maxHeight: '34vh', overflow: 'auto', border: '1px solid var(--line)', borderRadius: 8 }}>
             {hosts.map((h) => (

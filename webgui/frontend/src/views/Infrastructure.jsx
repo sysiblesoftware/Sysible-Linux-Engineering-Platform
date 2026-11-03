@@ -146,7 +146,7 @@ export function JumpHostEditor({ r, onClose, onSaved }) {
       </Field>
       {jhSel === '__manual' && (
         <Field label="Jump host (user@host[:port])">
-          <input value={bastion} onChange={(e) => setBastion(e.target.value)} placeholder="admin@192.168.8.212" />
+          <input value={bastion} onChange={(e) => setBastion(e.target.value)} placeholder="admin@198.51.100.10" />
         </Field>
       )}
       <div style={{ background: 'rgba(240,180,40,0.10)', border: '1px solid rgba(240,180,40,0.35)',
@@ -371,7 +371,7 @@ export function PrepareJumpModal({ r, onClose }) {
       <p className="muted" style={{ marginTop: 0 }}>
         Installs SLEP's key on the jump host (the hypervisor) with a one-time password, so runs and Diagnose hop through it with the key. The password is used once and never saved.
       </p>
-      <Field label="Jump host (hypervisor address)"><input value={host} onChange={(e) => setHost(e.target.value)} placeholder="192.168.8.212" /></Field>
+      <Field label="Jump host (hypervisor address)"><input value={host} onChange={(e) => setHost(e.target.value)} /></Field>
       <Field label="SSH username"><input value={user} onChange={(e) => setUser(e.target.value)} placeholder="admin" /></Field>
       <Field label="Host password (used once)"><input type="password" value={pw} onChange={(e) => setPw(e.target.value)} autoComplete="off" /></Field>
       {node}
@@ -866,6 +866,19 @@ function LibvirtConnect({ values, set }) {
 
   const buildUri = (m, h, u, k) => {
     if (m === 'local') return 'qemu:///system'
+    // NO HOST, NO URI. With the host field empty this used to assemble
+    // `qemu+ssh://admin@/system?no_verify=1` and hand it over as though it
+    // were a real connection. libvirt cannot parse a URI with no host, falls
+    // back to its default, and the operator gets
+    //
+    //    ssh: connect to host localhost port 22: Connection refused
+    //
+    // pointing at a machine they never named — which reads as "the hypervisor
+    // is down" rather than "you have not told me which hypervisor". Returning
+    // empty is also what greys out Test, Load from host and Load images: they
+    // are already guarded on `!values.uri`, so the controls that would produce
+    // that error simply cannot be pressed.
+    if (!(h || '').trim()) return ''
     const base = `qemu+ssh://${(u || 'root').trim()}@${(h || '').trim()}/system`
     const q = []
     if (k?.keyfile) q.push('keyfile=' + k.keyfile)
@@ -894,7 +907,14 @@ function LibvirtConnect({ values, set }) {
       {mode === 'remote' && (
         <>
           <div className="row" style={{ gap: 10, marginTop: 8 }}>
-            <Field label="Host (IP or name)"><input value={host} onChange={(e) => setHost(e.target.value)} placeholder="192.168.8.212" /></Field>
+            {/* NO PLACEHOLDER. Reported: "That IP should be blank because it's
+                confusing and looks like it's already in there." A bare address
+                in placeholder grey is indistinguishable from a filled-in value
+                at a glance, and this one was a real address from the author's
+                own network — so the field read as "already configured, pointing
+                at a host you have never heard of". The label says what goes
+                here; an empty box says it is empty. */}
+            <Field label="Host (IP or name)"><input value={host} onChange={(e) => setHost(e.target.value)} /></Field>
             <Field label="SSH user"><input value={user} onChange={(e) => setUser(e.target.value)} placeholder="root / admin" /></Field>
           </div>
           {/* One-time password: let SLEP install its key for you, breaking the
