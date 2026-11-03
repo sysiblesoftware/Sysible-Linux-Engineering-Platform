@@ -3942,6 +3942,29 @@ def _derive_public_key(private_key: str) -> str:
         return r.stdout.strip() if r.returncode == 0 else ""
 
 
+def _controller_group(options: dict) -> str:
+    """The Controller environment new agents enroll into.
+
+    NOT `environment`, which is the CLOUD RESOURCE TAG that Terraform puts in
+    `tags = [var.environment, "slep"]`. Those were one key doing two jobs: the
+    build panel had a control for each, both wrote `environment`, and the
+    Controller-environment picker won — so choosing a group silently retagged
+    the cloud resources, and leaving enrolment off replaced a typed tag with
+    the empty string.
+
+    ONE FUNCTION, because there are TWO write paths — set_infra on create and
+    set_infra_environment on regenerate — and a test caught them disagreeing:
+    the fix went into the second and a freshly created project still stored its
+    cloud tag as its Controller group.
+
+    The fallback keeps projects made before the split working. Their single
+    `environment` WAS the group, so reading it is right for them and harmless
+    for everyone else, who have the explicit key.
+    """
+    return str((options or {}).get("controller_environment")
+               or (options or {}).get("environment", ""))
+
+
 @app.post("/infra")
 def infra_create(request: Request, body: dict = Body(...), user: str = Depends(require_operator)):
     """Generate a Terraform VM project from the wizard selections. A chosen deploy
@@ -4077,10 +4100,10 @@ def infra_create(request: Request, body: dict = Body(...), user: str = Depends(r
         # PRESERVE the rest of the infra wiring (controller, inventory, jump host,
         # stored password) — the lossy set_infra would wipe those extra columns.
         db.set_infra_ssh_user(pid, str(options.get("ssh_user", "")))
-        db.set_infra_environment(pid, str(options.get("environment", "")))
+        db.set_infra_environment(pid, _controller_group(options))
     else:
         db.set_infra(pid, provider, int(controller_id) if controller_id else None,
-                     str(options.get("ssh_user", "")), str(options.get("environment", "")),
+                     str(options.get("ssh_user", "")), _controller_group(options),
                      inventory_id=inv_target, bastion=hv_bastion)
     # Persist the wizard options (minus the secret) so an Edit can pre-fill + regenerate.
     _opts_store = {k: v for k, v in (options or {}).items() if k != "ssh_password"}

@@ -586,14 +586,20 @@ export function CreateWizard({ onClose, onDone, project, editInfra }) {
         ))}
       </div>
 
-      <Field label="Deploy SSH credential (so SLEP can log in to configure the VMs)">
+      {/* AN EXTRA key, not the only one. backend/app.py bakes SLEP's own
+          managed key into every VM unconditionally (`managed_key =
+          keydist.ensure_key()`), so the old "None (VMs won't be reachable by
+          SLEP…)" was simply false, and picking the "SLEP managed key"
+          credential here was a no-op that looked load-bearing. Say what this
+          actually adds. */}
+      <Field label="Also deploy an SSH credential (optional)">
         <select value={deployCredId} onChange={(e) => setDeployCredId(e.target.value)}>
-          <option value="">None (VMs won’t be reachable by SLEP unless you add a key another way)</option>
+          <option value="">None — SLEP’s own key is enough</option>
           {creds.map((c) => <option key={c.id} value={c.id}>{c.name}{c.username ? ` (${c.username})` : ''}</option>)}
         </select>
       </Field>
       <div className="faint" style={{ fontSize: 12 }}>
-        SLEP bakes this credential’s <b>public</b> key into the VMs’ cloud-init, so the same credential you pick for the cadence’s Ansible steps can SSH in. Pick an <b>SSH key</b> credential.
+        SLEP’s managed key is <b>always</b> baked into the VMs, so it can reach them whatever you choose here — pick a credential only if you want a <b>second</b> key in as well (your own, or one a teammate uses). Must be an <b>SSH key</b> credential.
         {creds.length === 0 && <> No SSH key credentials yet — add one under <b>Credentials</b> first.</>}
       </div>
 
@@ -614,25 +620,36 @@ export function CreateWizard({ onClose, onDone, project, editInfra }) {
         </select>
       </Field>
       <div className="faint" style={{ fontSize: 12 }}>If chosen, the Controller’s SSH key is also baked into the VMs’ cloud-init so it can reach them, and “Enroll →” registers them after apply.</div>
-      {controllerId && (
-        <>
-          <Field label="Controller environment for the new VMs">
-            <select value={environment} onChange={(e) => setEnvironment(e.target.value)}>
-              <option value="">(unassigned)</option>
-              {envs.map((n) => <option key={n} value={n}>{n}</option>)}
-              {environment && !envs.includes(environment) && <option value={environment}>{environment}</option>}
-            </select>
-          </Field>
-          <div className="faint" style={{ fontSize: 12 }}>The VMs enroll straight into this environment (inheriting its sudo policy) instead of “Unassigned”. Create environments in the Controller if the one you want isn’t listed.</div>
-        </>
-      )}
+      {/* ALWAYS ON SCREEN. This used to render only inside `{controllerId &&
+          (…)}`, so with enrolment left on "Don't enroll" there was nothing to
+          find — reported as "why can't I get a list of the Controller
+          environments to choose from". It is disabled rather than hidden now:
+          an operator can see the choice exists and what it needs. */}
+      <Field label="Controller environment for the new VMs">
+        <select value={environment} disabled={!controllerId}
+          onChange={(e) => setEnvironment(e.target.value)}>
+          <option value="">{controllerId ? '(unassigned)' : '— choose a Controller above first —'}</option>
+          {envs.map((n) => <option key={n} value={n}>{n}</option>)}
+          {environment && !envs.includes(environment) && <option value={environment}>{environment}</option>}
+        </select>
+      </Field>
+      <div className="faint" style={{ fontSize: 12 }}>
+        {controllerId
+          ? <>The VMs enroll straight into this environment (inheriting its sudo policy) instead of “Unassigned”. {envs.length === 0 && <>That Controller reports no environments yet — create one there first.</>}</>
+          : <>These come from the Controller: choose a Controller just above and its environments are listed here. This is <b>not</b> the “Environment tag” further up, which only names the resources in your cloud.</>}
+      </div>
       {node}
       <button className="primary" onClick={() => wrap(async () => {
         if (!project && !name.trim()) throw new Error('Give it a name.')
-        // The Controller environment the applied VMs enroll into (persisted on the infra
-        // project, then stamped onto each agent bundle at enroll). Only meaningful with a
-        // Controller chosen; harmless (blank) otherwise.
-        let options = { ...values, environment: controllerId ? environment : '' }
+        // TWO SEPARATE KEYS. `environment` is the cloud resource tag the
+        // operator typed; `controller_environment` is the group the applied
+        // VMs enroll into (persisted on the infra project, then stamped onto
+        // each agent bundle at enroll).
+        //
+        // This line used to write the picker's value — or '' — over the typed
+        // tag, so typing "dev" and leaving enrolment off produced Terraform
+        // with `variable "environment" { default = "" }` and the tag was gone.
+        let options = { ...values, controller_environment: controllerId ? environment : '' }
         if (groupsOn) {
           if (!values.groups.length) throw new Error('Add at least one VM type, or turn off “Multiple VM types”.')
           for (const g of values.groups) {

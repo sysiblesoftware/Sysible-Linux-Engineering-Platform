@@ -45,7 +45,21 @@ _SSH_PASSWORD = {"key": "ssh_password", "label": "Login password (optional — e
                  "type": "password", "default": "",
                  "help": "Set a password for the login user and turn ON password SSH. Leave blank for "
                          "key-only. Stored hashed (SHA-512) in the VM's cloud-init, not in plaintext."}
-_ENV = {"key": "environment", "label": "Environment tag (Controller group)", "type": "text", "default": "production"}
+# The CLOUD RESOURCE TAG, and nothing else. Terraform puts it in
+# `tags = [var.environment, "slep"]` and `Environment = var.environment` across
+# every renderer below — it names the resources in the cloud console, and has
+# nothing to do with which Controller group an agent enrolls into.
+#
+# It used to say "(Controller group)", which is where this went wrong: an
+# operator read that, typed their Controller environment here, and the panel
+# then threw it away — the submit overwrote this key with the Controller
+# environment picker's value, or with "" when enrolment was off. Two different
+# things were sharing one key and the label pointed at the wrong one. The group
+# to enroll into is `controller_environment` now.
+_ENV = {"key": "environment", "label": "Environment tag (names the resources in your cloud)",
+        "type": "text", "default": "production",
+        "help": "Tags the created resources, e.g. dev / staging / production. "
+                "Not the Controller environment — that is chosen further down."}
 
 # Curated catalog of common cloud images (generic/-cloud qcow2 with cloud-init),
 # offered as a picker so the operator doesn't hunt for URLs. Each uses the distro's
