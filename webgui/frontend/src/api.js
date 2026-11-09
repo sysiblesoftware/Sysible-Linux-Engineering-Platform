@@ -28,11 +28,25 @@ export function setRole(r) {
 export const canWrite = () => role === 'operator' || role === 'superuser'
 export const isSuperuser = () => role === 'superuser'
 
-// Theme (dark default / light), persisted per browser and applied to <html>.
-export const getTheme = () => localStorage.getItem('slep_theme') || 'dark'
+// Theme. The decision lives in ONE place — the pre-paint script in index.html,
+// which owns the "sysible-theme" key every Sysible console reads and the
+// migration off the old per-app keys. These are thin wrappers over it, NOT a
+// second source of truth: reading localStorage here with its own key is exactly
+// how SLEP came to disagree with SLOP and the Controller about what the theme
+// was. The fallbacks only matter if the script somehow did not run.
+export const getTheme = () => {
+  try {
+    const t = window.sysibleTheme?.get()
+    if (t === 'light' || t === 'dark') return t
+  } catch { /* no-op */ }
+  return document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark'
+}
 export function applyTheme(t) {
-  document.documentElement.setAttribute('data-theme', t)
-  localStorage.setItem('slep_theme', t)
+  try {
+    window.sysibleTheme.set(t)
+  } catch {
+    document.documentElement.setAttribute('data-theme', t)
+  }
 }
 
 // A session that expires at the GATEWAY does not come back as a 401.
