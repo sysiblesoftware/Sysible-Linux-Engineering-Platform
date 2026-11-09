@@ -33,13 +33,34 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && ln -sf "$(command -v genisoimage)" /usr/local/bin/mkisofs \
     && rm -rf /var/lib/apt/lists/*
 
-# Terraform (arch-aware via buildx's TARGETARCH: amd64 / arm64).
-ARG TARGETARCH=amd64
+# Terraform. The architecture is read from the IMAGE BEING BUILT, not from a
+# build arg.
+#
+# This was `ARG TARGETARCH=amd64` with `..._linux_${TARGETARCH}.zip`. TARGETARCH
+# is a predefined arg that only a BuildKit/buildx build populates; anything else
+# leaves it unset and the `=amd64` default silently wins. That is not a corner
+# case here — a host that fell back to the standalone docker-compose binary gets
+# the legacy builder, and install-sysible installs exactly that fallback when
+# Docker's own apt repo is unreachable. On an arm64 host it then puts a genuine
+# amd64 Terraform into an arm64 image.
+#
+# The SHA-256 check below did not catch it and could not: the amd64 zip verifies
+# perfectly against HashiCorp's published sums, because it IS the real amd64
+# artifact — just the wrong one for this image. Integrity says nothing about
+# architecture. So the build went straight past verification and died at the
+# version probe with the one error that names no cause:
+#
+#     /bin/sh: 1: terraform: Exec format error
+#
+# `dpkg --print-architecture` answers from the image's own dpkg database, so it
+# is correct under every builder — buildx or legacy, native or emulated — and it
+# already uses HashiCorp's spelling (amd64 / arm64).
 ARG TERRAFORM_VERSION=1.9.8
 # Download the pinned Terraform and verify its SHA-256 against HashiCorp's
 # published SHA256SUMS before unzipping (so a corrupted/substituted artifact from
 # a mirror/MITM is rejected, not installed).
-RUN TFZIP="terraform_${TERRAFORM_VERSION}_linux_${TARGETARCH}.zip" \
+RUN ARCH="$(dpkg --print-architecture)" \
+    && TFZIP="terraform_${TERRAFORM_VERSION}_linux_${ARCH}.zip" \
     && curl -fsSL -o "/tmp/${TFZIP}" \
          "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/${TFZIP}" \
     && curl -fsSL -o /tmp/tf.sums \
