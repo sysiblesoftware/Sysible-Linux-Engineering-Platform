@@ -41,6 +41,38 @@ const NAV = [
   { key: 'users', label: 'Users', icon: 'users', su: true },
 ]
 
+// The nav keys that are a real place to be. A ?view= naming anything else is
+// ignored rather than rendering an empty shell.
+const VIEW_KEYS = new Set(NAV.map((n) => n.key))
+
+// WHY THE VIEW LIVES IN THE URL. It used to be useState alone, so every view
+// but Projects was unreachable by address: no bookmark, no new tab, no back
+// button, and -- the reason this was noticed -- no way for SLOP's
+// Administration to link to SLEP's Organizations or Users the way it already
+// linked into the Controller's Settings. The console was a place you could
+// only arrive at the front door of.
+function viewFromSearch() {
+  try {
+    const v = new URLSearchParams(window.location.search).get('view')
+    if (v && VIEW_KEYS.has(v)) return v
+  } catch { /* a URL we cannot parse is not a view */ }
+  return 'projects'
+}
+
+function hrefForView(key) { return '?view=' + (key || 'projects') }
+
+// replaceState, not pushState: the rail is not history. Clicking five sections
+// should leave Back meaning "where I was before this console", not five steps
+// of rail-clicking to walk out through.
+function setSearchView(v) {
+  try {
+    const url = new URL(window.location.href)
+    if (v && v !== 'projects') url.searchParams.set('view', v)
+    else url.searchParams.delete('view')
+    window.history.replaceState(null, '', url.toString())
+  } catch { /* an address bar we cannot write is not worth failing over */ }
+}
+
 // Feather-style line icons (inline SVG paths), matching the Controller's set.
 const ICONS = {
   folder: <path d="M3 7a2 2 0 0 1 2-2h3.5l2 2H19a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />,
@@ -74,7 +106,7 @@ export default function App() {
   const [authed, setAuthed] = useState(false)
   const [username, setUsername] = useState('')
   const [roleName, setRoleName] = useState('')
-  const [view, setView] = useState('projects')
+  const [view, setView] = useState(viewFromSearch)
   const [project, setProject] = useState(null)
   const [runId, setRunId] = useState(null)
   const [infraBump, setInfraBump] = useState(0)   // bump → the IDE's infra bar refetches (e.g. after "Build Infrastructure")
@@ -113,7 +145,7 @@ export default function App() {
   if (!authed && sso) return <SsoSignIn />
   if (!authed) return <Auth needSetup={needSetup} onAuthed={(u, r) => { setNeedSetup(false); setUsername(u); setRoleName(r); setAuthed(true) }} />
 
-  const go = (v) => { setView(v); setProject(null); setRunId(null) }
+  const go = (v) => { setView(v); setProject(null); setRunId(null); setSearchView(v) }
   const atNav = (k) => view === k && !project && runId == null
   const initials = (username || 'AD').slice(0, 2).toUpperCase()
 
@@ -126,9 +158,18 @@ export default function App() {
         </div>
         <nav className="rail-nav">
           {NAV.filter((n) => !n.su || roleName === 'superuser').map((n) => (
-            <button key={n.key} className={'rail-item' + (atNav(n.key) ? ' active' : '')} onClick={() => go(n.key)}>
+            <a key={n.key} href={hrefForView(n.key)}
+               className={'rail-item' + (atNav(n.key) ? ' active' : '')}
+               aria-current={atNav(n.key) ? 'page' : undefined}
+               onClick={(e) => {
+                 // Plain click navigates in place; ctrl/cmd/middle-click and
+                 // "open in new tab" are left to the browser, which is the
+                 // whole point of this being a link.
+                 if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return
+                 e.preventDefault(); go(n.key)
+               }}>
               <NavIcon name={n.icon} /> {n.label}
-            </button>
+            </a>
           ))}
         </nav>
         <div className="rail-foot">
