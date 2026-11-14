@@ -23,23 +23,40 @@ import Notifications from './views/Notifications.jsx'
 
 // Left-rail navigation — same shape as the Sysible Controller console.
 // `su: true` items are shown only to superusers.
+// Fifteen items in one flat run asked the reader to hold the whole list in
+// mind to find anything. They fall into four jobs and always did: WHAT you
+// manage, HOW runs reach it, WHAT you run, and oversight. `group` is the
+// heading an item sits under; the first needs none.
 const NAV = [
   { key: 'projects', label: 'Projects', icon: 'folder' },
   { key: 'inventories', label: 'Inventories', icon: 'server' },
   { key: 'infra', label: 'Infrastructure', icon: 'cloud' },
-  { key: 'controllers', label: 'Controllers', icon: 'link' },
+  { key: 'controllers', label: 'Controllers', icon: 'link', group: 'Reach' },
   { key: 'credentials', label: 'Credentials', icon: 'key' },
   { key: 'jumphosts', label: 'Jump Hosts', icon: 'jump' },
   { key: 'vault', label: 'Variable Vault', icon: 'lock' },
-  { key: 'templates', label: 'Job Templates', icon: 'template' },
+  { key: 'templates', label: 'Job Templates', icon: 'template', group: 'Run' },
   { key: 'runs', label: 'Runs', icon: 'play' },
   { key: 'pipelines', label: 'Pipelines', icon: 'pipeline' },
   { key: 'schedules', label: 'Schedules', icon: 'clock' },
   { key: 'notifications', label: 'Notifications', icon: 'bell' },
-  { key: 'organizations', label: 'Organizations', icon: 'org', su: true },
+  { key: 'organizations', label: 'Organizations', icon: 'org', su: true, group: 'Oversee' },
   { key: 'activity', label: 'Activity', icon: 'activity', su: true },
   { key: 'users', label: 'Users', icon: 'users', su: true },
 ]
+
+// A heading only when something under it survived the role filter: the whole
+// Oversee group is superuser-only, and a heading over nothing is worse than
+// no heading.
+function withHeadings(items) {
+  const out = []
+  let shown = null
+  for (const n of items) {
+    if (n.group && n.group !== shown) { out.push({ heading: n.group }); shown = n.group }
+    out.push(n)
+  }
+  return out
+}
 
 // The nav keys that are a real place to be. A ?view= naming anything else is
 // ignored rather than rendering an empty shell.
@@ -157,7 +174,10 @@ export default function App() {
           <div className="name">Sysible Linux<br />Engineering Platform</div>
         </div>
         <nav className="rail-nav">
-          {NAV.filter((n) => !n.su || roleName === 'superuser').map((n) => (
+          {withHeadings(NAV.filter((n) => !n.su || roleName === 'superuser')).map((n) => (
+            n.heading ? (
+              <div key={'h-' + n.heading} className="rail-group">{n.heading}</div>
+            ) : (
             <a key={n.key} href={hrefForView(n.key)}
                className={'rail-item' + (atNav(n.key) ? ' active' : '')}
                aria-current={atNav(n.key) ? 'page' : undefined}
@@ -170,6 +190,7 @@ export default function App() {
                }}>
               <NavIcon name={n.icon} /> {n.label}
             </a>
+            )
           ))}
         </nav>
         <div className="rail-foot">
