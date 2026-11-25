@@ -1915,9 +1915,11 @@ def connect_controller(request: Request, body: dict = Body(...), user: str = Dep
     # which Administration -> TLS now makes easy -- produces no certificate
     # error at all, so the guard went quiet in exactly the setup it was written
     # for. Asking up front costs one handshake, once, at connect.
-    probe = controller_import.fetch_server_cert_quietly(url)
-    if probe:
-        wrong_door = controller_import.gateway_instead_of_controller(probe, url)
+    # NB: not named `probe` — that name is taken further down by the connection
+    # test whose result is splatted into the response (**probe).
+    presented_cert = controller_import.fetch_server_cert_quietly(url)
+    if presented_cert:
+        wrong_door = controller_import.gateway_instead_of_controller(presented_cert, url)
         if wrong_door:
             raise HTTPException(status_code=400, detail=wrong_door)
 

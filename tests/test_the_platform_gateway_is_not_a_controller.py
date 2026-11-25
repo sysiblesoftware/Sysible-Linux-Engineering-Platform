@@ -371,3 +371,23 @@ def test_the_quiet_probe_returns_what_it_finds():
     with mock.patch.object(ssl, "get_server_certificate", return_value="PEM") as g:
         assert controller_import.fetch_server_cert_quietly("https://198.51.100.7") == "PEM"
         assert g.called
+
+
+def test_the_controllers_own_browser_url_is_recognised_too(client, gateway):
+    """The gateway header documents the Controller as
+
+        Controller    https://<server-ip>/controller/
+
+    so that is a thoroughly reasonable thing to paste into "Controller URL".
+    It cannot work for connect: /controller/* runs forward_auth, and a
+    server-to-server POST carries no SLOP session cookie, so the gateway 302s
+    to /login and SLEP gets an HTML login page where it expected JSON. Same
+    certificate, so the same check must catch it -- and it must still point at
+    the port, not at the path it just refused."""
+    r = client.post("/controllers", json={"name": "by-path",
+                                          "base_url": gateway.rstrip("/") + "/controller/",
+                                          "username": "admin", "password": "pw"})
+    assert r.status_code == 400, r.text
+    detail = r.json()["detail"]
+    assert "gateway" in detail.lower(), detail
+    assert str(controller_import.CONTROLLER_DEFAULT_PORT) in detail, detail
