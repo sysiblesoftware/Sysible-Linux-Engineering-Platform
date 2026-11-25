@@ -61,21 +61,83 @@ _ENV = {"key": "environment", "label": "Environment tag (names the resources in 
         "help": "Tags the created resources, e.g. dev / staging / production. "
                 "Not the Controller environment — that is chosen further down."}
 
+# Architecture tokens as distros actually spell them in cloud-image paths. x86_64
+# and amd64 name the same machine; aarch64 and arm64 name the same machine. Both
+# spellings turn up in the wild, sometimes in the same URL.
+_ARCH_TOKENS = {
+    "x86_64": "x86_64", "amd64": "x86_64", "x86-64": "x86_64",
+    "aarch64": "aarch64", "arm64": "aarch64",
+}
+
+
+def image_arch(url: str) -> str:
+    """The machine architecture a cloud image URL is for, or "" if it doesn't say.
+
+    Read out of the path and filename, because that is the only thing available
+    before committing to a multi-gigabyte download. Returns the canonical kernel
+    spelling (x86_64 / aarch64) so it can be compared straight against what
+    `virsh nodeinfo` reports for the hypervisor.
+
+    "" means "this URL does not say", NOT "any architecture will do". An
+    operator's own URL may carry no token at all, and a URL carrying two
+    CONFLICTING tokens (a mirror path that disagrees with the filename) also
+    returns "" -- guessing in either case would be worse than admitting it is
+    unknown, because the caller's job is to block only a mismatch it is sure of.
+    """
+    import re
+    found = {_ARCH_TOKENS[t] for t in re.split(r"[^A-Za-z0-9_]+", (url or "").lower())
+             if t in _ARCH_TOKENS}
+    return found.pop() if len(found) == 1 else ""
+
+
+def normalize_arch(name: str) -> str:
+    """Canonicalize an architecture name, or "" if it isn't one we know.
+
+    amd64 and x86_64 are one machine, arm64 and aarch64 are another, and which
+    spelling you get depends on who is being asked -- `virsh nodeinfo` says
+    x86_64, a Debian image URL says amd64. Normalizing both sides is what lets
+    them be compared at all.
+    """
+    return _ARCH_TOKENS.get((name or "").strip().lower(), "")
+
+
 # Curated catalog of common cloud images (generic/-cloud qcow2 with cloud-init),
 # offered as a picker so the operator doesn't hunt for URLs. Each uses the distro's
-# stable "latest/current" path so it tracks point releases. amd64/x86_64.
+# stable "latest/current" path so it tracks point releases.
+#
+# EVERY ENTRY CARRIES ITS ARCH, and nothing here is arch-neutral: a cloud image is
+# a disk image built for one machine, and an aarch64 hypervisor cannot boot an
+# x86_64 one. It fails as a VM that never finishes booting -- no installer, no
+# error from the download, nothing that names the cause. Before this the catalog
+# was x86_64 only, said so in a comment nobody reading the picker could see, and
+# was offered unchanged to operators whose hypervisor was aarch64.
+#
+# The aarch64 entries stop at Ubuntu because those are the two whose URLs I could
+# actually fetch from where this was written; every other image host here is
+# unreachable from that network, including for the x86_64 URLs already shipping.
+# Rather than add eight more by pattern-matching the x86_64 paths and calling them
+# checked, they are left out: an operator on aarch64 pastes a URL, and
+# image_arch() + the hypervisor check still protect them if it is the wrong one.
 CLOUD_IMAGES = [
-    {"label": "Ubuntu 24.04 LTS (Noble)", "url": "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img"},
-    {"label": "Ubuntu 22.04 LTS (Jammy)", "url": "https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img"},
-    {"label": "Debian 12 (Bookworm)", "url": "https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-amd64.qcow2"},
-    {"label": "Debian 11 (Bullseye)", "url": "https://cloud.debian.org/images/cloud/bullseye/latest/debian-11-generic-amd64.qcow2"},
-    {"label": "Rocky Linux 9", "url": "https://download.rockylinux.org/pub/rocky/9/images/x86_64/Rocky-9-GenericCloud-Base.latest.x86_64.qcow2"},
-    {"label": "Rocky Linux 8", "url": "https://download.rockylinux.org/pub/rocky/8/images/x86_64/Rocky-8-GenericCloud-Base.latest.x86_64.qcow2"},
-    {"label": "AlmaLinux 9", "url": "https://repo.almalinux.org/almalinux/9/cloud/x86_64/images/AlmaLinux-9-GenericCloud-latest.x86_64.qcow2"},
-    {"label": "AlmaLinux 8", "url": "https://repo.almalinux.org/almalinux/8/cloud/x86_64/images/AlmaLinux-8-GenericCloud-latest.x86_64.qcow2"},
-    {"label": "CentOS Stream 9", "url": "https://cloud.centos.org/centos/9-stream/x86_64/images/CentOS-Stream-GenericCloud-9-latest.x86_64.qcow2"},
-    {"label": "Fedora 40 Cloud", "url": "https://download.fedoraproject.org/pub/fedora/linux/releases/40/Cloud/x86_64/images/Fedora-Cloud-Base-Generic.x86_64-40-1.14.qcow2"},
-    {"label": "openSUSE Leap 15.6", "url": "https://download.opensuse.org/distribution/leap/15.6/appliances/openSUSE-Leap-15.6-Minimal-VM.x86_64-Cloud.qcow2"},
+    {"label": "Ubuntu 24.04 LTS (Noble)", "url": "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img", "arch": "x86_64"},
+    {"label": "Ubuntu 22.04 LTS (Jammy)", "url": "https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img", "arch": "x86_64"},
+    {"label": "Debian 12 (Bookworm)", "url": "https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-amd64.qcow2", "arch": "x86_64"},
+    {"label": "Debian 11 (Bullseye)", "url": "https://cloud.debian.org/images/cloud/bullseye/latest/debian-11-generic-amd64.qcow2", "arch": "x86_64"},
+    {"label": "Rocky Linux 9", "url": "https://download.rockylinux.org/pub/rocky/9/images/x86_64/Rocky-9-GenericCloud-Base.latest.x86_64.qcow2", "arch": "x86_64"},
+    {"label": "Rocky Linux 8", "url": "https://download.rockylinux.org/pub/rocky/8/images/x86_64/Rocky-8-GenericCloud-Base.latest.x86_64.qcow2", "arch": "x86_64"},
+    {"label": "AlmaLinux 9", "url": "https://repo.almalinux.org/almalinux/9/cloud/x86_64/images/AlmaLinux-9-GenericCloud-latest.x86_64.qcow2", "arch": "x86_64"},
+    {"label": "AlmaLinux 8", "url": "https://repo.almalinux.org/almalinux/8/cloud/x86_64/images/AlmaLinux-8-GenericCloud-latest.x86_64.qcow2", "arch": "x86_64"},
+    {"label": "CentOS Stream 9", "url": "https://cloud.centos.org/centos/9-stream/x86_64/images/CentOS-Stream-GenericCloud-9-latest.x86_64.qcow2", "arch": "x86_64"},
+    {"label": "Fedora 40 Cloud", "url": "https://download.fedoraproject.org/pub/fedora/linux/releases/40/Cloud/x86_64/images/Fedora-Cloud-Base-Generic.x86_64-40-1.14.qcow2", "arch": "x86_64"},
+    {"label": "openSUSE Leap 15.6", "url": "https://download.opensuse.org/distribution/leap/15.6/appliances/openSUSE-Leap-15.6-Minimal-VM.x86_64-Cloud.qcow2", "arch": "x86_64"},
+    # Arch's official cloud image, from the arch-boxes project. "latest" is a
+    # stable unversioned alias beside the dated builds, so this tracks releases
+    # instead of pinning one; verified, it answers 206 to a ranged request. Arch
+    # proper is x86_64 only -- Arch Linux ARM is a separate project and ships no
+    # equivalent cloud-init qcow2 -- so there is no aarch64 entry to pair with it.
+    {"label": "Arch Linux", "url": "https://geo.mirror.pkgbuild.com/images/latest/Arch-Linux-x86_64-cloudimg.qcow2", "arch": "x86_64"},
+    {"label": "Ubuntu 24.04 LTS (Noble)", "url": "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-arm64.img", "arch": "aarch64"},
+    {"label": "Ubuntu 22.04 LTS (Jammy)", "url": "https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-arm64.img", "arch": "aarch64"},
 ]
 
 PROVIDERS = {

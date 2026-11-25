@@ -297,10 +297,11 @@ def init_db() -> None:
             );
 
             -- Organizations (multi-tenancy): the top-level container that owns
-            -- projects, inventories, credentials and controllers. A user's
-            -- effective role in an org is the highest of their direct grant
-            -- (org_members) and any team they belong to (teams.org_role). The
-            -- global 'superuser' is the system admin and bypasses org checks.
+            -- projects, inventories, credentials and controllers. A user's role
+            -- in an org comes from the teams they belong to (teams.org_role) and
+            -- from nowhere else; org_members records who belongs but confers
+            -- nothing. The global 'superuser' is the system admin and bypasses
+            -- org checks.
             CREATE TABLE IF NOT EXISTS organizations (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL,
@@ -312,6 +313,8 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS org_members (
                 org_id INTEGER NOT NULL,
                 username TEXT NOT NULL,
+                -- Kept for the record of who belongs and at what role they were
+                -- last set. NOT consulted for access: see effective_org_role.
                 role TEXT NOT NULL DEFAULT 'viewer',   -- admin | operator | viewer
                 PRIMARY KEY (org_id, username),
                 FOREIGN KEY (org_id) REFERENCES organizations(id) ON DELETE CASCADE,
@@ -445,6 +448,9 @@ def init_db() -> None:
         if "tls_cert" not in ctrl_cols:
             c.execute("ALTER TABLE controllers ADD COLUMN tls_cert TEXT DEFAULT ''")
         _seed_default_org(c)
+        # Teams are the only grant; convert any direct org roles into the team
+        # that confers them, or every existing member would lose their access.
+        _migrate_org_grants_to_teams(c)
         # Project hierarchy: a project may nest under a parent project (folders /
         # sub-projects). NULL parent_id = a top-level project.
         proj_cols2 = [r["name"] for r in c.execute("PRAGMA table_info(projects)")]
@@ -483,6 +489,31 @@ def _seed_default_org(c) -> int:
         c.execute("INSERT OR IGNORE INTO org_members(org_id, username, role) VALUES(?,?,?)",
                   (oid, a["username"], role))
     return oid
+
+
+def _migrate_org_grants_to_teams(c) -> None:
+    """Move every direct org grant into the team that confers it.
+
+    Teams are the only grant now, so a role sitting in org_members.role would
+    simply stop working -- and the people it would stop working for are exactly
+    the administrators, who would have no way back in. So each existing row is
+    converted: ensure the org has its standard teams, then put the user in the
+    one matching the role they already held.
+
+    Idempotent, and runs on every boot: INSERT OR IGNORE throughout, and a user
+    already in the right team is left alone. It never REMOVES anyone from a
+    team, so an operator who has since been moved by hand is not dragged back to
+    whatever org_members last said.
+    """
+    for org in c.execute("SELECT id FROM organizations").fetchall():
+        by_role = _ensure_standard_teams(c, org["id"])
+        for m in c.execute("SELECT username, role FROM org_members WHERE org_id=?",
+                           (org["id"],)).fetchall():
+            tid = by_role.get(m["role"])
+            if tid is None:
+                continue          # a role no longer offered; leave it to an admin
+            c.execute("INSERT OR IGNORE INTO team_members(team_id, username) VALUES(?,?)",
+                      (tid, m["username"]))
 
 
 def _encrypt_legacy_secrets(c) -> None:
@@ -1900,21 +1931,96 @@ def delete_org(oid: int) -> None:
 
 
 # ---- membership ----
-def list_org_members(org_id: int) -> list:
+# TEAMS ARE THE ONLY GRANT.
+#
+# There used to be two ways to hold a role in an org: a direct row in
+# org_members, and membership of a team whose org_role conferred one. The
+# effective role was the higher of the two, which meant teams could only ever
+# restate what the member row already said -- they added a second place to look
+# and no capability. Reported as "I have to add the user under users then I add
+# them as a team member but it's not really rbac", and that is a fair reading:
+# two overlapping grants, neither of which is a permission.
+#
+# Now a role comes from teams and nothing else. Membership of an org IS
+# membership of one of its teams, so there is one place to grant and one place
+# to revoke, and the member list is a view of who holds what and where it came
+# from. org_members survives as the record of who belongs, but it no longer
+# carries authority: _migrate_org_grants_to_teams() converts every role it held
+# into the team that confers it, so nobody loses access on upgrade.
+
+# The teams every org gets, so that "give this person operator" always has a
+# team to mean. An org may add as many of its own as it likes.
+STANDARD_TEAMS = (("Admins", "admin"), ("Operators", "operator"), ("Viewers", "viewer"))
+
+
+def _ensure_standard_teams(c, org_id: int) -> dict:
+    """Create the standard teams for an org if absent. Returns role -> team id."""
+    for name, role in STANDARD_TEAMS:
+        c.execute("INSERT OR IGNORE INTO teams(org_id, name, org_role, created) VALUES(?,?,?,?)",
+                  (org_id, name, role, _now()))
+    return {r["org_role"]: r["id"] for r in c.execute(
+        "SELECT id, org_role FROM teams WHERE org_id=? AND name IN (?,?,?)",
+        (org_id, *[n for n, _ in STANDARD_TEAMS])).fetchall()}
+
+
+def ensure_standard_teams(org_id: int) -> dict:
     with _connect() as c:
-        return [dict(r) for r in c.execute(
-            "SELECT username, role FROM org_members WHERE org_id=? ORDER BY username", (org_id,)).fetchall()]
+        return _ensure_standard_teams(c, org_id)
+
+
+def list_org_members(org_id: int) -> list:
+    """Who holds a role in this org, what it is, and which team grants it.
+
+    Derived, not stored: `via` is the teams conferring the role, so the page can
+    say where the access comes from instead of showing a number nobody can trace.
+    """
+    with _connect() as c:
+        rows = c.execute(
+            "SELECT m.username AS username, t.org_role AS role, t.name AS team "
+            "FROM teams t JOIN team_members m ON m.team_id=t.id "
+            "WHERE t.org_id=? ORDER BY m.username", (org_id,)).fetchall()
+    best: dict = {}
+    for r in rows:
+        e = best.setdefault(r["username"], {"username": r["username"], "role": None, "via": []})
+        e["via"].append(r["team"])
+        if _ORG_RANK.get(r["role"], 0) > _ORG_RANK.get(e["role"] or "", 0):
+            e["role"] = r["role"]
+    return [best[u] for u in sorted(best)]
 
 
 def set_org_member(org_id: int, username: str, role: str) -> None:
+    """Give `username` `role` in this org, by putting them in the team that
+    confers it and taking them out of the other standard teams.
+
+    Kept under its old name because it is still "set this person's membership at
+    this role" -- the mechanism beneath it changed, not the meaning. Only the
+    STANDARD teams are adjusted: an org's own teams are its business, and
+    silently dropping someone out of one because their role was set elsewhere
+    would be the kind of action-at-a-distance this change exists to remove.
+    """
     with _connect() as c:
+        by_role = _ensure_standard_teams(c, org_id)
+        keep = by_role.get(role)
+        if keep is None:
+            raise ValueError(f"unknown org role {role!r}")
+        for r, tid in by_role.items():
+            if tid != keep:
+                c.execute("DELETE FROM team_members WHERE team_id=? AND username=?", (tid, username))
+        c.execute("INSERT OR IGNORE INTO team_members(team_id, username) VALUES(?,?)",
+                  (keep, username))
+        # Still recorded as belonging to the org; it just grants nothing now.
         c.execute("INSERT INTO org_members(org_id, username, role) VALUES(?,?,?) "
                   "ON CONFLICT(org_id, username) DO UPDATE SET role=excluded.role",
                   (org_id, username, role))
 
 
 def remove_org_member(org_id: int, username: str) -> None:
+    """Revoke every grant this user has in the org — all of its teams, not only
+    the standard ones. A revoke that left them in one team would leave the role
+    in place while the member list showed them gone."""
     with _connect() as c:
+        c.execute("DELETE FROM team_members WHERE username=? AND team_id IN "
+                  "(SELECT id FROM teams WHERE org_id=?)", (username, org_id))
         c.execute("DELETE FROM org_members WHERE org_id=? AND username=?", (org_id, username))
 
 
@@ -1982,10 +2088,9 @@ def effective_org_role(username: str, org_id: int):
     when the user has no access to the org."""
     best = 0
     with _connect() as c:
-        r = c.execute("SELECT role FROM org_members WHERE org_id=? AND username=?",
-                      (org_id, username)).fetchone()
-        if r:
-            best = max(best, _ORG_RANK.get(r["role"], 0))
+        # Teams only. org_members.role is not consulted: it is kept as the record
+        # of who belongs, and every role it used to carry was migrated into the
+        # team that confers it (_migrate_org_grants_to_teams).
         for t in c.execute(
                 "SELECT t.org_role AS role FROM teams t JOIN team_members m ON m.team_id=t.id "
                 "WHERE t.org_id=? AND m.username=?", (org_id, username)).fetchall():
@@ -1996,10 +2101,9 @@ def effective_org_role(username: str, org_id: int):
 
 
 def orgs_for_user(username: str) -> list:
-    """Org ids the user can access (direct membership or via a team)."""
+    """Org ids the user can access. Via a team — there is no other way now."""
     with _connect() as c:
         rows = c.execute(
-            "SELECT org_id FROM org_members WHERE username=? "
-            "UNION SELECT t.org_id FROM teams t JOIN team_members m ON m.team_id=t.id "
-            "WHERE m.username=?", (username, username)).fetchall()
+            "SELECT t.org_id AS org_id FROM teams t JOIN team_members m ON m.team_id=t.id "
+            "WHERE m.username=?", (username,)).fetchall()
         return [r["org_id"] for r in rows]

@@ -401,3 +401,124 @@ def test_a_controller_with_no_pin_is_trusted_on_first_use(client, controller, pr
     assert r.json()["imported"] == 3
     assert db.get_controller(cid, include_key=True)["tls_cert"] == controller.pem, \
         "a first-use pin should be persisted, not re-fetched on every call"
+
+
+# ---------------------------------------------------------------------------
+# A Controller whose certificate is signed by its own CA
+# ---------------------------------------------------------------------------
+# Everything above serves a SELF-SIGNED certificate, and that is the only shape
+# the pin was ever tested against. It is not the only shape in the field: an
+# appliance with its own small PKI serves a leaf signed by a CA it does not
+# send, and the two fail DIFFERENTLY --
+#
+#   self-signed      -> "certificate verify failed: self-signed certificate"
+#   issued by a CA   -> "certificate verify failed: unable to get local issuer
+#                        certificate"
+#
+# -- because the second is missing its ISSUER, not its trust anchor. Pinning the
+# leaf into a CA bundle satisfies the first (a self-signed cert is its own
+# issuer) and does nothing for the second, so trust-on-first-use pinned the
+# certificate, retried, failed identically, and reported the original error as
+# though it had never run. Reported from exactly that, against a Controller on
+# the same LAN.
+
+def _ca_signed(tmp_path, addr):
+    """(key, crt, ca_crt) — a leaf signed by a private CA, to be served alone."""
+    ca_key, ca_crt = tmp_path / "ca.key", tmp_path / "ca.crt"
+    key, csr, crt = tmp_path / "s.key", tmp_path / "s.csr", tmp_path / "s.crt"
+    ext = tmp_path / "ext.cnf"
+    ext.write_text(f"subjectAltName=IP:{addr}\n")
+    cmds = [
+        ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "2",
+         "-keyout", str(ca_key), "-out", str(ca_crt), "-subj", "/CN=Sysible Test CA"],
+        ["openssl", "req", "-newkey", "rsa:2048", "-nodes",
+         "-keyout", str(key), "-out", str(csr), "-subj", f"/CN={addr}"],
+        ["openssl", "x509", "-req", "-in", str(csr), "-CA", str(ca_crt),
+         "-CAkey", str(ca_key), "-CAcreateserial", "-out", str(crt),
+         "-days", "2", "-extfile", str(ext)],
+    ]
+    for c in cmds:
+        r = subprocess.run(c, capture_output=True, text=True, timeout=120)
+        if r.returncode != 0:
+            pytest.skip(f"openssl could not build the CA-signed test cert: {r.stderr[-300:]}")
+    return str(key), str(crt), str(ca_crt)
+
+
+@pytest.fixture()
+def ca_signed_controller(tmp_path, monkeypatch):
+    """A Controller serving a CA-signed leaf and NOT the CA that signed it."""
+    addr = _local_address()
+    for var in ("no_proxy", "NO_PROXY"):
+        monkeypatch.setenv(var, (os.environ.get(var, "") + "," + addr).strip(","))
+    d = tmp_path / "capki"
+    d.mkdir()
+    key, crt, _ca = _ca_signed(d, addr)
+    sock = socket.socket()
+    sock.bind((addr, 0))
+    port = sock.getsockname()[1]
+    sock.close()
+    srv = http.server.ThreadingHTTPServer((addr, port), _Handler)
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.load_cert_chain(crt, key)          # the leaf ALONE — no chain file
+    srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        yield f"https://{addr}:{port}", open(crt).read()
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_a_ca_signed_controller_fails_differently_from_a_self_signed_one(ca_signed_controller):
+    """The control, and the distinction the old pin was blind to. If this ever
+    reports 'self-signed certificate' the fixture has stopped testing the case
+    it exists for, and the test below would pass for the wrong reason."""
+    base, _pem = ca_signed_controller
+    with pytest.raises(controller_import.ControllerImportError) as ei:
+        controller_import.fetch_hosts(base, API_KEY)
+    msg = str(ei.value).lower()
+    assert "unable to get local issuer certificate" in msg, msg
+    assert controller_import._is_cert_error(ei.value)
+
+
+def test_the_pin_works_for_a_ca_signed_controller_too(ca_signed_controller):
+    """What the operator could not do. Pinning the presented certificate has to
+    be enough on its own -- the issuing CA is never sent, so there is nothing
+    else to obtain."""
+    base, pem = ca_signed_controller
+    out = controller_import.fetch_hosts(base, API_KEY, cert_pem=pem)
+    assert {h["name"] for h in out["hosts"]} == {"web-01", "db-01", "legacy-01"}
+
+
+def test_the_pin_still_refuses_a_different_ca_signed_certificate(ca_signed_controller, tmp_path):
+    """Pinning that accepts anything is not pinning. A certificate from another
+    CA entirely, correctly formed, must still be refused."""
+    base, _pem = ca_signed_controller
+    other = tmp_path / "other-pki"
+    other.mkdir()
+    _k, crt, _ca = _ca_signed(other, _local_address())
+    with pytest.raises(controller_import.ControllerImportError) as ei:
+        controller_import.fetch_hosts(base, API_KEY, cert_pem=open(crt).read())
+    assert controller_import._is_cert_error(ei.value), str(ei.value)
+
+
+def test_an_exported_ca_bundle_cannot_switch_verification_back_on(ca_signed_controller,
+                                                                  monkeypatch, tmp_path):
+    """REQUESTS_CA_BUNDLE must not defeat the pin.
+
+    requests turns an unset per-request verify into REQUESTS_CA_BUNDLE when one
+    is exported, and prefers it over the session's verify=False -- which put
+    chain verification back and made a pinned Controller fail with the exact
+    error the pin exists to cure. Exporting it is ordinary on a host behind an
+    inspecting proxy, and it is set on the machine this was written on, which is
+    how the first version was caught."""
+    pki = tmp_path / "bundle-pki"
+    pki.mkdir()
+    _key, _crt, ca = _ca_signed(pki, _local_address())
+    bundle = tmp_path / "irrelevant-ca.pem"
+    bundle.write_text(open(ca).read())
+    for var in ("REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE"):
+        monkeypatch.setenv(var, str(bundle))
+    base, pem = ca_signed_controller
+    out = controller_import.fetch_hosts(base, API_KEY, cert_pem=pem)
+    assert {h["name"] for h in out["hosts"]} == {"web-01", "db-01", "legacy-01"}

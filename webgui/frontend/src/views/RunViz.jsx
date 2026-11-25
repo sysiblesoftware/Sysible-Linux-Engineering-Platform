@@ -30,11 +30,11 @@ export function stageTally(engine, model) {
   return null
 }
 
-export default function RunViz({ engine, model, seedHosts }) {
+export default function RunViz({ engine, model, seedHosts, status, text }) {
   if (engine === 'terraform') return <TerraformViz model={model} />
   if (engine === 'inventory') return <InventoryViz model={model} />
-  if (engine === 'enroll') return <EnrollViz model={model} />
-  return <AnsibleViz model={model} seedHosts={seedHosts} />
+  if (engine === 'enroll') return <EnrollViz model={model} status={status} text={text} />
+  return <AnsibleViz model={model} seedHosts={seedHosts} status={status} text={text} />
 }
 
 // The WHOLE run as a stage flow — Terraform → Inventory → Ansible (whatever
@@ -103,24 +103,33 @@ function InventoryViz({ model }) {
 // Controller. Not an Ansible play — so instead of an ok/changed grid, show one row
 // per VM with its ✓/✗ into the Controller and the reason on failure, plus the
 // "enrolled X/Y" tally. Reads the model from parseEnroll.
-function EnrollViz({ model }) {
+function EnrollViz({ model, status, text }) {
+  if (ENDED.has(status) && !(model.hosts || []).length && !(model.errors || []).length
+      && !model.done) {
+    return <WhyItEnded status={status} text={text} what="it registered anything" />
+  }
   const { hosts = [], enrolled, total, controller, errors = [], done } = model
   const allOk = total != null && enrolled === total && total > 0
   const summary = total != null
     ? `${enrolled}/${total} enrolled${controller ? ` → ${controller}` : ''}`
-    : (done ? 'nothing enrolled' : 'enrolling…')
+    : (done ? 'nothing enrolled'
+      : ENDED.has(status) ? (status === 'canceled' ? 'canceled' : 'stopped')
+        : 'enrolling…')
   return (
     <div className="viz">
       <div className="viz-flow-box">
         <div className="flow-head">
           <div className="flow-title">
             <span className="faint">Enroll{controller ? ` · ${controller}` : ' → Controller'}</span>
-            <b>{hosts.length ? `${hosts.length} VM(s)` : done ? 'Done' : 'Starting…'}</b>
+            <b>{hosts.length ? `${hosts.length} VM(s)`
+              : done ? 'Done'
+                : ENDED.has(status) ? (status === 'canceled' ? 'Canceled' : 'Stopped')
+                  : 'Starting…'}</b>
           </div>
           <div className="spacer" />
           <span className={'pill ' + (total == null ? 'running' : allOk ? 'success' : 'failed')}>{summary}</span>
         </div>
-        {hosts.length === 0 && errors.length === 0 && (
+        {hosts.length === 0 && errors.length === 0 && !ENDED.has(status) && (
           <div className="muted" style={{ padding: '6px 2px' }}>
             Registering this project’s VMs into the Controller…
           </div>
@@ -143,8 +152,58 @@ function EnrollViz({ model }) {
   )
 }
 
+
+// ---------------------------------------------------- why a run ended
+// A run that has ENDED must never render as "Starting…". That is the state it
+// is furthest from, and it is exactly the moment the operator needs a reason.
+//
+// Reported as: "Why did this fail? I can't see any logs or what happened?" —
+// against a step whose pill read Failed while its panel read "Starting…" with
+// 0 task(s). These panels were handed only the PARSED model, with no status and
+// no log, so when ansible-playbook died before emitting its first task there was
+// nothing in the model to render and the panel kept describing a run that had
+// been over for minutes. The Enroll panel did the same thing under Canceled,
+// down to a badge that still said "enrolling…".
+const ENDED = new Set(['failed', 'canceled', 'error'])
+
+// Lines that say something. Ansible's own failure markers first; otherwise the
+// tail, because the last thing a dying process writes is usually the reason.
+function whyItEnded(text) {
+  const lines = String(text || '')
+    .replace(/\u001b\[[0-9;]*m/g, '')
+    .split('\n').map((l) => l.replace(/\s+$/, '')).filter((l) => l.trim())
+  if (!lines.length) return []
+  const flagged = lines.filter((l) => /(ERROR!|fatal:|FAILED!|^!!|\[ERROR\]|No such file|not found|Permission denied|unreachable)/i.test(l))
+  return (flagged.length ? flagged : lines).slice(-8)
+}
+
+function WhyItEnded({ status, text, what }) {
+  const lines = whyItEnded(text)
+  const verb = status === 'canceled' ? 'Canceled' : 'Failed'
+  return (
+    <div style={{ padding: '8px 2px' }}>
+      <div className={'pill ' + (status === 'canceled' ? 'canceled' : 'failed')}
+           style={{ display: 'inline-block' }}>
+        {verb} before {what}
+      </div>
+      {lines.length
+        ? <pre className="log" style={{ marginTop: 8, maxHeight: 220, overflow: 'auto',
+                                        whiteSpace: 'pre-wrap' }}>{lines.join('\n')}</pre>
+        : <div className="muted" style={{ marginTop: 8 }}>
+            This step wrote nothing to its log. “Show log” has the raw stream.
+          </div>}
+    </div>
+  )
+}
+
 // -------------------------------------------------------------- Ansible
-function AnsibleViz({ model, seedHosts }) {
+function AnsibleViz({ model, seedHosts, status, text }) {
+  // Nothing parsed AND the run is over: there is no play to draw, so draw the
+  // reason instead of a diagram of a run that never began.
+  const nothingRan = !model.tasks && !model.recap && !Object.keys(model.hosts || {}).length
+  if (ENDED.has(status) && nothingRan) {
+    return <WhyItEnded status={status} text={text} what="any task ran" />
+  }
   // Merge live results over any seeded (inventory) hosts so the grid shows every
   // target from the start, filling in as the play reaches them.
   const names = Array.from(new Set([...(seedHosts || []), ...Object.keys(model.hosts)])).sort()
@@ -161,7 +220,10 @@ function AnsibleViz({ model, seedHosts }) {
         <div className="flow-head">
           <div className="flow-title">
             <span className="faint">{model.currentPlay ? `PLAY · ${model.currentPlay}` : 'Ansible'}</span>
-            <b>{model.currentTask ? model.currentTask : recap ? 'Play recap' : 'Starting…'}</b>
+            <b>{model.currentTask ? model.currentTask
+              : recap ? 'Play recap'
+                : ENDED.has(status) ? (status === 'canceled' ? 'Canceled' : 'Stopped')
+                  : 'Starting…'}</b>
           </div>
           <div className="spacer" />
           <div className="zoom-ctl">

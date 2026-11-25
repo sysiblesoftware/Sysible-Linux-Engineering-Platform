@@ -34,6 +34,93 @@ from . import _common
 _BECOME: dict[int, str] = {}
 
 
+
+# --------------------------------------------------------------------------
+# Is this target even a playbook?
+#
+# Reported against a pipeline whose Ansible step was pointed at `main.tf`. The
+# step's target IS the playbook path, so that ran `ansible-playbook main.tf`,
+# which dies at parse, emits zero tasks, and leaves a run holding nothing that
+# explains itself. The runner already refuses a path that escapes the project
+# or does not exist; what it could not tell was that an existing, readable file
+# is not a playbook at all.
+#
+# Checked at LAUNCH, so the operator hears it while they are still looking --
+# not three steps into a pipeline, and not at 02:00 from a schedule.
+# --------------------------------------------------------------------------
+import yaml as _yaml
+
+
+class _TolerantLoader(_yaml.SafeLoader):
+    """SafeLoader that does not choke on Ansible's own tags.
+
+    `!vault` and friends are not YAML the standard loader knows, and refusing a
+    playbook for containing an inline vaulted value would be this check causing
+    the very thing it exists to prevent. Unknown tags resolve to None: the
+    SHAPE is what is being judged here, never the values.
+    """
+
+
+_TolerantLoader.add_multi_constructor("!", lambda loader, suffix, node: None)
+_TolerantLoader.add_multi_constructor("tag:", lambda loader, suffix, node: None)
+
+
+def why_not_a_playbook(workdir, target: str):
+    """A sentence saying why `target` cannot be a playbook, or None.
+
+    Deliberately conservative -- it refuses only what is CERTAIN:
+
+      * A target that does not exist yet is LEFT ALONE. An earlier step of the
+        same pipeline may write it, and the runner reports a missing playbook
+        clearly when the time comes. Refusing here would break a working setup
+        to catch a typo.
+      * The file's NAME is never consulted. ansible-playbook will run any
+        readable YAML whatever it is called, so insisting on .yml would reject
+        working playbooks.
+      * A whole-file vault is not opened or judged.
+
+    What is left is the case that was reported: a file that is there, and is
+    not a list of plays.
+    """
+    from pathlib import Path as _Path
+    if not target:
+        return "No playbook was given."
+    root = _Path(workdir).resolve()
+    try:
+        pb = (root / target).resolve()
+    except (OSError, ValueError):
+        return f"{target!r} is not a usable path."
+    # Same guard the runner enforces, moved earlier: the target comes from the
+    # console and must not reach outside the project.
+    if not str(pb).startswith(str(root)):
+        return f"{target!r} points outside the project directory."
+    if pb.is_dir():
+        return f"{target!r} is a directory, not a playbook."
+    if not pb.is_file():
+        return None                      # may yet be written; the runner will say so
+    try:
+        raw = pb.read_text(encoding="utf-8", errors="replace")
+    except OSError as e:
+        return f"{target!r} could not be read ({e.strerror or e})."
+    if raw.lstrip().startswith("$ANSIBLE_VAULT"):
+        return None                      # encrypted whole-file: nothing to judge
+    if not raw.strip():
+        return f"{target!r} is empty."
+    try:
+        doc = _yaml.load(raw, Loader=_TolerantLoader)
+    except _yaml.YAMLError:
+        return (f"{target!r} is not YAML, so ansible-playbook cannot read it as a "
+                f"playbook. (Is this the right file? An Ansible step's target is "
+                f"the playbook to run.)")
+    if doc is None:
+        return f"{target!r} has no content ansible-playbook can run."
+    if not isinstance(doc, list):
+        kind = {dict: "a mapping", str: "plain text"}.get(type(doc), type(doc).__name__)
+        return (f"{target!r} is {kind}, not a list of plays. A playbook is a "
+                f"sequence of plays, each beginning with '- hosts:'.")
+    return None
+
+
 def stash_become(run_id: int, password: str) -> None:
     if password:
         _BECOME[run_id] = password

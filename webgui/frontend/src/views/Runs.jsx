@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react'
+import React, { Fragment, useEffect, useRef, useState } from 'react'
 import { api, tail, getTheme } from '../api.js'
 import { parseRun } from '../runParse.js'
 import RunViz, { PipelineFlow, stageTally } from './RunViz.jsx'
@@ -47,8 +47,52 @@ function ansiToSpans(text) {
   return out
 }
 
+// A launched pipeline is ONE thing that happened, and it was listed as three.
+//
+// _dispatch_pipeline already stamps every step of a launch with the same
+// group_id -- that is how the step strip inside a run draws the chain. The list
+// simply never read it, so "terraform → ansible → enroll" arrived as three
+// sibling rows, in reverse order, each with its own number and its own status,
+// and nothing on the page said they were one launch. Reading three rows to find
+// out whether one deploy worked is the operator doing the join by hand.
+//
+// Standalone runs (no group_id, e.g. a single ad-hoc play) stay their own row;
+// a group of one is not a pipeline.
+function groupRuns(runs) {
+  const out = []
+  const byGroup = new Map()
+  for (const r of runs) {
+    const g = (r.group_id || '').trim()
+    if (!g) { out.push({ solo: r, key: 'r' + r.id, newest: r.created || 0 }); continue }
+    if (!byGroup.has(g)) {
+      const entry = { group: g, steps: [], key: 'g' + g, newest: 0 }
+      byGroup.set(g, entry)
+      out.push(entry)
+    }
+    const e = byGroup.get(g)
+    e.steps.push(r)
+    e.newest = Math.max(e.newest, r.created || 0)
+  }
+  // Steps in the order they were launched, not the newest-first order the list
+  // arrives in -- a pipeline read backwards is worse than three rows.
+  for (const e of out) if (e.steps) e.steps.sort((a, b) => a.id - b.id)
+  return out.sort((a, b) => b.newest - a.newest)
+}
+
+// The pipeline's own status: the worst thing that happened to it. A launch with
+// a failed step did not succeed because its last step was canceled.
+function pipelineStatus(steps) {
+  const has = (s) => steps.some((r) => r.status === s)
+  if (has('running')) return 'running'
+  if (has('failed')) return 'failed'
+  if (has('canceled')) return 'canceled'
+  if (has('queued') || has('pending')) return 'queued'
+  return steps.every((r) => r.status === 'success') ? 'success' : 'queued'
+}
+
 export default function Runs({ onOpen }) {
   const [runs, setRuns] = useState([])
+  const [open, setOpen] = useState({})     // group_id -> steps expanded
   const [busy, setBusy] = useState(0)
   const load = () => api('runs').then((d) => setRuns(d.runs))
   useEffect(() => { load() }, [])
@@ -66,17 +110,67 @@ export default function Runs({ onOpen }) {
         <table>
           <thead><tr><th>#</th><th>Engine</th><th>Target</th><th>Status</th><th>When</th><th></th></tr></thead>
           <tbody>
-            {runs.map((r) => (
-              <tr key={r.id}>
-                <td><a onClick={() => onOpen(r.id)}>#{r.id}</a></td>
-                <td>{r.kind}</td><td className="muted">{r.target}</td>
-                <td><span className={'pill ' + r.status}>{r.status}</span></td>
-                <td className="muted">{r.created ? new Date(r.created * 1000).toLocaleString() : ''}</td>
-                <td><button className="ghost sm" disabled={busy === r.id}
-                  title={`Re-run this ${r.kind} (${r.target}) with the same settings`}
-                  onClick={() => rerun(r.id)}>{busy === r.id ? '…' : 'Re-run'}</button></td>
-              </tr>
-            ))}
+            {groupRuns(runs).map((row) => {
+              if (row.solo) {
+                const r = row.solo
+                return (
+                  <tr key={row.key}>
+                    <td><a onClick={() => onOpen(r.id)}>#{r.id}</a></td>
+                    <td>{r.kind}</td><td className="muted">{r.target}</td>
+                    <td><span className={'pill ' + r.status}>{r.status}</span></td>
+                    <td className="muted">{r.created ? new Date(r.created * 1000).toLocaleString() : ''}</td>
+                    <td><button className="ghost sm" disabled={busy === r.id}
+                      title={`Re-run this ${r.kind} (${r.target}) with the same settings`}
+                      onClick={() => rerun(r.id)}>{busy === r.id ? '…' : 'Re-run'}</button></td>
+                  </tr>
+                )
+              }
+              const steps = row.steps
+              const st = pipelineStatus(steps)
+              // Open the step that needs reading: the one that broke it, else the last.
+              const landing = steps.find((r) => r.status === 'failed') || steps[steps.length - 1]
+              const expanded = !!open[row.group]
+              const first = steps[0]
+              return (
+                <Fragment key={row.key}>
+                  <tr>
+                    <td>
+                      <a onClick={() => onOpen(landing.id)}
+                         title={st === 'failed' ? 'Open the step that failed' : 'Open the last step'}>
+                        #{first.id}{steps.length > 1 ? `–${steps[steps.length - 1].id}` : ''}
+                      </a>
+                    </td>
+                    <td title={steps.map((r) => `${r.kind} · ${r.status}`).join('\n')}>
+                      {steps.map((r) => r.kind).join(' → ')}
+                    </td>
+                    <td className="muted">{first.target}</td>
+                    <td><span className={'pill ' + st}>{st}</span></td>
+                    <td className="muted">{first.created ? new Date(first.created * 1000).toLocaleString() : ''}</td>
+                    <td>
+                      <button className="ghost sm"
+                        title={expanded ? 'Hide the steps' : 'Show each step of this launch'}
+                        onClick={() => setOpen((o) => ({ ...o, [row.group]: !o[row.group] }))}>
+                        {expanded ? '▾' : '▸'} {steps.length} steps
+                      </button>
+                    </td>
+                  </tr>
+                  {expanded && steps.map((r) => (
+                    <tr key={r.id}>
+                      <td style={{ paddingLeft: 24 }}>
+                        <a onClick={() => onOpen(r.id)}>#{r.id}</a>
+                      </td>
+                      <td className="muted">{r.kind}</td>
+                      <td className="muted">{r.target}</td>
+                      <td><span className={'pill ' + r.status}>{r.status}</span></td>
+                      <td className="muted">{r.created ? new Date(r.created * 1000).toLocaleString() : ''}</td>
+                      <td><button className="ghost sm" disabled={busy === r.id}
+                        title={`Re-run this ${r.kind} (${r.target}) with the same settings`}
+                        onClick={() => rerun(r.id)}>{busy === r.id ? '…' : 'Re-run'}</button></td>
+                    </tr>
+                  ))}
+                </Fragment>
+              )
+            })}
           </tbody>
         </table>
       )}
@@ -367,7 +461,8 @@ export function RunLog({ runId, onBack, onOpenRun, backLabel = 'Runs' }) {
                       <span className="stage-max" aria-hidden="true">{maxed ? '⤡' : '⤢'}</span>
                     </div>
                     <div className="stage-block-body">
-                      {m ? <RunViz engine={st.engine} model={m} seedHosts={s.id === runId ? seedHosts : []} />
+                      {m ? <RunViz engine={st.engine} model={m} seedHosts={s.id === runId ? seedHosts : []}
+                                status={s.status} text={st.text} />
                         : <div className="muted" style={{ padding: 8 }}>waiting…</div>}
                     </div>
                   </div>
@@ -376,7 +471,7 @@ export function RunLog({ runId, onBack, onOpenRun, backLabel = 'Runs' }) {
             </div>
           ) : (
             <div className="run-scroll">
-              {text ? <RunViz engine={engine} model={model} seedHosts={seedHosts} />
+              {text ? <RunViz engine={engine} model={model} seedHosts={seedHosts} status={status} text={text} />
                 : <div className="muted" style={{ padding: 8 }}>connecting…</div>}
             </div>
           )}

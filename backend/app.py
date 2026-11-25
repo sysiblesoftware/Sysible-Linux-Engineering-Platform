@@ -1515,6 +1515,78 @@ def _validate_base_image_url(url: str) -> None:
                                 detail=f"Refusing a base image URL that resolves to {ip} (loopback/link-local/metadata).")
 
 
+def _hypervisor_arch(uri: str) -> str:
+    """The machine architecture a libvirt hypervisor actually runs, via nodeinfo.
+
+    NOT platform.machine(). SLEP drives remote hypervisors over qemu+ssh:// and
+    qemu+tls://, so the SLEP host's own architecture says nothing at all about
+    where the VM will run -- the whole point of asking is that the two differ.
+
+    Read-only, short timeout, and returns "" for every kind of don't-know:
+    virsh not installed, host unreachable, output in an unexpected shape.
+    Callers MUST treat "" as unknown and let the operator through, because a
+    hypervisor that merely cannot be probed right now is not a hypervisor that
+    is known to be wrong.
+    """
+    import re
+    import shutil
+    if not uri or not shutil.which("virsh"):
+        return ""
+    try:
+        p = subprocess.run(["virsh", "-c", uri, "--readonly", "nodeinfo"],
+                           capture_output=True, text=True, timeout=20)
+    except Exception:  # noqa: BLE001 — unreachable/timed out is "unknown", not an error
+        return ""
+    if p.returncode != 0:
+        return ""
+    m = re.search(r"^CPU model:\s*(\S+)", p.stdout, re.M)
+    return infra.normalize_arch(m.group(1) if m else "")
+
+
+def _reject_mismatched_image_arch(options: dict) -> None:
+    """Refuse a cloud image built for a different machine than the hypervisor.
+
+    A cloud image is a disk image for ONE architecture. Handing an x86_64 image
+    to an aarch64 hypervisor (or the reverse) produces a domain that is created,
+    starts, and then simply never boots: no console output, no installer, no
+    error from the download, and nothing anywhere that names the architecture.
+    It looks exactly like a broken image or a bad network.
+
+    Nothing checked this before. The catalog offered was x86_64-only while the
+    hypervisor URI -- which is what says where the VM runs, and may be a remote
+    machine of any architecture -- was never consulted.
+
+    Fails closed only on a mismatch it is SURE of: both the image URL and the
+    hypervisor have to state an architecture, and they have to disagree. An
+    unprobeable hypervisor or a URL with no arch token in it is allowed
+    through, so this cannot break a working setup.
+    """
+    uri = str(options.get("uri") or "").strip()
+    if not uri:
+        return
+    urls = [str(options.get("base_image") or "").strip()]
+    if isinstance(options.get("groups"), list):
+        urls += [str((g or {}).get("base_image") or "").strip() for g in options["groups"]]
+    wanted = {infra.image_arch(u) for u in urls if u}
+    wanted.discard("")
+    if not wanted:
+        return                      # no image states an arch; nothing to contradict
+    host = _hypervisor_arch(uri)
+    if not host:
+        return                      # cannot be probed, so not known to be wrong
+    bad = sorted(a for a in wanted if a != host)
+    if not bad:
+        return                      # every stated arch matches the hypervisor
+    raise HTTPException(
+        status_code=400,
+        detail=(f"The hypervisor at {uri} is {host}, but "
+                f"{'an image' if len(bad) == 1 else 'images'} built for "
+                f"{', '.join(bad)} {'was' if len(bad) == 1 else 'were'} chosen. "
+                f"A {bad[0]} disk image cannot boot on {host}: the VM would be "
+                f"created and then never boot, with nothing to say why. Pick a "
+                f"{host} image, or point the URI at a {bad[0]} hypervisor."))
+
+
 def _validate_bastion(bastion: str) -> str:
     """A jump host is `[user@]host[:port]`. Strictly validate each part: the user and
     host against a safe charset (no shell metacharacters, spaces, or leading '-') and
@@ -1919,6 +1991,24 @@ def _assert_step_org(project_org, credential_id=None, inventory_id=None):
             raise HTTPException(status_code=403, detail="That inventory belongs to a different organization.")
 
 
+def _assert_runnable_playbook(project, kind, target):
+    """Refuse an Ansible step whose target cannot be a playbook.
+
+    At LAUNCH, where the operator is still looking. The same check from inside
+    the runner would be a red run with a parse error in it -- which is how this
+    was reported: an Ansible step pointed at main.tf, zero tasks, and a panel
+    with nothing to say. The schedule path takes it too, for the same reason
+    the template check beside it exists: a bad target discovered at 02:00 is
+    discovered by nobody.
+    """
+    if kind != "ansible":
+        return
+    from .runners import ansible_runner
+    why = ansible_runner.why_not_a_playbook(db.project_dir(project["id"]), target)
+    if why:
+        raise HTTPException(status_code=400, detail=why)
+
+
 def _dispatch_run(project, kind, target, inventory_id, credential_id, extra_vars, actor,
                   become_password="", limit="", start_at_task="", tf_tool="",
                   job_opts=None, survey_secrets=None):
@@ -2025,6 +2115,9 @@ def _dispatch_pipeline(project, steps, actor, stop_on_failure=True):
         # Same cross-tenant guard the per-run path enforces: a step must not reference
         # another org's credential/inventory (pipelines bypassed this before).
         _assert_step_org(_porg, s.get("credential_id"), s.get("inventory_id"))
+        # AFTER the template expansion above, so a template's resolved playbook
+        # is checked rather than the template id that stood in for it.
+        _assert_runnable_playbook(project, kind, str(s.get("target") or "").strip())
         target = str(s.get("target") or "").strip() or (
             "from VMs" if kind == "inventory" else "→ Controller" if kind == "enroll" else "")
         rid = db.create_run(
@@ -2658,6 +2751,7 @@ def launch_run(request: Request, body: dict = Body(...), user: str = Depends(cur
         what = {"ansible": "playbook path", "terraform": "action (plan/apply/destroy)",
                 }.get(kind, "target")
         raise HTTPException(status_code=400, detail=f"target ({what}) is required.")
+    _assert_runnable_playbook(project, kind, target)
     run_id = _dispatch_run(project, kind, target, body.get("inventory_id"),
                            body.get("credential_id"), body.get("extra_vars") or {}, user,
                            become_password=str(body.get("become_password") or ""),
@@ -2825,6 +2919,9 @@ def schedules_create(request: Request, body: dict = Body(...), user: str = Depen
             raise HTTPException(status_code=400, detail="Pick a saved pipeline to schedule.")
         if pl["project_id"] != pid:
             raise HTTPException(status_code=400, detail="That pipeline belongs to a different project.")
+    # Same reason the template check above exists: a target that cannot run is
+    # discovered at 02:00, by nobody, every night.
+    _assert_runnable_playbook(project, kind, target)
     cadence = str(body.get("cadence") or "daily")
     if cadence not in _CADENCES:
         raise HTTPException(status_code=400, detail=f"cadence must be one of: {', '.join(_CADENCES)}.")
@@ -3362,6 +3459,11 @@ def infra_test_hypervisor(body: dict = Body(...), user: str = Depends(current_us
         if not ok:
             return {"ok": False, "output": out or "connection failed"}
         out = out or "connected."
+        # Say which machine this hypervisor is, because it decides which cloud
+        # images can boot on it and the operator otherwise has no way to see it.
+        hv_arch = _hypervisor_arch(uri)
+        if hv_arch:
+            out += f"\n• architecture: {hv_arch} — cloud images must be built for {hv_arch}"
 
         def avail_names(listsub):
             try:
@@ -3995,6 +4097,13 @@ def infra_create(request: Request, body: dict = Body(...), user: str = Depends(r
             bi = str((g or {}).get("base_image") or "").strip()
             if bi:
                 _validate_base_image_url(bi)
+    # A cloud image is built for one machine architecture, and the hypervisor URI
+    # is the only thing that says which machine the VM will run on -- it may be a
+    # remote host of a different architecture from SLEP itself. Mismatched, the VM
+    # is created and then never boots, silently. Checked here so it is refused in
+    # the wizard rather than discovered as a dead domain.
+    if provider == "libvirt":
+        _reject_mismatched_image_arch(options)
 
     controller_key = ""
     if controller_id:

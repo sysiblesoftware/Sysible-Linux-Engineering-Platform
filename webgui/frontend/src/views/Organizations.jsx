@@ -85,8 +85,6 @@ function OrgDetail({ org, onClose, onChanged }) {
   const [members, setMembers] = useState([])
   const [teams, setTeams] = useState([])
   const [users, setUsers] = useState([])          // for the add-member picker (system admin only)
-  const [addUser, setAddUser] = useState('')
-  const [addRole, setAddRole] = useState('viewer')
   const [teamName, setTeamName] = useState('')
   const [teamRole, setTeamRole] = useState('viewer')
   const { wrap, node } = useErr()
@@ -99,9 +97,6 @@ function OrgDetail({ org, onClose, onChanged }) {
   }
   useEffect(() => { load() }, [org.id])
 
-  const setMember = (username, role) => wrap(async () => {
-    await api(`organizations/${org.id}/members`, { method: 'POST', json: { username, role } }); load(); onChanged()
-  })
   const removeMember = (username) => wrap(async () => {
     await api(`organizations/${org.id}/members/${username}`, { method: 'DELETE' }); load(); onChanged()
   })
@@ -115,49 +110,32 @@ function OrgDetail({ org, onClose, onChanged }) {
       {node}
       <h3 style={{ marginTop: 0 }}>Members</h3>
       {!canManage && <div className="muted" style={{ marginBottom: 8 }}>You need the admin role in this organization to change membership.</div>}
+      <div className="muted" style={{ marginBottom: 8, fontSize: 12 }}>
+        Who holds a role here, and which team grants it. Roles come from teams and
+        nowhere else, so this list is a view — add someone to a team below to give
+        them access. Removing revokes every team in this organization.
+      </div>
       <table>
-        <thead><tr><th>User</th><th>Role</th><th></th></tr></thead>
+        <thead><tr><th>User</th><th>Role</th><th>Via</th><th></th></tr></thead>
         <tbody>
           {members.map((m) => (
             <tr key={m.username}>
               <td>{m.username}</td>
-              <td>
-                {canManage ? (
-                  <select value={m.role} onChange={(e) => setMember(m.username, e.target.value)}>
-                    {ROLES.map((r) => <option key={r} value={r}>{r}</option>)}
-                  </select>
-                ) : <span className={'pill role-' + m.role}>{m.role}</span>}
-              </td>
+              <td><span className={'pill role-' + m.role}>{m.role}</span></td>
+              <td className="muted" style={{ fontSize: 12 }}>{(m.via || []).join(', ')}</td>
               <td>{canManage && <button className="danger ghost sm" onClick={() => removeMember(m.username)}>Remove</button>}</td>
             </tr>
           ))}
-          {members.length === 0 && <tr><td colSpan="3" className="muted">No members yet.</td></tr>}
+          {members.length === 0 && <tr><td colSpan="4" className="muted">Nobody is in a team in this organization yet.</td></tr>}
         </tbody>
       </table>
-      {canManage && (
-        <div className="row" style={{ gap: 8, marginTop: 8, alignItems: 'flex-end' }}>
-          <Field label="Add member">
-            {isSuperuser()
-              ? <select value={addUser} onChange={(e) => setAddUser(e.target.value)}>
-                  <option value="">— pick a user —</option>
-                  {users.map((u) => <option key={u} value={u}>{u}</option>)}
-                </select>
-              : <input value={addUser} placeholder="username" onChange={(e) => setAddUser(e.target.value)} />}
-          </Field>
-          <Field label="Role">
-            <select value={addRole} onChange={(e) => setAddRole(e.target.value)}>
-              {ROLES.map((r) => <option key={r} value={r}>{r}</option>)}
-            </select>
-          </Field>
-          <button className="primary sm" disabled={!addUser} onClick={() => { setMember(addUser, addRole); setAddUser('') }}>Add</button>
-        </div>
-      )}
 
       <h3>Teams</h3>
       <table>
         <thead><tr><th>Team</th><th>Confers role</th><th>Members</th><th></th></tr></thead>
         <tbody>
-          {teams.map((t) => <TeamRow key={t.id} team={t} orgRole={org.role} onChanged={() => { load(); onChanged() }} />)}
+          {teams.map((t) => <TeamRow key={t.id} team={t} orgRole={org.role} users={users}
+                                     onChanged={() => { load(); onChanged() }} />)}
           {teams.length === 0 && <tr><td colSpan="4" className="muted">No teams yet.</td></tr>}
         </tbody>
       </table>
@@ -176,7 +154,7 @@ function OrgDetail({ org, onClose, onChanged }) {
   )
 }
 
-function TeamRow({ team, orgRole, onChanged }) {
+function TeamRow({ team, orgRole, users, onChanged }) {
   const [open, setOpen] = useState(false)
   const [mem, setMem] = useState([])
   const [add, setAdd] = useState('')
@@ -211,7 +189,14 @@ function TeamRow({ team, orgRole, onChanged }) {
           {mem.length === 0 && <span className="muted">No members.</span>}
           {canManage && (
             <div className="row" style={{ gap: 8, marginTop: 8 }}>
-              <input value={add} placeholder="username" onChange={(e) => setAdd(e.target.value)} style={{ maxWidth: 220 }} />
+              {(users || []).length
+                ? <select value={add} onChange={(e) => setAdd(e.target.value)} style={{ maxWidth: 220 }}>
+                    <option value="">— pick a user —</option>
+                    {users.filter((u) => !mem.includes(u)).map((u) => <option key={u} value={u}>{u}</option>)}
+                  </select>
+                /* No user list to offer: only a superuser can read /users, so an
+                   org admin who is not one still types the name. */
+                : <input value={add} placeholder="username" onChange={(e) => setAdd(e.target.value)} style={{ maxWidth: 220 }} />}
               <button className="primary sm" disabled={!add.trim()} onClick={addMem}>Add member</button>
             </div>
           )}

@@ -721,7 +721,7 @@ function LibvirtGroups({ values, set, catalog }) {
             <select value={catalog.find((c) => c.url === g.base_image) ? g.base_image : ''} style={{ maxWidth: 180 }}
               onChange={(e) => upd(i, { base_image: e.target.value, base_volume: '' })}>
               <option value="">Custom / pool volume…</option>
-              {catalog.map((c) => <option key={c.url} value={c.url}>{c.label}</option>)}
+              {catalog.map((c) => <option key={c.url} value={c.url}>{c.label}{c.arch ? ` · ${c.arch}` : ''}</option>)}
             </select>
           </Field>
           <button className="danger ghost sm" title="Remove this type" onClick={() => del(i)}
@@ -754,12 +754,12 @@ function BaseImageField({ values, set, catalog }) {
         <select value={known ? known.url : ''} title="Common cloud images" disabled={usingPool}
           onChange={(e) => { if (e.target.value) set('base_image', e.target.value) }} style={{ width: 210 }}>
           <option value="">Pick a common image…</option>
-          {catalog.map((c) => <option key={c.url} value={c.url}>{c.label}</option>)}
+          {catalog.map((c) => <option key={c.url} value={c.url}>{c.label}{c.arch ? ` · ${c.arch}` : ''}</option>)}
         </select>
         <input value={url} disabled={usingPool} onChange={(e) => set('base_image', e.target.value)}
           placeholder="https://…/image.qcow2" style={{ flex: 1 }} />
       </div>
-      <div className="faint" style={{ fontSize: 11 }}>Pick a distro or paste a qcow2/img URL — downloaded once into the pool and shared (copy-on-write per VM).</div>
+      <div className="faint" style={{ fontSize: 11 }}>Pick a distro or paste a qcow2/img URL — downloaded once into the pool and shared (copy-on-write per VM). The image must be built for the hypervisor's machine (Test connection reports it); a mismatch is refused, because such a VM is created and then never boots.</div>
     </Field>
   )
 }

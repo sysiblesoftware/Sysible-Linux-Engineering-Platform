@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import ipaddress
 import os
+import re
 import socket
 from urllib.parse import urlparse
 
@@ -59,31 +60,103 @@ import contextlib
 import contextvars
 
 _PINNED_CERT: contextvars.ContextVar[str] = contextvars.ContextVar("slep_pinned_cert", default="")
-_CERT_CACHE: dict[str, str] = {}
 
 
-def _cert_file(pem: str) -> str:
-    """A cached temp-file path for a PEM (requests' verify= needs a path, not a string)."""
+def _fingerprint(pem: str) -> str:
+    """The SHA-256 of a pinned certificate, in the form urllib3 wants."""
     import hashlib
-    import tempfile
-    key = hashlib.sha256(pem.encode()).hexdigest()
-    path = _CERT_CACHE.get(key)
-    if path and os.path.isfile(path):
-        return path
-    fd, path = tempfile.mkstemp(prefix="slep-ctrl-ca-", suffix=".pem")
-    try:
-        os.write(fd, pem.encode())
-    finally:
-        os.close(fd)
-    _CERT_CACHE[key] = path
-    return path
+    import re as _re
+    import ssl as _ssl
+    m = _re.search(r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----",
+                   pem or "", _re.S)       # a stored pin may hold a whole chain
+    if not m:
+        raise ControllerImportError("The pinned Controller certificate is not a PEM certificate.")
+    return hashlib.sha256(_ssl.PEM_cert_to_DER_cert(m.group(0))).hexdigest()
 
 
-def _verify():
-    """What to pass to requests' verify=: a pinned Controller cert if one is set for this
-    operation, else the env/public-CA default."""
+class _PinnedCertAdapter(requests.adapters.HTTPAdapter):
+    """Verify the Controller by the EXACT certificate SLEP pinned.
+
+    Not by handing that certificate to OpenSSL as a CA bundle, which is what this
+    used to do. A pinned leaf satisfies chain building ONLY when the Controller's
+    certificate is self-signed, because then it is its own issuer. A Controller
+    whose certificate is issued by an appliance's own CA fails with
+
+        certificate verify failed: unable to get local issuer certificate
+
+    and pinning the leaf changes nothing: the missing piece is the ISSUER, which
+    the handshake never sent and which no amount of pinning the leaf supplies. So
+    the retry failed exactly like the first attempt and the operator saw the same
+    error as if trust-on-first-use had never run.
+
+    The two cases are distinguishable in the text and were never distinguished:
+    a self-signed certificate reports "self-signed certificate", a CA-issued one
+    "unable to get local issuer certificate". Every test here used a self-signed
+    certificate, so only the case that already worked was ever covered.
+
+    A fingerprint says "exactly this certificate" and does not care how it is
+    chained -- which is what trust-on-first-use meant in the first place. It is
+    also strictly tighter than a CA bundle: any OTHER certificate is refused,
+    including one that chains correctly to a public CA.
+    """
+
+    def __init__(self, fingerprint: str, **kw):
+        self._fingerprint = fingerprint
+        super().__init__(**kw)
+
+    def init_poolmanager(self, connections, maxsize, block=False, **kw):
+        kw["assert_fingerprint"] = self._fingerprint
+        kw["cert_reqs"] = "CERT_NONE"      # the fingerprint IS the check
+        return super().init_poolmanager(connections, maxsize, block=block, **kw)
+
+    def send(self, request, **kw):
+        """Force verify=False for this adapter, whatever the session or the
+        environment says.
+
+        Setting it on the Session is not enough. requests'
+        merge_environment_settings() turns an unset per-request verify into
+        REQUESTS_CA_BUNDLE / CURL_CA_BUNDLE when one is exported, and
+        merge_setting() then PREFERS that over the session's False -- so chain
+        verification comes back on, the pin is bypassed, and a pinned Controller
+        fails with the very error the pin exists to fix. Exporting
+        REQUESTS_CA_BUNDLE is ordinary on a host behind an inspecting proxy, so
+        this is not a test-only concern; it is how the first version of this
+        broke, on a machine that had it set."""
+        kw["verify"] = False
+        return super().send(request, **kw)
+
+
+class _UnpinnedHttp:
+    """The no-pin path: requests' module-level functions, exactly as before.
+
+    A Session exists only to mount the pinning adapter, so the common path does
+    not get one. That keeps its behaviour identical -- the env-driven verify from
+    _tls_verify() included -- rather than changing the case that was never
+    broken, and it does not build a Session per call for it."""
+
+    @staticmethod
+    def get(url, **kw):
+        return requests.get(url, verify=_tls_verify(), **kw)
+
+    @staticmethod
+    def post(url, **kw):
+        return requests.post(url, verify=_tls_verify(), **kw)
+
+
+def _http():
+    """How to reach the Controller, given whatever trust SLEP has for it: a
+    pinned certificate verified by FINGERPRINT, else the env / public-CA default.
+
+    urllib3 counts a fingerprint-checked connection as verified, so the pinned
+    path raises no InsecureRequestWarning -- rightly, since it IS verified, and
+    more narrowly than the CA store would."""
     pem = _PINNED_CERT.get()
-    return _cert_file(pem) if pem else _tls_verify()
+    if not pem:
+        return _UnpinnedHttp
+    sess = requests.Session()
+    sess.mount("https://", _PinnedCertAdapter(_fingerprint(pem)))
+    sess.verify = False       # replaced by the adapter's fingerprint check
+    return sess
 
 
 @contextlib.contextmanager
@@ -114,7 +187,12 @@ def _is_cert_error(exc) -> bool:
     s = str(exc).lower()
     return ("certificate verify failed" in s or "self-signed certificate" in s
             or "self signed certificate" in s or "sslcertverificationerror" in s
-            or "certificate_verify_failed" in s)
+            or "certificate_verify_failed" in s
+            # urllib3's wording when a PINNED certificate is not the one presented.
+            # With fingerprint pinning this is what a rebuilt -- or intercepted --
+            # Controller looks like, and it has to reach the same cure as the
+            # chain-verification failures above, not a raw stack trace.
+            or "fingerprints did not match" in s)
 
 
 def fetch_server_cert(base_url: str) -> str:
@@ -159,12 +237,43 @@ def _guard_url(url: str) -> None:
                 "(including cloud metadata) are blocked.")
 
 
+# A scheme typed by hand, with the separator mistyped. "https//host" (no colon),
+# "https:/host" (one slash) and "https:host" (no slashes at all) are all things
+# people type into a URL box, and none of them start with "http://" or
+# "https://" -- so the old code took them for bare hostnames and prefixed a
+# scheme, turning "https//192.168.8.139" into "https://https//192.168.8.139":
+#
+#   Could not reach the Controller at https://https//192.168.8.139/auth/api-key:
+#   HTTPSConnectionPool(host='https', port=443) ... Failed to resolve 'https'
+#   ([Errno -5] No address associated with hostname)
+#
+# The host it names is "https". Nothing in that mentions a missing colon, and the
+# operator is left looking at the network between two machines that are fine.
+#
+# The group after the scheme must not be another slash, so a correct
+# "https://host" matches and is rewritten to itself, while "httpsfoo.example"
+# does not match at all and stays the hostname it is.
+_MISTYPED_SCHEME = re.compile(r"^(https?)(?::/{0,2}|/{2})(?!/)(.*)$", re.I)
+
+
 def _normalize_base(url: str) -> str:
-    url = (url or "").strip().rstrip("/")
+    raw = (url or "").strip()
+    url = raw.rstrip("/")
     if not url:
         raise ControllerImportError("Controller URL is required.")
-    if not url.startswith(("http://", "https://")):
+    m = _MISTYPED_SCHEME.match(url)
+    if m:
+        url = f"{m.group(1).lower()}://{m.group(2)}"
+    elif not url.startswith(("http://", "https://")):
         url = "https://" + url
+    # Say what is wrong with the URL here, where the URL is, rather than letting
+    # it become a DNS failure for a host nobody typed.
+    host = (urlparse(url).hostname or "").strip()
+    if not host or host.lower() in ("http", "https"):
+        raise ControllerImportError(
+            f"\u201c{raw}\u201d is not a usable Controller URL \u2014 there is no host in it. "
+            "Use the address of the Controller, e.g. https://192.168.8.139 "
+            "or https://controller.example.com.")
     return url
 
 
@@ -175,7 +284,7 @@ def _get(base_url: str, path: str, api_key: str, allow_404: bool = False):
     url = base_url + path
     _guard_url(url)
     try:
-        resp = requests.get(url, headers={"X-API-Key": api_key}, verify=_verify(), timeout=20)
+        resp = _http().get(url, headers={"X-API-Key": api_key}, timeout=20)
     except requests.exceptions.RequestException as e:
         raise ControllerImportError(f"Could not reach the Controller at {url}: {e}")
     if resp.status_code in (401, 403):
@@ -226,8 +335,7 @@ def exchange_credentials_for_key(controller_url: str, username: str, password: s
         headers["X-Sysible-Auth"] = _sso
     try:
         _guard_url(url)
-        resp = requests.post(url, json=payload, headers=headers or None,
-                             verify=_verify(), timeout=20)
+        resp = _http().post(url, json=payload, headers=headers or None, timeout=20)
     except requests.exceptions.RequestException as e:
         raise ControllerImportError(f"Could not reach the Controller at {url}: {e}")
     if resp.status_code == 404:
@@ -278,7 +386,7 @@ def exchange_sso_for_key(controller_url: str, sso_user: str, sso_role: str):
     payload = {"username": sso_user, "password": ""}
     try:
         _guard_url(url)
-        resp = requests.post(url, json=payload, headers=headers, verify=_verify(), timeout=20)
+        resp = _http().post(url, json=payload, headers=headers, timeout=20)
     except requests.exceptions.RequestException as e:
         raise ControllerImportError(f"Could not reach the Controller at {url}: {e}")
     if resp.status_code == 404:
@@ -326,8 +434,7 @@ def fetch_agent_bundle(controller_url: str, api_key: str, environment: str = "")
     url = base + "/remote/agent-bundle"
     params = {"environment": environment} if (environment or "").strip() else None
     try:
-        resp = requests.get(url, headers={"X-API-Key": api_key}, params=params,
-                            verify=_verify(), timeout=30)
+        resp = _http().get(url, headers={"X-API-Key": api_key}, params=params, timeout=30)
     except requests.exceptions.RequestException as e:
         raise ControllerImportError(f"could not reach the Controller at {url}: {e}")
     if resp.status_code == 200:
@@ -390,9 +497,9 @@ def register_ssh_host(controller_url: str, api_key: str, name: str, ip: str,
     base = _normalize_base(controller_url)
     url = base + "/remote/hosts"
     try:
-        resp = requests.post(url, headers={"X-API-Key": api_key},
-                             json={"name": name, "ip": ip, "user": user, "environment": environment},
-                             verify=_verify(), timeout=20)
+        resp = _http().post(url, headers={"X-API-Key": api_key},
+                            json={"name": name, "ip": ip, "user": user, "environment": environment},
+                            timeout=20)
     except requests.exceptions.RequestException as e:
         return False, f"could not reach Controller: {e}"
     if resp.status_code == 200:

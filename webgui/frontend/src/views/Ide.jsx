@@ -907,6 +907,17 @@ export function RunModal({ project, currentFile, onClose, onLaunched, initial })
   const [startAt, setStartAt] = useState(ini.start_at_task || '')  // --start-at-task
   const startTasks = ini.tasks || []           // task names for the start-at dropdown
   const [files, setFiles] = useState([])       // project files → target autocomplete
+  // In a project that BUILDS infrastructure the thing to run is Terraform, not a
+  // playbook. Only when the caller named no engine; a prefilled Run (re-run, or
+  // "run this playbook") keeps what it was given. The [engine] effect below then
+  // sets the target to plan, which is the right default for a single run -- it
+  // shows what would change without creating anything.
+  const freshEngine = useRef(!ini.engine)
+  const startWithTerraform = () => {
+    if (!freshEngine.current) return
+    freshEngine.current = false
+    setEngine('terraform')
+  }
   const { wrap, node } = useErr()
 
   // Parse the KEY=value textarea into an object (blank lines / #comments ignored).
@@ -935,6 +946,7 @@ export function RunModal({ project, currentFile, onClose, onLaunched, initial })
       api('infra').then((f) => {
         const row = (f.infra || []).find((x) => x.project_id === project.id)
         if (!row) return
+        startWithTerraform()
         const managed = (d.credentials || []).find((c) => c.name === 'SLEP managed key')
         const def = row.login_credential_id || row.deploy_credential_id || (managed && managed.id)
         if (def) setCred((cur) => cur || String(def))
@@ -942,7 +954,14 @@ export function RunModal({ project, currentFile, onClose, onLaunched, initial })
     })
   }, [])   // eslint-disable-line
   useEffect(() => { if (project?.id) api(`projects/${project.id}/files`)
-    .then((d) => setFiles((d.files || []).filter((f) => f.type === 'file').map((f) => f.path))).catch(() => {}) }, [project?.id])
+    .then((d) => {
+      const list = (d.files || []).filter((f) => f.type === 'file').map((f) => f.path)
+      setFiles(list)
+      // Hand-written Terraform: a project can hold .tf files without ever having
+      // been registered as infrastructure, and it still builds infra. Whichever
+      // signal lands first wins; the ref makes the other a no-op.
+      if (list.some((x) => x.endsWith('.tf'))) startWithTerraform()
+    }).catch(() => {}) }, [project?.id])
   const targetFiles = files.filter((p) => p.endsWith('.yml') || p.endsWith('.yaml'))
   const firstEngine = useRef(true)
   useEffect(() => {
@@ -970,7 +989,8 @@ export function RunModal({ project, currentFile, onClose, onLaunched, initial })
       )}
       <Field label={engine === 'ansible' ? 'Playbook path' : engine === 'terraform' ? 'Action' : 'State (or “highstate”)'}>
         {engine === 'terraform'
-          ? <select value={target} onChange={(e) => setTarget(e.target.value)}><option>plan</option><option>apply</option><option>destroy</option></select>
+          ? <select value={target} onChange={(e) => setTarget(e.target.value)}
+                    title="Terraform runs the whole project directory, not one file -- main.tf, variables.tf and outputs.tf are read together -- so this is an action, not a file to pick. plan shows what would change and changes nothing; apply is what builds the VMs; destroy removes them."><option>plan</option><option>apply</option><option>destroy</option></select>
           : <FileTarget value={target} onChange={setTarget} files={targetFiles}
                         placeholder={'playbook.yml'} />}
       </Field>
@@ -1049,7 +1069,13 @@ export function PipelineModal({ project, currentFile, initialSteps, initialName,
   const [envsByCtrl, setEnvsByCtrl] = useState({})     // controller_id -> [environment names], for the Enroll step
   const [stopOnFail, setStopOnFail] = useState(stopDefault !== undefined ? stopDefault : true)
   const [name, setName] = useState(initialName || '')
-  const blank = (over) => ({ kind: 'ansible', target: currentFile || 'site.yml', inventory_id: '', credential_id: '', tool: 'terraform',
+  // currentFile is whatever the IDE had open, which is only a sensible Ansible
+  // target if it IS a playbook. Opening the pipeline with main.tf focused used to
+  // pre-fill an Ansible step with main.tf -- something Ansible cannot run, and
+  // which the file picker will not even offer, since it lists .yml/.yaml only.
+  const blank = (over) => ({ kind: 'ansible',
+    target: (/\.ya?ml$/i.test(currentFile || '') ? currentFile : 'site.yml'),
+    inventory_id: '', credential_id: '', tool: 'terraform',
     vars: '', becomePw: '', limit: '', startAt: '', controller_id: '', environment: '', ...over })
   // Load a Controller's environments (for the Enroll step's Environment picker), cached
   // per controller so switching back doesn't refetch. Empty list on an older Controller.
@@ -1059,6 +1085,22 @@ export function PipelineModal({ project, currentFile, initialSteps, initialName,
       .catch(() => setEnvsByCtrl((m) => ({ ...m, [cid]: [] })))
   }
   const [steps, setSteps] = useState(initialSteps && initialSteps.length ? initialSteps.map((s) => blank(s)) : [blank()])
+  // STEP ONE SHOULD MATCH WHAT THE PROJECT IS. A project that builds
+  // infrastructure starts with apply -- a playbook run first targets hosts that
+  // do not exist yet. Defaulting every pipeline to Ansible put a playbook step in
+  // front of each infra build, aimed at a playbook the project does not contain:
+  // an all-.tf project offers no .yml, so the picker collapses to an empty
+  // free-text box labelled "playbook.yml".
+  //
+  // Only ever for a FRESH pipeline. A saved one is whatever its author made it,
+  // and an edit must not be second-guessed -- the ref starts false whenever
+  // initialSteps came in, so re-opening or editing one is never touched.
+  const freshPipeline = useRef(!(initialSteps && initialSteps.length))
+  const startWithTerraform = () => {
+    if (!freshPipeline.current) return
+    freshPipeline.current = false
+    setSteps([blank({ kind: 'terraform', target: 'apply' })])
+  }
   const [openSteps, setOpenSteps] = useState(new Set())   // steps whose ⚙ options panel is expanded
   const toggleOpts = (i) => setOpenSteps((s) => { const n = new Set(s); n.has(i) ? n.delete(i) : n.add(i); return n })
   // Parse a step's "KEY=value per line" box → object (→ -var / -e)
@@ -1111,6 +1153,10 @@ export function PipelineModal({ project, currentFile, initialSteps, initialName,
       api('infra').then((f) => {
         const row = (f.infra || []).find((x) => x.project_id === project.id)
         if (!row) return
+        // Registered infrastructure -- the record the rest of the infra UI reads.
+        // Authoritative, and free: this call was already being made to find the
+        // project's deploy credential.
+        startWithTerraform()
         const managed = (d.credentials || []).find((c) => c.name === 'SLEP managed key')
         const def = row.login_credential_id || row.deploy_credential_id || (managed && managed.id)
         if (def) setSteps((s) => s.map((st) => st.kind === 'ansible'
@@ -1119,7 +1165,14 @@ export function PipelineModal({ project, currentFile, initialSteps, initialName,
     })
   }, [])   // eslint-disable-line
   useEffect(() => { if (project?.id) api(`projects/${project.id}/files`)
-    .then((d) => setFiles((d.files || []).filter((f) => f.type === 'file').map((f) => f.path))).catch(() => {}) }, [project?.id])
+    .then((d) => {
+      const list = (d.files || []).filter((f) => f.type === 'file').map((f) => f.path)
+      setFiles(list)
+      // Hand-written Terraform: a project can hold .tf files without ever having
+      // been registered as infrastructure, and it still builds infra. Whichever
+      // signal lands first wins; the ref makes the other a no-op.
+      if (list.some((x) => x.endsWith('.tf'))) startWithTerraform()
+    }).catch(() => {}) }, [project?.id])
   // Files that make sense as a run target for each engine — playbooks for Ansible,
   // offered as a datalist so the target is picked, not typed.
   const filesFor = (kind) => files.filter((p) => p.endsWith('.yml') || p.endsWith('.yaml'))
@@ -1185,7 +1238,7 @@ export function PipelineModal({ project, currentFile, initialSteps, initialName,
               </>)
             : (<>
                 {st.kind === 'terraform'
-                  ? <select value={st.target} onChange={(e) => upd(i, { target: e.target.value })} title="Action" style={{ flex: '1 1 auto', minWidth: 0 }}><option>plan</option><option>apply</option><option>destroy</option></select>
+                  ? <select value={st.target} onChange={(e) => upd(i, { target: e.target.value })} title="Terraform runs the whole project directory, not one file -- main.tf, variables.tf and outputs.tf are read together -- so this is an action, not a file to pick. plan shows what would change and changes nothing; apply is what builds the VMs; destroy removes them." style={{ flex: '1 1 auto', minWidth: 0 }}><option>plan</option><option>apply</option><option>destroy</option></select>
                   : <FileTarget value={st.target} onChange={(v) => upd(i, { target: v })} files={filesFor(st.kind)}
                                 placeholder={'playbook.yml'} />}
                 {st.kind === 'terraform'
