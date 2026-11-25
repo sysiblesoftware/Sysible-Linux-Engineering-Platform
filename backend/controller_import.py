@@ -277,6 +277,21 @@ def fetch_server_cert(base_url: str) -> str:
         raise ControllerImportError(f"could not fetch the Controller's certificate: {e}")
 
 
+def fetch_server_cert_quietly(base_url: str) -> str:
+    """The certificate an address presents, or "" if it cannot be had.
+
+    Same as fetch_server_cert, but it never raises: this is used to ASK a
+    question before any request is made (is this address a Controller, or the
+    platform's own front door?), and a host that is simply unreachable, or
+    plain http, must fall through to the ordinary attempt and its ordinary
+    error rather than be rejected by a probe.
+    """
+    try:
+        return fetch_server_cert(base_url)
+    except Exception:  # noqa: BLE001 — a probe that cannot answer answers nothing
+        return ""
+
+
 def _guard_url(url: str) -> None:
     """SSRF guard: resolve the target host and refuse loopback, link-local (cloud
     metadata at 169.254.169.254 / fd00:ec2::), unspecified, multicast, and reserved
@@ -403,9 +418,19 @@ def exchange_credentials_for_key(controller_url: str, username: str, password: s
     except requests.exceptions.RequestException as e:
         raise ControllerImportError(f"Could not reach the Controller at {url}: {e}")
     if resp.status_code == 404:
+        # A 404 says only that nothing answers /auth/api-key there. It does NOT
+        # say the Controller is old, and asserting that sends the operator to
+        # update a Controller that is fine -- which is what happened when this
+        # address turned out to be the platform gateway, whose /auth/* belongs
+        # to the SLOP IdP. Name the likelier cause first and keep the other.
         raise ControllerImportError(
-            "This Controller doesn't support username/password connect (it predates the "
-            "feature). Update the Controller, or connect with its backend API key instead.")
+            f"Nothing at {url} answers like a Controller. The commonest cause is an "
+            "address that is not the Controller's own: if SLEP and the Controller are "
+            "behind the same platform gateway, the address you browse the platform at "
+            f"is the gateway, and the Controller's own listener is port "
+            f"{CONTROLLER_DEFAULT_PORT}. Failing that, a Controller too old for "
+            "username/password connect would also answer this way — connect with its "
+            "backend API key instead.")
     if resp.status_code in (401, 403, 429):
         detail = "The Controller rejected those credentials."
         try:

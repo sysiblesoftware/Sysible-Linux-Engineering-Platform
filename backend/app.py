@@ -1899,6 +1899,28 @@ def connect_controller(request: Request, body: dict = Body(...), user: str = Dep
     # later calls (enroll/import), so it's TOFU, not blanket-insecure.
     cert_pem = ""
 
+    # IS THIS A CONTROLLER AT ALL? Asked FIRST, of every https address, before a
+    # single request is made.
+    #
+    # SLEP and the Controller usually sit behind the same SLOP gateway on one
+    # address, so the address an operator browses the platform at is the one
+    # they type here -- and it reaches the gateway. The gateway routes /auth/*
+    # to the SLOP IdP, which 404s, and SLEP's 404 branch then reports that the
+    # Controller "predates the feature": a confident, wrong answer that sends
+    # them to go and look at the Controller.
+    #
+    # This check used to live inside the certificate-error branch below, which
+    # meant it only ran when the TLS handshake failed first. That was wrong in a
+    # way that was about to get worse: a gateway with a REAL certificate --
+    # which Administration -> TLS now makes easy -- produces no certificate
+    # error at all, so the guard went quiet in exactly the setup it was written
+    # for. Asking up front costs one handshake, once, at connect.
+    probe = controller_import.fetch_server_cert_quietly(url)
+    if probe:
+        wrong_door = controller_import.gateway_instead_of_controller(probe, url)
+        if wrong_door:
+            raise HTTPException(status_code=400, detail=wrong_door)
+
     def _tofu(run):
         nonlocal cert_pem
         try:
@@ -1907,17 +1929,6 @@ def connect_controller(request: Request, body: dict = Body(...), user: str = Dep
             if cert_pem or not controller_import._is_cert_error(e):
                 raise
             cert_pem = controller_import.fetch_server_cert(url)   # pin once, then retry
-            # Before trusting it: is this a Controller at all? SLEP and the
-            # Controller usually sit behind the SAME gateway on one address, so
-            # the address an operator browses the platform at is the one they
-            # naturally type here -- and it reaches the gateway, whose cert is
-            # issued by Caddy's internal CA. Pinning that and retrying would send
-            # POST /auth/api-key to the SLOP IdP, which answers 404, and SLEP
-            # would report that the Controller "predates the feature". Wrong, and
-            # wrong in a way that sends the operator looking at the Controller.
-            wrong_door = controller_import.gateway_instead_of_controller(cert_pem, url)
-            if wrong_door:
-                raise HTTPException(status_code=400, detail=wrong_door)
             return run(cert_pem)
 
     # SSO path FIRST: if this SLEP session is signed in through the SLOP gateway,
