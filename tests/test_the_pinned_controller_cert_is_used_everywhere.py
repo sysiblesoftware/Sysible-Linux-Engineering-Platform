@@ -522,3 +522,78 @@ def test_an_exported_ca_bundle_cannot_switch_verification_back_on(ca_signed_cont
     base, pem = ca_signed_controller
     out = controller_import.fetch_hosts(base, API_KEY, cert_pem=pem)
     assert {h["name"] for h in out["hosts"]} == {"web-01", "db-01", "legacy-01"}
+
+
+# ---------------------------------------------------------------------------
+# Connecting to one, which is where an operator actually meets this
+# ---------------------------------------------------------------------------
+# Everything above pins by handing a certificate to a helper. The flow a person
+# uses does not: POST /controllers has NO pin to start with, hits the cert
+# error, fetches what the Controller presents, pins it and retries. That whole
+# sequence had no test against a CA-signed Controller -- only against a
+# self-signed one, which worked before any of this -- so the case reported from
+# the field was the one case never exercised end to end.
+
+class _ConnectHandler(_Handler):
+    """Also answers POST /auth/api-key, which is how Connect gets the key."""
+
+    def do_POST(self):
+        if self.path.split("?")[0] != "/auth/api-key":
+            self.send_response(404); self.end_headers(); return
+        raw = json.dumps({"api_key": API_KEY}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+
+@pytest.fixture()
+def ca_signed_connect_controller(tmp_path, monkeypatch):
+    addr = _local_address()
+    for var in ("no_proxy", "NO_PROXY"):
+        monkeypatch.setenv(var, (os.environ.get(var, "") + "," + addr).strip(","))
+    d = tmp_path / "connect-pki"
+    d.mkdir()
+    key, crt, _ca = _ca_signed(d, addr)
+    sock = socket.socket()
+    sock.bind((addr, 0))
+    port = sock.getsockname()[1]
+    sock.close()
+    srv = http.server.ThreadingHTTPServer((addr, port), _ConnectHandler)
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.load_cert_chain(crt, key)          # the leaf alone, no CA
+    srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        yield f"https://{addr}:{port}", open(crt).read()
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_connecting_to_a_ca_signed_controller_pins_it_and_succeeds(client,
+                                                                   ca_signed_connect_controller):
+    """The reported failure, driven the way an operator drives it."""
+    base, pem = ca_signed_connect_controller
+    r = client.post("/controllers", json={"name": "ca-signed-ctrl", "base_url": base,
+                                          "username": "admin", "password": "pw"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body.get("pinned_cert") is True, body
+    import backend.db as db
+    saved = db.get_controller(body["controller"]["id"], include_key=True)
+    assert saved["tls_cert"].strip() == pem.strip(), \
+        "connect reported success without storing the certificate it trusted"
+
+
+def test_connecting_to_a_self_signed_controller_still_works(client, self_signed_controller):
+    """The case that already worked must not have been traded away for the
+    one that did not."""
+    base, pem = self_signed_controller
+    # The self-signed fixture's server answers GETs only, so drive the API-key
+    # path rather than username/password.
+    r = client.post("/controllers", json={"name": "self-signed-ctrl", "base_url": base,
+                                          "api_key": API_KEY})
+    assert r.status_code == 200, r.text
+    assert r.json().get("pinned_cert") is True, r.text
