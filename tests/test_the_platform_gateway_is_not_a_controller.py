@@ -391,3 +391,35 @@ def test_the_controllers_own_browser_url_is_recognised_too(client, gateway):
     detail = r.json()["detail"]
     assert "gateway" in detail.lower(), detail
     assert str(controller_import.CONTROLLER_DEFAULT_PORT) in detail, detail
+
+
+def test_the_port_we_send_people_to_is_the_api_port():
+    """The whole value of this check is the address it hands back, so that
+    address has to be right. The Controller runs two listeners -- console 8800,
+    API 9000 -- and POST /auth/api-key is on the API. Naming the console port
+    sent the operator to something that 404s, i.e. straight back to "nothing
+    answers like a Controller". Pin it to the unit that actually starts it."""
+    root = None
+    for up in range(1, 5):
+        c = pathlib.Path(HERE).parents[up - 1] / "apps" / "controller"
+        if c.is_dir():
+            root = c
+            break
+    if root is None:
+        pytest.skip("no apps/controller here (app published standalone)")
+
+    unit = [l for l in (root / "install_sysible.sh").read_text().splitlines()
+            if "uvicorn backend.app:app" in l]
+    assert unit, "could not find the backend's uvicorn command line"
+    line = unit[0]
+    assert f"--port {controller_import.CONTROLLER_DEFAULT_PORT}" in line, line
+    # ...and it must be TLS, since the advice says https://.
+    assert "--ssl-certfile" in line, line
+
+    # The endpoint SLEP posts to is served by that app, not by the console.
+    assert '@app.post("/auth/api-key")' in (root / "backend" / "app.py").read_text()
+
+    # And the UI's own placeholder must agree, or the field contradicts the error.
+    ui = (root.parent / "slep" / "webgui" / "frontend" / "src" / "views"
+          / "Controllers.jsx").read_text()
+    assert f":{controller_import.CONTROLLER_DEFAULT_PORT}" in ui

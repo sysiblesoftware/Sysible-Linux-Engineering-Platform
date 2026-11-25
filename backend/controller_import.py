@@ -85,11 +85,17 @@ def _fingerprint(pem: str) -> str:
 # is the PLATFORM FRONT DOOR and not a Controller at all.
 SLOP_GATEWAY_CN = "sysible.slop"
 
-# The Controller's own listener, which is what SLEP has to talk to. The gateway
-# proxies a BROWSER to the Controller console at /controller/, but that path is
-# behind the SSO forward_auth and is not the Controller's API, so it is no use
-# to a server-to-server caller.
-CONTROLLER_DEFAULT_PORT = 8800
+# The Controller's own API listener, which is what SLEP has to talk to.
+#
+# NOT 8800. The Controller runs TWO listeners: the web console on 8800
+# (webgui.server:app, whose only catch-all is a GET that serves the SPA) and the
+# API on 9000 (backend.app:app), which is where POST /auth/api-key lives. 8800
+# would 404 that POST, so naming it here sent the operator to an address that
+# produces the very "nothing answers like a Controller" error this is meant to
+# resolve. Both speak TLS; see install_sysible.sh, which starts 9000 with
+# --ssl-keyfile/--ssl-certfile, and Controllers.jsx, whose field placeholder has
+# always said https://controller-host:9000.
+CONTROLLER_DEFAULT_PORT = 9000
 
 
 def certificate_common_name(pem: str) -> str:
