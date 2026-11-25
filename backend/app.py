@@ -1907,6 +1907,17 @@ def connect_controller(request: Request, body: dict = Body(...), user: str = Dep
             if cert_pem or not controller_import._is_cert_error(e):
                 raise
             cert_pem = controller_import.fetch_server_cert(url)   # pin once, then retry
+            # Before trusting it: is this a Controller at all? SLEP and the
+            # Controller usually sit behind the SAME gateway on one address, so
+            # the address an operator browses the platform at is the one they
+            # naturally type here -- and it reaches the gateway, whose cert is
+            # issued by Caddy's internal CA. Pinning that and retrying would send
+            # POST /auth/api-key to the SLOP IdP, which answers 404, and SLEP
+            # would report that the Controller "predates the feature". Wrong, and
+            # wrong in a way that sends the operator looking at the Controller.
+            wrong_door = controller_import.gateway_instead_of_controller(cert_pem, url)
+            if wrong_door:
+                raise HTTPException(status_code=400, detail=wrong_door)
             return run(cert_pem)
 
     # SSO path FIRST: if this SLEP session is signed in through the SLOP gateway,

@@ -62,16 +62,80 @@ import contextvars
 _PINNED_CERT: contextvars.ContextVar[str] = contextvars.ContextVar("slep_pinned_cert", default="")
 
 
+def _first_pem_block(pem: str) -> str:
+    """The first certificate in a PEM blob — a pin may hold a whole chain."""
+    m = re.search(r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----",
+                  pem or "", re.S)
+    return m.group(0) if m else ""
+
+
 def _fingerprint(pem: str) -> str:
     """The SHA-256 of a pinned certificate, in the form urllib3 wants."""
     import hashlib
-    import re as _re
     import ssl as _ssl
-    m = _re.search(r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----",
-                   pem or "", _re.S)       # a stored pin may hold a whole chain
-    if not m:
+    block = _first_pem_block(pem)
+    if not block:
         raise ControllerImportError("The pinned Controller certificate is not a PEM certificate.")
-    return hashlib.sha256(_ssl.PEM_cert_to_DER_cert(m.group(0))).hexdigest()
+    return hashlib.sha256(_ssl.PEM_cert_to_DER_cert(block)).hexdigest()
+
+
+# The name the SLOP gateway's own certificate carries. Caddy mints one cert under
+# this fixed internal name and serves it for every raw-IP request (default_sni,
+# gateway/Caddyfile), so a certificate with this subject means the address given
+# is the PLATFORM FRONT DOOR and not a Controller at all.
+SLOP_GATEWAY_CN = "sysible.slop"
+
+# The Controller's own listener, which is what SLEP has to talk to. The gateway
+# proxies a BROWSER to the Controller console at /controller/, but that path is
+# behind the SSO forward_auth and is not the Controller's API, so it is no use
+# to a server-to-server caller.
+CONTROLLER_DEFAULT_PORT = 8800
+
+
+def certificate_common_name(pem: str) -> str:
+    """The subject CN of a PEM certificate, or "" if it cannot be read."""
+    try:
+        from cryptography import x509
+        from cryptography.x509.oid import NameOID
+        block = _first_pem_block(pem)
+        if not block:
+            return ""
+        cert = x509.load_pem_x509_certificate(block.encode())
+        vals = cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)
+        return str(vals[0].value) if vals else ""
+    except Exception:  # noqa: BLE001 — an unreadable certificate is simply not a match
+        return ""
+
+
+def gateway_instead_of_controller(pem: str, url: str) -> str:
+    """A sentence to show the operator if `url` is the platform gateway, else "".
+
+    The reason this exists: SLEP and the Controller usually sit behind the SAME
+    SLOP gateway on one address, so the obvious thing to type into "Controller
+    URL" -- the address you browse the platform at -- reaches the gateway. The
+    gateway routes /auth/* to the SLOP IdP, so SLEP's POST /auth/api-key does
+    not reach the Controller at all, and the gateway's certificate is issued by
+    Caddy's internal CA, whose root SLEP has no reason to hold. The operator
+    therefore sees
+
+        certificate verify failed: unable to get local issuer certificate
+
+    about a machine on their own LAN that is working perfectly, with nothing to
+    suggest the address is pointing at the wrong service. Reported as "Controller
+    isn't connecting to SLEP even though they are on the same IP", which is
+    exactly the sentence this produces an answer to.
+    """
+    if certificate_common_name(pem).strip().lower() != SLOP_GATEWAY_CN:
+        return ""
+    u = urlparse(url if "://" in url else "https://" + url)
+    host = u.hostname or url
+    return (f"{url} is the Sysible platform gateway, not a Controller — the "
+            f"certificate it presents is the gateway's own ({SLOP_GATEWAY_CN}). "
+            f"The gateway serves the Controller CONSOLE to a browser at "
+            f"/controller/, but that path requires a sign-in and is not the "
+            f"Controller's API, so SLEP cannot use it. Give SLEP the Controller's "
+            f"own address instead — port {CONTROLLER_DEFAULT_PORT} by default: "
+            f"https://{host}:{CONTROLLER_DEFAULT_PORT}")
 
 
 class _PinnedCertAdapter(requests.adapters.HTTPAdapter):
