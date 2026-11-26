@@ -109,3 +109,7 @@ Configuration state — keeping hosts in a declared state over time — is **Sys
 
 `9100` backend · `8810` web console. (Controller uses 9000/8800/8090, so SLEP and
 Controller coexist on one host.)
+
+## License
+
+Sysible Linux Engineering Platform is released under the **MIT License** — see [LICENSE](LICENSE).
