@@ -1869,7 +1869,159 @@ def import_controller(iid: int, request: Request, body: dict = Body(...), user: 
 # ------------------------------------------------------------------ controllers (Connect to Controller)
 @app.get("/controllers")
 def controllers(request: Request, user: str = Depends(current_user)):
+    # First look on a fresh platform install: adopt the Controller that shares
+    # this host so the fleet is simply there. Guarded hard inside; a no-op on
+    # every later call because a Controller then exists.
+    _autoconnect_local_controller(request)
     return {"controllers": db.list_controllers(org_ids=_visible_org_ids(request))}
+
+
+# Set when an operator deliberately disconnects the Controller that shares this
+# host. Without it, a disconnect would be undone by the next page load, which
+# reads as the button not working.
+_AUTOCONNECT_OPT_OUT = "slep.autoconnect.local.opted_out"
+
+
+def _same_controller(a: str, b: str) -> bool:
+    """Whether two Controller URLs point at the same place, ignoring spelling."""
+    def norm(u: str) -> str:
+        u = (u or "").strip().rstrip("/").lower()
+        for p in ("https://", "http://"):
+            if u.startswith(p):
+                u = u[len(p):]
+                break
+        return u
+    return bool(a) and bool(b) and norm(a) == norm(b)
+
+
+def _local_controller_url(request: Request) -> str:
+    """Where the Controller is, on a platform install where it shares this host.
+
+    SLEP, the Controller and the gateway all run on one machine behind one front
+    door, so making the operator look up and type the Controller's address is
+    asking them for something this process can already see. SLOP's installer
+    seeds SLEP_CONTROLLER_URL for the first run, before any browser has arrived
+    and there is nothing else to go on.
+
+    After that, the address the PORTAL was reached at wins. A seeded value is one
+    `ip route get` from install time: the day the host moves to another subnet it
+    points at a machine nobody answers at, and a stale saved address is worse
+    than none because it fails slowly. Sysible Connect learned this already --
+    its seed is explicitly "a starting value only" -- so SLEP follows the same
+    rule rather than inventing a second one.
+
+    The Controller publishes its backend API on :9000 of that same host.
+    """
+    host = (request.headers.get("x-forwarded-host") or request.headers.get("host") or "").strip()
+    host = host.split(",")[0].strip()
+    if "]" in host:                       # [::1]:443
+        host = host.rsplit("]", 1)[0] + "]"
+    elif ":" in host:
+        host = host.rsplit(":", 1)[0]
+    if host and host not in ("localhost", "127.0.0.1", "::1"):
+        return f"https://{host}:9000"
+    seeded = (os.environ.get("SLEP_CONTROLLER_URL") or "").strip()
+    return seeded
+
+
+def _autoconnect_precheck(request: Request):
+    """May this request adopt the Controller sharing this host? (ok, detail)
+
+    PURE AND SEPARATE, deliberately. The network half below has to be wrapped in
+    a broad `except` -- it runs on an ordinary page load and must never turn
+    "list the Controllers" into an error -- and a broad except over the guards
+    as well is how a guard stops working without anything noticing: remove the
+    superuser check and the next line raises TypeError, which that handler
+    swallows into the same quiet False a refusal produces. Indistinguishable
+    from the outside, and three mutation tests duly passed against a version
+    with the guards deleted.
+
+    So the decision happens here, where nothing is caught, and the caller does
+    only the fallible part inside the handler.
+
+    Returns (True, url) or (False, reason). The reason is a short STABLE CODE,
+    not a sentence: tests that matched on prose passed for the wrong reason --
+    with the identity check deleted, the role check answered "gateway identity
+    role is none, not superuser", which contains the word "identity", so a test
+    asserting that substring still passed against a version with the guard gone.
+
+    Every condition has to hold:
+
+      * a gateway-asserted identity, verified against the shared secret in
+        constant time, so a forged header cannot reach the key exchange;
+      * a SUPERUSER identity -- the Controller refuses its master key to anyone
+        else and this must not become the way around that;
+      * no earlier deliberate disconnect of this host's own Controller;
+      * an address to use at all;
+      * that Controller not already registered. Gated on the LOCAL one, not on
+        the list being empty: connecting an external Controller first is normal
+        and must not stop this host's own from being adopted.
+    """
+    ident = _gateway_identity(request)
+    if not ident:
+        return False, "no_identity"
+    slop_role = (request.headers.get("x-sysible-role") or "").strip().lower()
+    if slop_role != "superuser":
+        return False, "not_superuser"
+    if db.meta_get(_AUTOCONNECT_OPT_OUT) == "1":
+        return False, "opted_out"
+    url = _local_controller_url(request)
+    if not url:
+        return False, "no_address"
+    if any(_same_controller(c.get("base_url"), url) for c in db.list_controllers()):
+        return False, "already_registered"
+    return True, url
+
+
+def _autoconnect_local_controller(request: Request) -> bool:
+    """Register the Controller that shares this host, once, without being asked.
+
+    The flow is: build the infrastructure here, enrol it, then watch it in the
+    Controller. Every piece of that already works -- the gateway stamps this
+    session's identity, SLEP trades it for the Controller's API key with no
+    password (exchange_sso_for_key), and the enrol step fetches a one-time agent
+    bundle per host. The only thing missing was a row in `controllers`, so the
+    first thing anyone had to do was open the Controller's portal, find its
+    address and hand it back to SLEP -- on a machine where both are the same
+    host behind the same gateway, sharing the same secret.
+
+    Returns True when it created one.
+    """
+    ok, detail = _autoconnect_precheck(request)
+    if not ok:
+        return False
+    url, ident = detail, _gateway_identity(request)
+    try:
+        # Trust-on-first-use, as the manual connect does: an on-prem Controller
+        # serves a self-signed cert, so pin what it presents and retry.
+        cert_pem = ""
+
+        def _tofu(call):
+            nonlocal cert_pem
+            try:
+                return call(cert_pem)
+            except controller_import.ControllerImportError as e:
+                if cert_pem or not controller_import._is_cert_error(e):
+                    raise
+                cert_pem = controller_import.fetch_server_cert(url)
+                return call(cert_pem)
+
+        key = _tofu(lambda c: controller_import.exchange_sso_for_key(
+            url, ident["user"], "superuser", cert_pem=c))
+        if not key:
+            return False
+        # Fails closed: a key that does not work is not written down.
+        _tofu(lambda c: controller_import.test_connection(url, key, cert_pem=c))
+        db.create_controller("Sysible Controller", url, key, tls_cert=cert_pem)
+        db.log_audit("controller_autoconnected", ident["user"],
+                     f"adopted the Controller sharing this host ({url}) using the platform "
+                     f"sign-in; no password or API key was entered")
+        return True
+    except Exception:
+        # Only the NETWORK half is here. A Controller that is not up yet, or is
+        # not part of this platform, leaves the list empty and the ordinary
+        # connect form still works.
+        return False
 
 
 @app.post("/controllers")
@@ -1971,6 +2123,11 @@ def connect_controller(request: Request, body: dict = Body(...), user: str = Dep
         raise HTTPException(status_code=400, detail=str(e))
     cid = db.create_controller(name or url, url, key,
                                org_id=_coerce_org_id(body.get("org_id")), tls_cert=cert_pem)
+    # Connecting this host's own Controller by hand undoes an earlier disconnect,
+    # so it is adopted again on a later fresh start rather than staying opted out
+    # for ever on the strength of one click.
+    if _same_controller(url, _local_controller_url(request)):
+        db.meta_set(_AUTOCONNECT_OPT_OUT, "0")
     out = {"status": "connected", "controller": db.get_controller(cid), **probe}
     if cert_pem:
         out["pinned_cert"] = True   # UI can note SLEP trusted a self-signed cert
@@ -1990,7 +2147,16 @@ def test_controller(cid: int, user: str = Depends(require_superuser)):
 
 
 @app.delete("/controllers/{cid}")
-def disconnect_controller(cid: int, user: str = Depends(require_superuser)):
+def disconnect_controller(request: Request, cid: int, user: str = Depends(require_superuser)):
+    # Remember a deliberate disconnect of THIS host's own Controller. It is
+    # adopted automatically on first use, so without this the next page load
+    # would silently put it back and the button would look broken.
+    ctrl = db.get_controller(cid)
+    if ctrl and _same_controller(ctrl.get("base_url"), _local_controller_url(request)):
+        db.meta_set(_AUTOCONNECT_OPT_OUT, "1")
+        db.log_audit("controller_autoconnect_opted_out", user,
+                     "disconnected the Controller sharing this host; it will not be "
+                     "re-adopted automatically. Connect it again to undo.")
     db.delete_controller(cid)
     return {"status": "disconnected"}
 

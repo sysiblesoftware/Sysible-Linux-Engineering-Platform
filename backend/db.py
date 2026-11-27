@@ -1301,6 +1301,19 @@ def all_secret_ciphertexts(org_ids=None):
 
 
 # ---------------------------------------------------------------- controllers
+def meta_get(key: str, default: str = "") -> str:
+    """Read a small, durable platform fact from the meta table."""
+    with _connect() as c:
+        row = c.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+    return (row["value"] if row and row["value"] is not None else default)
+
+
+def meta_set(key: str, value: str) -> None:
+    with _connect() as c:
+        c.execute("INSERT INTO meta(key, value) VALUES(?,?) "
+                  "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, str(value)))
+
+
 def list_controllers(include_key=False, org_ids=None):
     with _connect() as c:
         if org_ids is None:

@@ -540,16 +540,25 @@ def test_pipeline_auto_inventory_step_backfills_following_steps(client, monkeypa
 
 
 def test_hypervisor_key_is_managed_and_idempotent(client):
-    """SLEP mints/returns a persistent managed SSH key for hypervisor connections;
-    the public half + in-container keyfile path come back, and a second call
-    returns the same key (no churn)."""
+    """SLEP mints/returns a persistent managed SSH key; the public half +
+    in-container keyfile path come back, and a second call returns the same key
+    (no churn).
+
+    The file is slep_ed25519, NOT a per-purpose "hypervisor" key. That is the
+    documented design -- /infra/hypervisor-key's own docstring: "SLEP's ONE
+    managed SSH key ... One key installed once -- no per-purpose keys to keep in
+    sync." This assertion still named the pre-consolidation path, and the only
+    machines that run it are ones with ssh-keygen, so it skipped on the
+    developer container and nothing ran it anywhere else: this repository had no
+    CI at all until the commit that added it.
+    """
     import shutil
     if not shutil.which("ssh-keygen"):
         import pytest
         pytest.skip("ssh-keygen not available")
     d = client.post("/infra/hypervisor-key", json={}).json()
     assert d["public_key"].startswith("ssh-ed25519 ")
-    assert d["keyfile"].endswith("/ssh/hypervisor")
+    assert d["keyfile"].endswith("/ssh/slep_ed25519")
     d2 = client.post("/infra/hypervisor-key", json={}).json()
     assert d2["public_key"] == d["public_key"]     # stable across calls
 
@@ -961,7 +970,34 @@ def test_infra_ssh_user_kept_consistent(client, monkeypatch):
         returncode = 0
         stdout = '{"sysible_hosts":{"value":[{"name":"vm-1","ip":"10.0.0.9","user":"clouduser"}]}}'
         stderr = ""
-    monkeypatch.setattr(appmod.subprocess, "run", lambda *a, **k: Out())
+
+    # NARROW, and it has to be. `appmod.subprocess` is the subprocess MODULE
+    # object, shared with every other importer, so setattr on it replaces
+    # subprocess.run for keydist too -- and keydist shells out to ssh-keygen to
+    # mint SLEP's managed key, which _refresh_infra_cloudinit then writes into
+    # ssh_authorized_keys.
+    #
+    # With a blanket fake, that key becomes this Out.stdout: the terraform JSON,
+    # carrying the word "clouduser", embedded in the cloud-init as a public key.
+    # The final assertion below then fails on a string the PRODUCT never put
+    # there. It only shows where ssh-keygen EXISTS -- so it passed on a
+    # developer container without it and failed on the first CI runner, which is
+    # also the first machine ever to run this file.
+    #
+    # NOTE: 21 other tests in this file use the same blanket form. They pass
+    # today because none of them renders cloud-init after patching; it is a
+    # latent trap, not a dormant failure.
+    _real_run = appmod.subprocess.run
+
+    def _only_terraform(*a, **k):
+        argv = a[0] if a else k.get("args") or []
+        if isinstance(argv, (list, tuple)):
+            prog = str(argv[0]) if argv else ""
+            if "terraform" in prog or "tofu" in prog:
+                return Out()
+        return _real_run(*a, **k)
+
+    monkeypatch.setattr(appmod.subprocess, "run", _only_terraform)
     iid, _n, _c = appmod._autobuild_infra_inventory(pid)
 
     r = client.patch(f"/infra/{pid}", json={"ssh_user": "admin"})

@@ -96,11 +96,35 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(raw)
 
+    def _not_found(self):
+        """404, correctly.
+
+        A server that answers before READING the request body leaves the
+        client still writing into a socket the server has stopped draining,
+        and the client sees
+
+            BrokenPipeError: [Errno 32] Broken pipe
+
+        instead of the 404 the test is about. Over TLS, with a body big enough
+        to fill a buffer, that is the usual outcome rather than a rare one --
+        and the assertion then fails on a transport error that looks exactly
+        like the product failing to reach the Controller.
+        """
+        length = int(self.headers.get("Content-Length") or 0)
+        while length > 0:
+            chunk = self.rfile.read(min(length, 65536))
+            if not chunk:
+                break
+            length -= len(chunk)
+        self.send_response(404)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
     def do_POST(self):
         if self.path.split("?")[0] == "/auth/api-key":
             self._json({"api_key": API_KEY})
         else:
-            self.send_response(404); self.end_headers()
+            self._not_found()
 
     def do_GET(self):
         body = {"/agents": {"agents": []}, "/remote/hosts": {}}.get(self.path.split("?")[0])
@@ -112,11 +136,14 @@ class _Handler(http.server.BaseHTTPRequestHandler):
 def _serve(tmp_path, cn):
     addr = _local_address()
     key, crt = _cert(tmp_path, cn, addr)
-    sock = socket.socket()
-    sock.bind((addr, 0))
-    port = sock.getsockname()[1]
-    sock.close()
-    srv = http.server.ThreadingHTTPServer((addr, port), _Handler)
+    # Let the SERVER take the ephemeral port. The previous form bound a probe
+    # socket, read its port, CLOSED it, then asked ThreadingHTTPServer to bind
+    # that same port -- a window in which anything else on the machine can take
+    # it. On a quiet developer box it never closes; on a CI runner it does, and
+    # the symptom is the opposite of a port clash: the client reports it could
+    # not reach the Controller at all.
+    srv = http.server.ThreadingHTTPServer((addr, 0), _Handler)
+    port = srv.server_address[1]
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.load_cert_chain(crt, key)
     srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
@@ -244,11 +271,14 @@ def trusted_gateway(tmp_path, monkeypatch):
     # Trust it, the way a real platform with a real certificate would be trusted.
     for var in ("REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE"):
         monkeypatch.setenv(var, ca)
-    sock = socket.socket()
-    sock.bind((addr, 0))
-    port = sock.getsockname()[1]
-    sock.close()
-    srv = http.server.ThreadingHTTPServer((addr, port), _Handler)
+    # Let the SERVER take the ephemeral port. The previous form bound a probe
+    # socket, read its port, CLOSED it, then asked ThreadingHTTPServer to bind
+    # that same port -- a window in which anything else on the machine can take
+    # it. On a quiet developer box it never closes; on a CI runner it does, and
+    # the symptom is the opposite of a port clash: the client reports it could
+    # not reach the Controller at all.
+    srv = http.server.ThreadingHTTPServer((addr, 0), _Handler)
+    port = srv.server_address[1]
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.load_cert_chain(crt, key)
     srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
@@ -285,7 +315,7 @@ class _Absent(_Handler):
     """Answers 404 to everything, as the gateway's IdP does to /auth/api-key."""
 
     def do_POST(self):
-        self.send_response(404); self.end_headers()
+        self._not_found()
 
 
 @pytest.fixture()
@@ -300,11 +330,14 @@ def answers_nothing(tmp_path, monkeypatch):
     key, crt, ca = _ca_signed_as(d, "controller.example", addr)
     for var in ("REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE"):
         monkeypatch.setenv(var, ca)
-    sock = socket.socket()
-    sock.bind((addr, 0))
-    port = sock.getsockname()[1]
-    sock.close()
-    srv = http.server.ThreadingHTTPServer((addr, port), _Absent)
+    # Let the SERVER take the ephemeral port. The previous form bound a probe
+    # socket, read its port, CLOSED it, then asked ThreadingHTTPServer to bind
+    # that same port -- a window in which anything else on the machine can take
+    # it. On a quiet developer box it never closes; on a CI runner it does, and
+    # the symptom is the opposite of a port clash: the client reports it could
+    # not reach the Controller at all.
+    srv = http.server.ThreadingHTTPServer((addr, 0), _Absent)
+    port = srv.server_address[1]
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.load_cert_chain(crt, key)
     srv.socket = ctx.wrap_socket(srv.socket, server_side=True)

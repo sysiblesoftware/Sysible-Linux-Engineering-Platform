@@ -87,6 +87,17 @@
 <script>
 // ---------------------------------------------------------------- tiny helpers
 const $ = (h) => { const t=document.createElement('template'); t.innerHTML=h.trim(); return t.content.firstElementChild; };
+// $() parses its argument as HTML, so every value interpolated into one has to
+// be escaped or it is script. These tables carry inventory host names and
+// addresses IMPORTED FROM THE CONTROLLER -- i.e. strings a managed host can
+// influence -- plus project, run and credential names an operator types. A host
+// named <img src=x onerror=...> ran that onerror in the console of whoever
+// looked at the inventory, on a page that also lists SSH credentials.
+// Interpolations of this file's OWN literals (the nav labels, the button
+// captions, labeled()'s caption, logoSvg) are left alone: they are source, not
+// data.
+const esc = (v) => String(v == null ? '' : v).replace(/[&<>"']/g,
+  (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 // The SLEP mark (sibling to the Controller mark): dark tile + green ring, code
 // brackets around a green run/play triangle. Inlined so it needs no network.
 const logoSvg = (s=24) => `<svg width="${s}" height="${s}" viewBox="0 0 128 128" style="display:block;border-radius:${s*0.22}px">
@@ -179,7 +190,7 @@ async function viewProjects(main){
   const {data}=await api('projects');
   if(!data.projects.length){ main.appendChild($('<div class="muted">No projects yet. Create one to start authoring playbooks.</div>')); return; }
   const t=$('<table><thead><tr><th>Name</th><th>Slug</th><th>Description</th><th></th></tr></thead><tbody></tbody></table>');
-  data.projects.forEach(p=>{ const tr=$(`<tr><td><a>${p.name}</a></td><td class="muted">${p.slug}</td><td class="muted">${p.description||''}</td>
+  data.projects.forEach(p=>{ const tr=$(`<tr><td><a>${esc(p.name)}</a></td><td class="muted">${esc(p.slug)}</td><td class="muted">${esc(p.description||'')}</td>
      <td class="row"><button class="ghost">Open</button> <button class="danger ghost">Delete</button></td></tr>`);
     tr.querySelector('a').onclick=()=>openProject(p);
     tr.querySelectorAll('button')[0].onclick=()=>openProject(p);
@@ -208,7 +219,7 @@ async function viewIDE(main){
   main.innerHTML='';
   main.appendChild($(`<div class="row" style="margin-bottom:10px">
      <button class="ghost" id="back">← Projects</button>
-     <h2 style="margin:0">${p.name}</h2><span class="muted">${p.slug}</span><div class="spacer"></div>
+     <h2 style="margin:0">${esc(p.name)}</h2><span class="muted">${esc(p.slug)}</span><div class="spacer"></div>
      <button id="newfile" class="ghost">+ File</button>
      <button id="save" class="ghost">Save</button>
      <button id="run" class="primary">▶ Run playbook</button></div>`));
@@ -230,7 +241,7 @@ async function refreshTree(){
   const {data}=await api('projects/'+STATE.project.id+'/files');
   const tree=document.getElementById('tree'); tree.innerHTML='';
   if(!data.files.length) tree.appendChild($('<div class="muted" style="padding:6px">Empty project. “+ File”.</div>'));
-  data.files.forEach(f=>{ const el=$(`<div class="f ${f.type==='dir'?'dir':''}">${f.type==='dir'?'📁 ':'📄 '}${f.path}</div>`);
+  data.files.forEach(f=>{ const el=$(`<div class="f ${f.type==='dir'?'dir':''}">${f.type==='dir'?'📁 ':'📄 '}${esc(f.path)}</div>`);
     if(f.type==='file'){ el.onclick=()=>openFile(f.path,el); } tree.appendChild(el); });
 }
 async function openFile(path,el){
@@ -260,10 +271,10 @@ function newFileModal(p){
 async function runModal(p){
   const [{data:inv},{data:cred}] = await Promise.all([api('inventories'),api('credentials')]);
   const err=$('<div class="err"></div>');
-  const pb=$(`<input value="${STATE.file||'site.yml'}" placeholder="playbook path">`);
-  const invSel=$('<select></select>'); inv.inventories.forEach(i=>invSel.appendChild($(`<option value="${i.id}">${i.name}</option>`)));
+  const pb=$(`<input value="${esc(STATE.file||'site.yml')}" placeholder="playbook path">`);
+  const invSel=$('<select></select>'); inv.inventories.forEach(i=>invSel.appendChild($(`<option value="${esc(i.id)}">${esc(i.name)}</option>`)));
   if(!inv.inventories.length) invSel.appendChild($('<option value="">(no inventories — create one first)</option>'));
-  const credSel=$('<select><option value="">(no credential)</option></select>'); cred.credentials.forEach(c=>credSel.appendChild($(`<option value="${c.id}">${c.name} (${c.kind})</option>`)));
+  const credSel=$('<select><option value="">(no credential)</option></select>'); cred.credentials.forEach(c=>credSel.appendChild($(`<option value="${esc(c.id)}">${esc(c.name)} (${esc(c.kind)})</option>`)));
   const m=$('<div class="card modal col"></div>');
   m.append($('<h2>Run playbook</h2>'),labeled('Playbook',pb),labeled('Inventory',invSel),labeled('SSH credential',credSel),err);
   const b=$('<button class="primary">▶ Launch</button>');
@@ -293,8 +304,8 @@ async function viewRuns(main){
   const {data}=await api('runs');
   if(!data.runs.length){ main.appendChild($('<div class="muted">No runs yet.</div>')); return; }
   const t=$('<table><thead><tr><th>#</th><th>Project</th><th>Engine</th><th>Target</th><th>Status</th><th>When</th></tr></thead><tbody></tbody></table>');
-  data.runs.forEach(r=>{ const tr=$(`<tr><td><a>#${r.id}</a></td><td>${r.project_id}</td><td>${r.kind}</td><td class="muted">${r.target}</td>
-     <td><span class="pill ${r.status}">${r.status}</span></td><td class="muted">${r.created?new Date(r.created*1000).toLocaleString():''}</td></tr>`);
+  data.runs.forEach(r=>{ const tr=$(`<tr><td><a>#${esc(r.id)}</a></td><td>${esc(r.project_id)}</td><td>${esc(r.kind)}</td><td class="muted">${esc(r.target)}</td>
+     <td><span class="pill ${esc(r.status)}">${esc(r.status)}</span></td><td class="muted">${esc(r.created?new Date(r.created*1000).toLocaleString():'')}</td></tr>`);
     tr.querySelector('a').onclick=()=>openRun(r.id); t.querySelector('tbody').appendChild(tr); });
   main.appendChild(t);
 }
@@ -318,11 +329,11 @@ async function viewInventories(main){
   for(const inv of data.inventories){
     const {data:hd}=await api('inventories/'+inv.id+'/hosts');
     const c=$(`<div class="card col" style="margin-bottom:12px"></div>`);
-    c.appendChild($(`<div class="row"><b>${inv.name}</b><span class="pill">${inv.source}</span><span class="muted">${hd.hosts.length} host(s)</span>
+    c.appendChild($(`<div class="row"><b>${esc(inv.name)}</b><span class="pill">${esc(inv.source)}</span><span class="muted">${hd.hosts.length} host(s)</span>
        <div class="spacer"></div><button class="ghost bi">Import from Controller</button><button class="ghost ba">+ Host</button>
        <button class="danger ghost bd">Delete</button></div>`));
     if(hd.hosts.length){ const t=$('<table><thead><tr><th>Name</th><th>Address</th><th>Groups</th><th>Source</th><th></th></tr></thead><tbody></tbody></table>');
-      hd.hosts.forEach(h=>{ const tr=$(`<tr><td>${h.name}</td><td class="muted">${h.address}</td><td class="muted">${h.groups||''}</td><td class="muted">${h.source}</td>
+      hd.hosts.forEach(h=>{ const tr=$(`<tr><td>${esc(h.name)}</td><td class="muted">${esc(h.address)}</td><td class="muted">${esc(h.groups||'')}</td><td class="muted">${esc(h.source)}</td>
         <td><button class="danger ghost">✕</button></td></tr>`); tr.querySelector('button').onclick=async()=>{await api('hosts/'+h.id,{method:'DELETE'});render();};
         t.querySelector('tbody').appendChild(tr); }); c.appendChild(t); }
     c.querySelector('.bi').onclick=()=>importModal(inv);
@@ -373,7 +384,7 @@ async function viewCredentials(main){
   const {data}=await api('credentials');
   if(!data.credentials.length){ main.appendChild($('<div class="muted">No credentials. Add an SSH key or password for runs to use.</div>')); return; }
   const t=$('<table><thead><tr><th>Name</th><th>Kind</th><th>Username</th><th></th></tr></thead><tbody></tbody></table>');
-  data.credentials.forEach(c=>{ const tr=$(`<tr><td>${c.name}</td><td class="muted">${c.kind}</td><td class="muted">${c.username||''}</td>
+  data.credentials.forEach(c=>{ const tr=$(`<tr><td>${esc(c.name)}</td><td class="muted">${esc(c.kind)}</td><td class="muted">${esc(c.username||'')}</td>
      <td><button class="danger ghost">Delete</button></td></tr>`); tr.querySelector('button').onclick=async()=>{await api('credentials/'+c.id,{method:'DELETE'});render();};
      t.querySelector('tbody').appendChild(tr); });
   main.appendChild(t);
